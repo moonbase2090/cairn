@@ -1,6 +1,6 @@
 """CairnClient — the six memory verbs + lifecycle + git-syncable packs.
 
-Semantics ported from VectorVault: append-only versioning, exact-hash idempotency,
+Cairn semantics: append-only versioning, exact-hash idempotency,
 explicit supersession, read-collapse, origin trust tags, cite-the-key.
 """
 from __future__ import annotations
@@ -132,7 +132,7 @@ class CairnClient:
             self._audit("store", {"key": key, "result": "superseded", "supersedes": supersedes_key})
             return StoreResult(key=key, version=version, action=StoreAction.SUPERSEDED, canonical_id=canonical_id)
 
-        # exact-duplicate → idempotent no-op (task-scoped, like VectorVault's dedup filter)
+        # exact-duplicate → idempotent no-op (task-scoped)
         dupes = self.vault.by_hash(f"sha256:{digest}", task_id)
         if dupes:
             row = dupes[0]

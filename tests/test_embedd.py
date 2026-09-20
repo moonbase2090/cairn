@@ -11,6 +11,8 @@ import pytest
 from cairn.embed import HashEmbedder
 from cairn.embedd import SocketEmbedder, ping
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def _wait_sock(path: Path, timeout: float = 5.0) -> None:
     deadline = time.time() + timeout
@@ -27,8 +29,8 @@ def embedd_hash(tmp_path):
     proc = subprocess.Popen(
         [sys.executable, "-m", "cairn.embedd", "--spec", "hash",
          "--sock", str(sock), "--idle", "8", "--dims", "384"],
-        cwd="/home/brandan/Projects/VectorVault-cli",
-        env={**os.environ, "PYTHONPATH": "/home/brandan/Projects/VectorVault-cli/src",
+        cwd="str(ROOT)",
+        env={**os.environ, "PYTHONPATH": "str(ROOT)/src",
              "CAIRN_EMBEDD": "0"},  # daemon loads in-process hash
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
@@ -65,8 +67,8 @@ def test_idle_exit(tmp_path):
     proc = subprocess.Popen(
         [sys.executable, "-m", "cairn.embedd", "--spec", "hash",
          "--sock", str(sock), "--idle", "1", "--dims", "384"],
-        cwd="/home/brandan/Projects/VectorVault-cli",
-        env={**os.environ, "PYTHONPATH": "/home/brandan/Projects/VectorVault-cli/src",
+        cwd="str(ROOT)",
+        env={**os.environ, "PYTHONPATH": "str(ROOT)/src",
              "CAIRN_EMBEDD": "0"},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

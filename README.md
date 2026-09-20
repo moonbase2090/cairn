@@ -1,6 +1,6 @@
 # cairn
 
-Local-first shared memory for CLI agents — the VectorVault essence with no AWS account.
+Local-first shared memory for CLI agents — no accounts, no keys, no cloud.
 One SQLite file, no API keys, no server. The agent *is* the LLM; `cairn` is the memory.
 
 ## Quickstart
@@ -33,7 +33,7 @@ Add `--json` anywhere for agent-parseable output. Identity resolves as
 | `init` / `bootstrap` | interactive project setup (`--doc-threshold BYTES` sets the docs/ spill size); wires `.mcp.json` + `AGENTS.md`, seeds the onboarding pack |
 | `whoami` / `doctor` / `log` | identity, diagnostics, audit trail |
 
-Semantics kept from VectorVault: deterministic keys (`mem_{agent}_{task}_{hash16}_v{version}`),
+Core semantics: deterministic keys (`mem_{agent}_{task}_{hash16}_v{version}`),
 exact-hash stores are no-ops, ≥0.95 near-dups return `duplicate_detected` for the agent to
 resolve (`--supersedes` to correct, `--mode new` for genuinely new), reads collapse versions
 by `(canonical_id, version, created_at)`, every result carries `origin: agent|external` —

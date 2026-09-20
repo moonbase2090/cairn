@@ -1,8 +1,8 @@
-"""Memory galaxy — VectorVault-style interactive starfield.
+"""Memory galaxy — interactive starfield for a cairn vault.
 
 Stars are PCA of embeddings (x/y/z from the first three components), colored
-by agent, clustered by task. The page is the VectorVault canvas (glow, tour,
-search, inspector) rebranded for Cairn, plus a WebGL 3D warp mode (orbit,
+by agent, clustered by task. The page is a canvas (glow, tour,
+search, inspector) plus a WebGL 3D warp mode (orbit,
 dive, hyperspace tour) in the same dependency-free file.
 `cairn galaxy` hosts it on a local stdlib HTTP server (not `cairn serve`).
 """
@@ -72,7 +72,7 @@ def _template() -> str:
 
 
 def to_points(client, limit: int = 2000) -> list[dict]:
-    """VV-shaped point records with x,y,z in [-1, 1]. Includes archived/superseded (dim)."""
+    """Starfield point records with x,y,z in [-1, 1]. Includes archived/superseded (dim)."""
     rows = client.vault.scan("", (), limit)
     vec_by_row = dict(client.vault.all_vectors())
     mat, meta = [], []
