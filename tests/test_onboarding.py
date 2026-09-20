@@ -78,8 +78,8 @@ def test_mcp_stdio_session(tmp_path, monkeypatch):
         proc = subprocess.run(
             [sys.executable, "-m", "cairn.mcp_server"],
             input="\n".join(json.dumps(p) for p in payloads) + "\n",
-            capture_output=True, text=True, timeout=120, cwd="str(ROOT)",
-            env={**env, "PYTHONPATH": "str(ROOT)/src"},
+            capture_output=True, text=True, timeout=120, cwd=str(ROOT),
+            env={**env, "PYTHONPATH": f"{ROOT}/src"},
         )
         assert proc.returncode == 0, proc.stderr
         return {json.loads(line)["id"]: json.loads(line) for line in proc.stdout.splitlines() if line.strip()}
@@ -129,8 +129,8 @@ def test_mcp_ops_tools(tmp_path, monkeypatch):
         proc = subprocess.run(
             [sys.executable, "-m", "cairn.mcp_server"],
             input="\n".join(json.dumps(p) for p in payloads) + "\n",
-            capture_output=True, text=True, timeout=120, cwd="str(ROOT)",
-            env={**env, "PYTHONPATH": "str(ROOT)/src"},
+            capture_output=True, text=True, timeout=120, cwd=str(ROOT),
+            env={**env, "PYTHONPATH": f"{ROOT}/src"},
         )
         assert proc.returncode == 0, proc.stderr
         return {json.loads(line)["id"]: json.loads(line) for line in proc.stdout.splitlines() if line.strip()}

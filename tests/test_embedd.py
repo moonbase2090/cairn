@@ -29,8 +29,8 @@ def embedd_hash(tmp_path):
     proc = subprocess.Popen(
         [sys.executable, "-m", "cairn.embedd", "--spec", "hash",
          "--sock", str(sock), "--idle", "8", "--dims", "384"],
-        cwd="str(ROOT)",
-        env={**os.environ, "PYTHONPATH": "str(ROOT)/src",
+        cwd=str(ROOT),
+        env={**os.environ, "PYTHONPATH": f"{ROOT}/src",
              "CAIRN_EMBEDD": "0"},  # daemon loads in-process hash
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
@@ -67,8 +67,8 @@ def test_idle_exit(tmp_path):
     proc = subprocess.Popen(
         [sys.executable, "-m", "cairn.embedd", "--spec", "hash",
          "--sock", str(sock), "--idle", "1", "--dims", "384"],
-        cwd="str(ROOT)",
-        env={**os.environ, "PYTHONPATH": "str(ROOT)/src",
+        cwd=str(ROOT),
+        env={**os.environ, "PYTHONPATH": f"{ROOT}/src",
              "CAIRN_EMBEDD": "0"},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
