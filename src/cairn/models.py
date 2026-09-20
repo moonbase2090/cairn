@@ -1,4 +1,4 @@
-"""Core data model for cairn — mirrors VectorVault's storage semantics locally.
+"""Core data model for cairn — append-only versioned memory records.
 
 Filterable vs content split, deterministic keys, append-only versioning.
 """
