@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cairn"
+version = "0.3.2"
+description = "Local-first shared memory for CLI agents — six verbs, keyless, git-syncable"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "Brandan Majeske" }]
+keywords = ["memory", "agents", "vector-search", "cli", "rag"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+urls = { Homepage = "https://github.com/brandanmajeske/cairn" }
+dependencies = [
+    "numpy>=1.26",
+    "sqlite-vec>=0.1.0",
+]
+
+[project.optional-dependencies]
+embed = ["fastembed>=0.3"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+cairn = "cairn.cli:main"
+cairn-mcp = "cairn.mcp_server:main"
+cairn-embedd = "cairn.embedd:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cairn = ["templates/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
