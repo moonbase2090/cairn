@@ -1,0 +1,1350 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Cairn — Memory Galaxy</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  /* Deliberately single-theme: a galaxy lives in the dark. */
+  :root {
+    color-scheme: dark;
+    --bg: #06080f;
+    --panel: rgba(13, 17, 32, 0.88);
+    --line: rgba(142, 162, 255, 0.14);
+    --ink: #dce3f5;
+    --ink-dim: #8b94ad;
+    --accent: #8ea2ff;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink); overflow: hidden;
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  #space { position: fixed; inset: 0; cursor: grab; touch-action: none; }
+  #space.dragging { cursor: grabbing; }
+  #gl { position: fixed; inset: 0; display: none; cursor: grab; touch-action: none; }
+  #gl.dragging { cursor: grabbing; }
+  body.warp3d #gl { display: block; }
+  body.warp3d #space { display: none; }
+  #warp {
+    position: fixed; inset: 0; z-index: 4; pointer-events: none;
+    display: none; mix-blend-mode: screen;
+  }
+  body.warp3d #warp { display: block; }
+  #labels { position: fixed; inset: 0; z-index: 4; pointer-events: none; display: none; overflow: hidden; }
+  body.warp3d #labels { display: block; }
+  #labels .tag {
+    position: absolute; transform: translate(-50%, -130%);
+    font: 11px var(--mono); letter-spacing: .14em; text-transform: uppercase;
+    color: var(--ink); background: rgba(6,8,15,.55);
+    border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px;
+    text-shadow: 0 0 8px currentColor; white-space: nowrap;
+  }
+  #labels .tag .n { color: var(--ink-dim); margin-left: 6px; }
+  #labels .isle {
+    position: absolute; transform: translate(-50%, -50%);
+    font: 12px var(--mono); letter-spacing: .34em; text-transform: uppercase;
+    color: #aab4cf; opacity: .85; white-space: nowrap; padding-left: .34em;
+    text-shadow: 0 0 12px rgba(142,162,255,.65);
+  }
+  #labels .neb {
+    position: absolute; transform: translate(-50%, -50%); border-radius: 50%;
+    pointer-events: none; filter: blur(18px);
+  }
+  #halo {
+    position: fixed; z-index: 4; display: none; pointer-events: none;
+    border: 1.5px dashed var(--accent); border-radius: 50%;
+    box-shadow: 0 0 18px rgba(142,162,255,.5), inset 0 0 12px rgba(142,162,255,.25);
+    animation: halo-spin 7s linear infinite;
+  }
+  @keyframes halo-spin { to { transform: rotate(360deg); } }
+
+  header {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 5;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 14px 18px 30px;
+    background: linear-gradient(rgba(6,8,15,.92), rgba(6,8,15,0));
+    pointer-events: none;
+  }
+  header * { pointer-events: auto; }
+  h1 {
+    margin: 0; font-size: 15px; font-weight: 650;
+    letter-spacing: .24em; text-transform: uppercase;
+  }
+  h1 .vv { color: var(--accent); }
+  #stats { font-family: var(--mono); font-size: 12px; color: var(--ink-dim); }
+  #controls { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  #search {
+    background: var(--panel); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 999px;
+    padding: 6px 14px; font: 13px var(--mono); width: min(220px, 36vw); outline: none;
+  }
+  #search:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(142,162,255,.25); }
+  #search::placeholder { color: var(--ink-dim); }
+  #tour, #mode3d {
+    background: var(--panel); color: var(--accent); border: 1px solid var(--line);
+    border-radius: 999px; padding: 6px 14px; font: 13px var(--mono); cursor: pointer;
+    transition: border-color .2s, box-shadow .2s;
+  }
+  #tour:hover, #tour.on, #mode3d:hover, #mode3d.on { border-color: var(--accent); box-shadow: 0 0 12px rgba(142,162,255,.35); }
+  #tour.on, #mode3d.on { color: var(--ink); background: rgba(142,162,255,.18); }
+  #tour:focus-visible, #mode3d:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  #legend {
+    position: fixed; left: 14px; bottom: 14px; z-index: 5;
+    display: flex; flex-direction: column; gap: 6px; max-width: 46vw;
+  }
+  .chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+    padding: 4px 12px 4px 8px; font: 12px var(--mono); color: var(--ink);
+    cursor: pointer; user-select: none; width: max-content;
+    transition: opacity .25s, border-color .2s;
+  }
+  .chip .dot { width: 9px; height: 9px; border-radius: 50%; box-shadow: 0 0 6px currentColor; }
+  .chip .n { color: var(--ink-dim); }
+  .chip.off { opacity: .35; }
+  .chip:hover { border-color: currentColor; }
+  .chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #legend .hint { font: 11px var(--mono); color: var(--ink-dim); padding-left: 4px; }
+
+  #caption {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+    z-index: 5; pointer-events: none; text-align: center;
+    font: 13px var(--mono); color: var(--ink);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+    padding: 7px 18px; opacity: 0; transition: opacity .45s;
+    max-width: 70vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #caption.show { opacity: 1; }
+  #caption .task { color: var(--accent); }
+
+  #tip {
+    position: fixed; z-index: 6; display: none; max-width: 320px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; pointer-events: none; backdrop-filter: blur(6px);
+  }
+  #tip .k { font: 11px var(--mono); color: var(--accent); word-break: break-all; }
+  #tip .m { font: 11px var(--mono); color: var(--ink-dim); margin: 3px 0 6px; }
+  #tip .t { font-size: 12.5px; }
+
+  #drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; z-index: 7;
+    width: min(400px, 92vw); transform: translateX(105%);
+    transition: transform .32s cubic-bezier(.2,.9,.25,1); overflow-y: auto;
+    background: var(--panel); border-left: 1px solid var(--line); backdrop-filter: blur(10px);
+    padding: 18px 20px 24px;
+  }
+  #drawer.open { transform: none; }
+  @media (prefers-reduced-motion: reduce) {
+    #drawer, .chip, #caption, #tour, #mode3d, #halo { transition: none; animation: none; }
+  }
+  #drawer .close {
+    float: right; background: none; border: 1px solid var(--line); color: var(--ink-dim);
+    border-radius: 8px; padding: 2px 10px; cursor: pointer; font-size: 13px;
+  }
+  #drawer .close:hover { color: var(--ink); border-color: var(--accent); }
+  #drawer h2 { font-size: 12px; letter-spacing: .18em; text-transform: uppercase; color: var(--ink-dim); margin: 4px 0 10px; }
+  #drawer .key { font: 12px var(--mono); color: var(--accent); word-break: break-all; margin-bottom: 12px; }
+  #drawer dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font: 12px var(--mono); margin: 0 0 14px; }
+  #drawer dt { color: var(--ink-dim); } #drawer dd { margin: 0; overflow-wrap: anywhere; }
+  #drawer .body { font-size: 13.5px; border-top: 1px solid var(--line); padding-top: 12px; overflow-wrap: anywhere; white-space: pre-wrap; }
+  #drawer[data-mode="res"] #done { display: none; }
+  #drawer[data-mode="one"] #mres-wrap { display: none; }
+  #backbtn {
+    background: none; border: 1px solid var(--line); color: var(--accent);
+    border-radius: 999px; padding: 3px 14px; cursor: pointer; font: 12px var(--mono);
+    margin-bottom: 6px;
+  }
+  #backbtn:hover { border-color: var(--accent); box-shadow: 0 0 8px rgba(142,162,255,.3); }
+  #mres-meta { font: 12px var(--mono); color: var(--ink-dim); margin-bottom: 6px; }
+  #mres .row {
+    display: block; width: 100%; text-align: left; cursor: pointer;
+    background: none; border: 0; border-top: 1px solid var(--line);
+    padding: 10px 2px; color: var(--ink); font: inherit;
+  }
+  #mres .row:hover { background: rgba(142,162,255,.08); }
+  #mres .row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  #mres .rnk { font: 11px var(--mono); color: var(--ink-dim); margin-right: 8px; }
+  #mres .rt {
+    font-size: 13px; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  #mres .rm { display: block; font: 11px var(--mono); color: var(--ink-dim); margin-top: 4px; }
+  #mres .rk {
+    display: block; font: 11px var(--mono); color: var(--accent); margin-top: 2px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #mres .empty, #mres .more { font: 12px var(--mono); color: var(--ink-dim); padding: 12px 2px; }
+  #drawer mark { background: rgba(142,162,255,.35); color: inherit; border-radius: 3px; padding: 0 1px; }
+  #expandbtn {
+    background: none; border: 1px solid var(--line); color: var(--accent);
+    border-radius: 999px; padding: 3px 14px; cursor: pointer; font: 12px var(--mono);
+    margin-bottom: 6px; margin-left: 6px;
+  }
+  #expandbtn:hover { border-color: var(--accent); box-shadow: 0 0 8px rgba(142,162,255,.3); }
+
+  /* expand overlay — the memory, uncropped: full text, versions, audit */
+  #expand { position: fixed; inset: 0; z-index: 20; }
+  #expand[hidden] { display: none; }
+  #expand .xback { position: absolute; inset: 0; background: rgba(3,5,10,.72); backdrop-filter: blur(3px); }
+  #expand .xmodal {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: min(880px, 94vw); max-height: 88vh; overflow-y: auto;
+    background: #0c1020; border: 1px solid var(--line); border-radius: 14px;
+    padding: 22px 26px 28px; box-shadow: 0 24px 80px rgba(0,0,0,.6);
+  }
+  #expand .xhead { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  #expand .xkey { font: 12px var(--mono); color: var(--accent); word-break: break-all; }
+  #expand .xbtns { margin-left: auto; display: flex; gap: 8px; flex: none; }
+  #expand .xbtns button {
+    background: none; border: 1px solid var(--line); color: var(--ink-dim);
+    border-radius: 8px; padding: 3px 12px; cursor: pointer; font: 12px var(--mono);
+  }
+  #expand .xbtns button:hover { color: var(--ink); border-color: var(--accent); }
+  #expand h3 {
+    font-size: 11px; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--ink-dim); margin: 22px 0 10px;
+    border-top: 1px solid var(--line); padding-top: 16px;
+  }
+  #expand .xmeta { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font: 12px var(--mono); margin: 0; }
+  #expand .xmeta dt { color: var(--ink-dim); } #expand .xmeta dd { margin: 0; overflow-wrap: anywhere; }
+  /* rendered markdown */
+  .xbody, #drawer .body { overflow-wrap: anywhere; }
+  .xbody h1, .xbody h2, .xbody h3, .xbody h4,
+  #drawer .body h1, #drawer .body h2, #drawer .body h3, #drawer .body h4 {
+    margin: .9em 0 .45em; line-height: 1.3;
+  }
+  .xbody h1, #drawer .body h1 { font-size: 1.35em; }
+  .xbody h2, #drawer .body h2 { font-size: 1.18em; }
+  .xbody h3, #drawer .body h3 { font-size: 1.05em; }
+  .xbody h4, #drawer .body h4 { font-size: 1em; }
+  .xbody p, #drawer .body p { margin: .5em 0; font-size: 13.5px; }
+  .xbody ul, .xbody ol, #drawer .body ul, #drawer .body ol { margin: .5em 0; padding-left: 1.5em; font-size: 13.5px; }
+  .xbody li, #drawer .body li { margin: .2em 0; }
+  .xbody code, #drawer .body code {
+    font: 12px var(--mono); background: rgba(142,162,255,.12);
+    border-radius: 4px; padding: 1px 5px;
+  }
+  .xbody pre, #drawer .body pre {
+    background: rgba(0,0,0,.4); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; overflow-x: auto; font-size: 12px;
+  }
+  .xbody pre code, #drawer .body pre code { background: none; padding: 0; }
+  .xbody blockquote, #drawer .body blockquote {
+    margin: .6em 0; padding: 2px 0 2px 12px; color: var(--ink-dim);
+    border-left: 2px solid var(--accent);
+  }
+  .xbody table, #drawer .body table { border-collapse: collapse; margin: .6em 0; font-size: 12.5px; }
+  .xbody th, .xbody td, #drawer .body th, #drawer .body td {
+    border: 1px solid var(--line); padding: 5px 10px; text-align: left;
+  }
+  .xbody th, #drawer .body th { background: rgba(142,162,255,.08); }
+  .xbody hr, #drawer .body hr { border: 0; border-top: 1px solid var(--line); margin: 1em 0; }
+  .xbody a, #drawer .body a { color: var(--accent); }
+  .xbody mark, #drawer .body mark { background: rgba(142,162,255,.35); color: inherit; border-radius: 3px; }
+  #expand .xvers .ver {
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin-bottom: 10px;
+  }
+  #expand .xvers .vm { font: 11px var(--mono); color: var(--ink-dim); margin-bottom: 6px; }
+  #expand .xvers .vm .st-active { color: #4de8c2; }
+  #expand .xvers .vm .st-superseded, #expand .xvers .vm .st-archived { color: #ffb45e; }
+  #expand .xaudit .ar {
+    display: flex; gap: 10px; font: 12px var(--mono); color: var(--ink-dim);
+    padding: 6px 0; border-top: 1px solid var(--line);
+  }
+  #expand .xaudit .ar .aa { color: var(--accent); flex: none; }
+  #expand .xaudit .ar .ag { margin-left: auto; flex: none; }
+  #expand .xempty { font: 12px var(--mono); color: var(--ink-dim); }
+</style>
+
+<canvas id="space" aria-label="Interactive map of shared memories: each star is one memory, positioned by semantic similarity"></canvas>
+<canvas id="gl" aria-label="3D warp view of shared memories: drag to orbit, scroll to dive"></canvas>
+<canvas id="warp" aria-hidden="true"></canvas>
+<div id="labels" aria-hidden="true"></div>
+<div id="halo" aria-hidden="true"></div>
+
+<header>
+  <h1><span class="vv">Cairn</span> · Memory Galaxy</h1>
+  <div id="stats"></div>
+  <div id="controls">
+    <button id="mode3d" aria-pressed="false" title="Warp to 3D">🌀 3D</button>
+    <button id="tour" aria-pressed="false">✦ tour</button>
+    <input id="search" type="search" placeholder="search memories…" aria-label="Search memories">
+  </div>
+</header>
+
+<div id="legend" role="group" aria-label="Filter by agent"></div>
+<div id="caption" aria-live="polite"></div>
+<div id="tip" role="tooltip"></div>
+<aside id="drawer" aria-label="Memory detail" data-mode="one">
+  <button class="close" aria-label="Close">✕</button>
+  <div id="done">
+    <button id="backbtn" hidden>← results</button>
+    <button id="expandbtn" title="Expand: full text, version history, audit trail">⤢ expand</button>
+    <h2>Memory</h2>
+    <div class="key"></div>
+    <dl></dl>
+    <div class="body"></div>
+  </div>
+  <div id="mres-wrap">
+    <h2>Results</h2>
+    <div id="mres-meta" aria-live="polite"></div>
+    <div id="mres"></div>
+  </div>
+</aside>
+
+<div id="expand" hidden>
+  <div class="xback"></div>
+  <div class="xmodal" role="dialog" aria-modal="true" aria-label="Memory expanded">
+    <div class="xhead">
+      <span class="xkey"></span>
+      <span class="xbtns">
+        <button id="xcopy" title="Copy memory key">⧉ key</button>
+        <button id="xx" aria-label="Close">✕</button>
+      </span>
+    </div>
+    <div class="xbody"></div>
+    <h3>Details</h3>
+    <dl class="xmeta"></dl>
+    <h3>Versions</h3>
+    <div class="xvers"></div>
+    <h3>Audit trail</h3>
+    <div class="xaudit"></div>
+  </div>
+</div>
+
+<script type="application/json" id="data">__DATA__</script>
+<script>
+(() => {
+  const DATA = JSON.parse(document.getElementById('data').textContent);
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // --- palette --------------------------------------------------------------------
+  const PINNED = { 'ingest-bot': '#ffb45e', 'gemma-local': '#4de8c2', 'grok-cli': '#ff5470',
+                   'grok-explore': '#e06bff', 'claude-code': '#7aa2ff',
+                   'grok-cairn-fresh': '#ff5470', 'grok-cf': '#ff5470',
+                   'spark': '#4de8c2', 'spark-cf': '#4de8c2' };
+  const FALLBACK = ['#9dff8e', '#ffd166', '#6ee7ff', '#ff9ecb', '#c3b0ff'];
+  const agents = [...new Set(DATA.map(d => d.agent))];
+  const color = {}; let fi = 0;
+  agents.forEach(a => color[a] = PINNED[a] ?? FALLBACK[fi++ % FALLBACK.length]);
+
+  // --- derived --------------------------------------------------------------------
+  DATA.forEach((d, i) => {
+    d.i = i;
+    d.r = 2.6 + Math.min(3.2, d.text.length / 110) + (d.version - 1) * 1.3;
+    d.phase = (i * 2.399) % (Math.PI * 2);
+    d.dim = d.status !== 'active';
+    d.alpha = 0;                       // animated visibility (lerped)
+    d._sr = 999;                       // BM25 rank (server search fills in)
+    d.spawn = Math.random() * Math.PI * 2; // intro trajectory angle
+    d.delay = (i * 137.5) % 900;       // staggered arrival
+  });
+  const tasks = {};
+  DATA.forEach(d => (tasks[d.task] ??= []).push(d));
+  Object.values(tasks).forEach(g => g.sort((a, b) => a.created - b.created));
+  // team islands — backend ring-packs each team onto its own patch of sky
+  const isles = {};
+  DATA.forEach(d => (isles[d.team ?? 'lobby'] ??= []).push(d));
+  const multiIsle = Object.keys(isles).length > 1;
+  const clusters = Object.entries(tasks).filter(([, g]) => g.length >= 3)
+    .map(([task, g]) => ({
+      task, g,
+      cx: g.reduce((s, d) => s + d.x, 0) / g.length,
+      cy: g.reduce((s, d) => s + d.y, 0) / g.length,
+      spread: Math.max(.08, ...g.map(d => Math.hypot(d.x - g.reduce((s, e) => s + e.x, 0) / g.length,
+                                                     d.y - g.reduce((s, e) => s + e.y, 0) / g.length))),
+    }));
+
+  document.getElementById('stats').textContent =
+    `${DATA.length} memories · ${new Set(DATA.map(d => d.team)).size} teams · ` +
+    `${agents.length} agents · ${Object.keys(tasks).length} tasks · PCA-3 of embeddings`;
+
+  // --- legend ------------------------------------------------------------------------
+  // Click a chip to SOLO that agent (isolate its memories); click it again to
+  // restore everyone. Shift+click keeps the classic toggle-one-agent behavior.
+  const off = new Set();
+  const chipByAgent = {};
+  const legend = document.getElementById('legend');
+  function refreshChips() {
+    Object.entries(chipByAgent).forEach(([a, chip]) => chip.classList.toggle('off', off.has(a)));
+  }
+  agents.sort((a, b) => DATA.filter(d => d.agent === b).length - DATA.filter(d => d.agent === a).length)
+    .forEach(a => {
+      const n = DATA.filter(d => d.agent === a).length;
+      const chip = document.createElement('button');
+      chip.className = 'chip'; chip.style.color = color[a];
+      chip.title = 'click to isolate · shift-click to toggle';
+      chip.innerHTML = `<span class="dot" style="background:${color[a]}"></span>` +
+        `<span style="color:var(--ink)">${a}</span><span class="n">${n}</span>`;
+      chip.onclick = e => {
+        if (e && e.shiftKey) { off.has(a) ? off.delete(a) : off.add(a); }
+        else if (off.size === agents.length - 1 && !off.has(a)) { off.clear(); }
+        else { off.clear(); agents.forEach(x => { if (x !== a) off.add(x); }); }
+        refreshChips();
+      };
+      chipByAgent[a] = chip;
+      legend.appendChild(chip);
+    });
+  const hint = document.createElement('div');
+  hint.className = 'hint';
+  hint.textContent = 'click agent to isolate · shift-click toggles · drag pan · scroll zoom · hover star · click detail · ✦ tour · 🌀 3D';
+  legend.appendChild(hint);
+
+  // --- canvas + camera (target-chasing for fluid glide) ------------------------------
+  const cv = document.getElementById('space'), cx = cv.getContext('2d');
+  let W, H, dpr;
+  const cam = { s: 1, ox: 0, oy: 0, ts: 1, tox: 0, toy: 0 };
+  const CHASE = reduced ? 1 : 0.11;
+  function resize() {
+    dpr = devicePixelRatio || 1;
+    W = innerWidth; H = innerHeight;
+    cv.width = W * dpr; cv.height = H * dpr;
+    cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  }
+  function fitTargets() {
+    cam.ts = Math.min(W, H) * 0.36;
+    cam.tox = W / 2; cam.toy = H / 2;
+  }
+  function snap() { cam.s = cam.ts; cam.ox = cam.tox; cam.oy = cam.toy; }
+
+  // background starfield (offscreen, parallax)
+  let bg;
+  function makeBg() {
+    bg = document.createElement('canvas');
+    bg.width = W * dpr * 1.4; bg.height = H * dpr * 1.4;
+    const b = bg.getContext('2d');
+    b.scale(dpr, dpr);
+    let seed = 7;
+    const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    for (let i = 0; i < 420; i++) {
+      const x = rnd() * W * 1.4, y = rnd() * H * 1.4, r = rnd() * 1.1 + .2;
+      b.fillStyle = `rgba(${180 + rnd() * 60},${190 + rnd() * 50},255,${rnd() * .5 + .12})`;
+      b.beginPath(); b.arc(x, y, r, 0, 7); b.fill();
+    }
+  }
+
+  // --- state ---------------------------------------------------------------------------
+  let hover = null, selected = null, query = '';
+  let mx = -1e4, my = -1e4;
+  const t0 = performance.now();
+  const INTRO = reduced ? 0 : 1500;
+  // search: instant local substring, refined by server BM25 when it answers.
+  // serverMatch maps key -> BM25 rank order; serverActive flips on only after a
+  // good response, so file:// or legacy servers silently keep local behavior.
+  const serverMatch = new Map();
+  let serverActive = false, searchSeq = 0, serverTimer = null, serverVer = 0;
+  const localMatches = d =>
+    query && (d.text + ' ' + d.task + ' ' + d.key).toLowerCase().includes(query);
+  const matches = d => serverActive ? serverMatch.has(d.key) : localMatches(d);
+  const rankW = d =>
+    (!serverActive || reduced) ? 1 : 1 - Math.min(1, (d._sr || 0) / 12) * 0.65;
+  const visible = d => !off.has(d.agent) && (!query || matches(d));
+  const ease = t => 1 - Math.pow(1 - t, 3);
+
+  // shooting stars
+  const meteors = [];
+  let nextMeteor = t0 + 3000;
+  function spawnMeteor(t) {
+    const edge = Math.random();
+    meteors.push({
+      x: edge * W * 1.2 - W * .1, y: -30,
+      vx: (Math.random() - .65) * 6 - 2, vy: Math.random() * 4 + 5,
+      life: 1, born: t,
+    });
+  }
+
+  // constellation reveal progress per task
+  const reveal = {};
+
+  function starPos(d, t) {
+    let x = cam.ox + d.x * cam.s, y = cam.oy + d.y * cam.s;
+    if (!reduced) {
+      // ambient drift — every star breathes on its own tiny orbit
+      x += Math.sin(t * 0.00031 + d.phase) * 2.6;
+      y += Math.cos(t * 0.00027 + d.phase * 1.7) * 2.6;
+      // mouse gravity — nearby stars lean toward the cursor
+      const dx = mx - x, dy = my - y, dist = Math.hypot(dx, dy);
+      if (dist < 150 && dist > 1) {
+        const pull = (1 - dist / 150) * 7;
+        x += dx / dist * pull; y += dy / dist * pull;
+      }
+      // intro: converge from a ring
+      const it = Math.min(1, Math.max(0, (t - t0 - d.delay) / (INTRO || 1)));
+      if (it < 1) {
+        const e = ease(it);
+        const R = Math.max(W, H) * 0.75 * (1 - e);
+        x += Math.cos(d.spawn) * R; y += Math.sin(d.spawn) * R;
+      }
+    }
+    return [x, y];
+  }
+
+  function draw(t) {
+    if (mode3) { draw3(t); requestAnimationFrame(draw); return; }
+    // camera glide
+    cam.s += (cam.ts - cam.s) * CHASE;
+    cam.ox += (cam.tox - cam.ox) * CHASE;
+    cam.oy += (cam.toy - cam.oy) * CHASE;
+
+    cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cx.clearRect(0, 0, W, H);
+    const px = -cam.ox * 0.12 - W * 0.2, py = -cam.oy * 0.12 - H * 0.2;
+    cx.globalAlpha = 0.9;
+    cx.drawImage(bg, px, py, W * 1.4, H * 1.4);
+    cx.globalAlpha = 1;
+
+    // meteors
+    if (!reduced) {
+      if (t > nextMeteor) { spawnMeteor(t); nextMeteor = t + 3500 + Math.random() * 4500; }
+      for (let i = meteors.length - 1; i >= 0; i--) {
+        const m = meteors[i];
+        m.x += m.vx; m.y += m.vy; m.life -= 0.012;
+        if (m.life <= 0 || m.y > H + 40) { meteors.splice(i, 1); continue; }
+        const grad = cx.createLinearGradient(m.x, m.y, m.x - m.vx * 9, m.y - m.vy * 9);
+        grad.addColorStop(0, `rgba(220,230,255,${0.75 * m.life})`);
+        grad.addColorStop(1, 'rgba(220,230,255,0)');
+        cx.strokeStyle = grad; cx.lineWidth = 1.4;
+        cx.beginPath(); cx.moveTo(m.x, m.y); cx.lineTo(m.x - m.vx * 9, m.y - m.vy * 9); cx.stroke();
+      }
+    }
+
+    // positions this frame
+    for (const d of DATA) { const [x, y] = starPos(d, t); d._sx = x; d._sy = y; }
+
+    // nebulae under clusters
+    for (const c of clusters) {
+      const mxp = c.g.reduce((s, d) => s + d._sx, 0) / c.g.length;
+      const myp = c.g.reduce((s, d) => s + d._sy, 0) / c.g.length;
+      const spread = Math.max(...c.g.map(d => Math.hypot(d._sx - mxp, d._sy - myp))) + 40;
+      const grad = cx.createRadialGradient(mxp, myp, 0, mxp, myp, spread);
+      const col = color[c.g[0].agent];
+      grad.addColorStop(0, col + '14'); grad.addColorStop(1, col + '00');
+      cx.fillStyle = grad;
+      cx.beginPath(); cx.arc(mxp, myp, spread, 0, 7); cx.fill();
+    }
+
+    // constellation lines — animated draw-on for hovered/selected/toured task
+    const active = tourTask || (hover && hover.task) || (selected && selected.task);
+    for (const task of Object.keys(reveal)) {
+      reveal[task] += (task === active ? 1 - reveal[task] : -reveal[task]) * (reduced ? 1 : 0.08);
+      if (reveal[task] < 0.01) delete reveal[task];
+    }
+    if (active && !(active in reveal)) reveal[active] = reduced ? 1 : 0.02;
+    for (const [task, prog] of Object.entries(reveal)) {
+      const g = tasks[task];
+      if (!g || g.length < 2) continue;
+      const col = color[g[0].agent];
+      cx.strokeStyle = col + '66'; cx.lineWidth = 1;
+      const total = g.length - 1, upto = prog * total;
+      cx.beginPath();
+      cx.moveTo(g[0]._sx, g[0]._sy);
+      for (let i = 1; i <= Math.floor(upto); i++) cx.lineTo(g[i]._sx, g[i]._sy);
+      const f = upto - Math.floor(upto), n = Math.floor(upto);
+      if (n < total) {
+        cx.lineTo(g[n]._sx + (g[n + 1]._sx - g[n]._sx) * f,
+                  g[n]._sy + (g[n + 1]._sy - g[n]._sy) * f);
+      }
+      cx.stroke();
+    }
+
+    // stars
+    for (const d of DATA) {
+      const target = visible(d) ? (d.dim ? 0.28 : 1) : 0.07;
+      d.alpha += (target - d.alpha) * (reduced ? 1 : 0.12);
+      const x = d._sx, y = d._sy;
+      if (x < -40 || y < -40 || x > W + 40 || y > H + 40) continue;
+      const twinkle = reduced ? 1 : 0.86 + 0.14 * Math.sin(t / 900 + d.phase);
+      const isHover = hover === d, isSel = selected === d;
+      let r = d.r * (isHover || isSel ? 1.6 : 1);
+      if (matches(d) && !reduced) r *= 1 + 0.18 * Math.sin(t / 260 + d.phase) * rankW(d); // search pulse
+      const a = d.alpha * twinkle;
+      const glow = cx.createRadialGradient(x, y, 0, x, y, r * 4);
+      glow.addColorStop(0, color[d.agent] + 'ff');
+      glow.addColorStop(0.25, color[d.agent] + '66');
+      glow.addColorStop(1, color[d.agent] + '00');
+      cx.globalAlpha = a;
+      cx.fillStyle = glow;
+      cx.beginPath(); cx.arc(x, y, r * 4, 0, 7); cx.fill();
+      cx.fillStyle = '#fff';
+      cx.beginPath(); cx.arc(x, y, Math.max(1, r * 0.45), 0, 7); cx.fill();
+      // selection halo — a slowly rotating dashed orbit
+      if (isSel) {
+        cx.strokeStyle = color[d.agent] + 'cc'; cx.lineWidth = 1.2;
+        cx.setLineDash([5, 6]); cx.lineDashOffset = reduced ? 0 : -t / 40;
+        cx.beginPath(); cx.arc(x, y, r * 4 + 6, 0, 7); cx.stroke();
+        cx.setLineDash([]);
+      }
+      cx.globalAlpha = 1;
+    }
+
+    // team island rings + names — each team's own galaxy gets a dashed orbit
+    if (multiIsle) {
+      cx.textAlign = 'center';
+      cx.letterSpacing = '4px';
+      cx.font = '11px ui-monospace, Menlo, Consolas, monospace';
+      for (const [team, g] of Object.entries(isles)) {
+        const vis = g.filter(d => visible(d) && d._sx > -1e3);
+        if (!vis.length) continue;
+        const mx = vis.reduce((s, d) => s + d._sx, 0) / vis.length;
+        const my = vis.reduce((s, d) => s + d._sy, 0) / vis.length;
+        const rr = Math.max(30, ...vis.map(d => Math.hypot(d._sx - mx, d._sy - my))) + 30;
+        cx.globalAlpha = 0.16; cx.strokeStyle = color[vis[0].agent] || '#8ea2ff';
+        cx.setLineDash([3, 7]); cx.lineWidth = 1;
+        cx.beginPath(); cx.arc(mx, my, rr, 0, 7); cx.stroke(); cx.setLineDash([]);
+        cx.globalAlpha = 0.85; cx.fillStyle = '#aab4cf';
+        cx.fillText(String(team).toUpperCase(), mx, my - rr - 10);
+        cx.globalAlpha = 1;
+      }
+      cx.letterSpacing = '0px';
+    }
+    requestAnimationFrame(draw);
+  }
+
+  // --- fly-to helpers ---------------------------------------------------------------------
+  function flyTo(d) {
+    const cxT = drawer.classList.contains('open') || true ? W * 0.5 - (W > 760 ? 200 : 0) : W / 2;
+    cam.ts = Math.max(cam.s, Math.min(W, H) * 0.5);
+    cam.tox = cxT - d.x * cam.ts;
+    cam.toy = H * 0.5 - d.y * cam.ts;
+  }
+  function flyToCluster(c) {
+    const margin = 0.62;
+    cam.ts = Math.min(W, H) * margin / (c.spread * 2 + 0.25);
+    cam.tox = W / 2 - c.cx * cam.ts;
+    cam.toy = H / 2 - c.cy * cam.ts;
+  }
+
+  // --- tour ------------------------------------------------------------------------------
+  const tourBtn = document.getElementById('tour');
+  const caption = document.getElementById('caption');
+  let tourTimer = null, tourIdx = -1, tourTask = null;
+  function tourStep() {
+    tourIdx = (tourIdx + 1) % clusters.length;
+    const c = clusters[tourIdx];
+    tourTask = c.task;
+    if (mode3) flyCluster3(c); else flyToCluster(c);
+    caption.innerHTML = `constellation <span class="task">${esc(c.task)}</span> · ${c.g.length} memories · ${esc(c.g[0].agent)}`;
+    caption.classList.add('show');
+  }
+  function startTour() {
+    if (!clusters.length) return;
+    tourBtn.classList.add('on'); tourBtn.setAttribute('aria-pressed', 'true');
+    closeDrawer(); selected = null;
+    tourStep();
+    tourTimer = setInterval(tourStep, 4200);
+  }
+  function stopTour() {
+    if (!tourTimer) return;
+    clearInterval(tourTimer); tourTimer = null; tourTask = null;
+    tourBtn.classList.remove('on'); tourBtn.setAttribute('aria-pressed', 'false');
+    caption.classList.remove('show');
+  }
+  tourBtn.onclick = () => tourTimer ? stopTour() : startTour();
+
+  // --- interactions -------------------------------------------------------------------------
+  const tip = document.getElementById('tip');
+  function pick(x, y) {
+    let best = null, bd = 14;
+    for (const d of DATA) {
+      if (!visible(d)) continue;
+      const dist = Math.hypot(d._sx - x, d._sy - y);
+      if (dist < bd + d.r) { bd = dist; best = d; }
+    }
+    return best;
+  }
+  let dragging = false, moved = false, lx = 0, ly = 0, vx = 0, vy = 0;
+  cv.addEventListener('pointerdown', e => {
+    stopTour();
+    dragging = true; moved = false; lx = e.clientX; ly = e.clientY; vx = vy = 0;
+    cv.classList.add('dragging'); cv.setPointerCapture(e.pointerId);
+  });
+  cv.addEventListener('pointerup', e => {
+    dragging = false; cv.classList.remove('dragging');
+    if (!moved) {
+      const d = pick(e.clientX, e.clientY);
+      if (d) { selected = d; openDrawer(d); flyTo(d); }
+      else { selected = null; closeDrawer(); }
+    } else if (!reduced) { cam.tox += vx * 9; cam.toy += vy * 9; } // inertial glide
+  });
+  cv.addEventListener('pointermove', e => {
+    mx = e.clientX; my = e.clientY;
+    if (dragging) {
+      const dx = e.clientX - lx, dy = e.clientY - ly;
+      if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+      cam.ox += dx; cam.oy += dy; cam.tox = cam.ox; cam.toy = cam.oy;
+      vx = dx; vy = dy;
+      lx = e.clientX; ly = e.clientY;
+      tip.style.display = 'none'; hover = null;
+      return;
+    }
+    hover = pick(e.clientX, e.clientY);
+    hoverTip(hover, e.clientX, e.clientY, cv);
+  });
+  cv.addEventListener('pointerleave', () => { mx = my = -1e4; });
+  cv.addEventListener('wheel', e => {
+    e.preventDefault(); stopTour();
+    const f = Math.exp(-e.deltaY * 0.0012);
+    cam.tox = e.clientX + (cam.tox - e.clientX) * f;
+    cam.toy = e.clientY + (cam.toy - e.clientY) * f;
+    cam.ts *= f;
+  }, { passive: false });
+  cv.addEventListener('dblclick', () => { stopTour(); selected = null; closeDrawer(); fitTargets(); });
+
+  // drawer
+  const drawer = document.getElementById('drawer');
+  const mres = document.getElementById('mres');
+  const mresMeta = document.getElementById('mres-meta');
+  const backbtn = document.getElementById('backbtn');
+  let drawerMode = 'one';                       // 'one' = memory detail, 'res' = results table
+  function setMode(m) { drawerMode = m; drawer.dataset.mode = m; }
+  const RES_CAP = 50;
+  function renderResults() {
+    const hits = DATA.filter(matches);
+    hits.sort((a, b) => serverActive ? (a._sr - b._sr) : (a.i - b.i));
+    mresMeta.textContent = hits.length
+      ? `${hits.length} result${hits.length === 1 ? '' : 's'}${serverActive ? ' · BM25' : ''} — click to fly`
+      : `no memories match “${query}”`;
+    mres.textContent = '';
+    hits.slice(0, RES_CAP).forEach((d, i) => {
+      const b = document.createElement('button');
+      b.className = 'row';
+      b.setAttribute('aria-label', `fly to ${d.key}`);
+      b.innerHTML = `<span class="rnk">${i + 1}</span>` +
+        `<span class="rt">${mdInline(markTerms(mdCompact(d.full || d.text), query))}</span>` +
+        `<span class="rm">${esc(d.agent)} · ${esc(d.team)}/${esc(d.task)} · ${esc(d.type)} · v${d.version}${d.dim ? ' · ' + esc(d.status) : ''}</span>` +
+        `<span class="rk">${esc(d.key)}</span>`;
+      b.onclick = () => { selected = d; openDrawer(d); if (mode3) flyTo3(d); else flyTo(d); };
+      mres.appendChild(b);
+    });
+    if (hits.length > RES_CAP) {
+      const more = document.createElement('div');
+      more.className = 'more';
+      more.textContent = `+${hits.length - RES_CAP} more — refine terms`;
+      mres.appendChild(more);
+    }
+  }
+  function openRes() { setMode('res'); drawer.classList.add('open'); }
+  function openDrawer(d) {
+    drawer.querySelector('.key').textContent = d.key;
+    const when = d.created ? new Date(d.created * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : '—';
+    drawer.querySelector('dl').innerHTML =
+      row('agent', d.agent) + row('stored by', d.stored_by) + row('team', d.team) + row('task', d.task) +
+      row('type', d.type) + row('status', d.status) + row('version', 'v' + d.version) + row('created', when);
+    drawer.querySelector('.body').innerHTML = md(d.full || d.text || '');
+    setMode('one');
+    backbtn.hidden = !query;
+    backbtn.onclick = () => { renderResults(); openRes(); };
+    expandbtn.onclick = () => openExpand(d.key);
+    drawer.classList.add('open');
+  }
+  const row = (k, v) => `<dt>${k}</dt><dd>${esc(String(v))}</dd>`;
+  const closeDrawer = () => drawer.classList.remove('open');
+  const expandbtn = document.getElementById('expandbtn');
+  drawer.querySelector('.close').onclick = () => { selected = null; closeDrawer(); };
+  addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    if (!document.getElementById('expand').hidden) { closeExpand(); return; }
+    if (drawerMode === 'one' && query && drawer.classList.contains('open')) {
+      renderResults(); openRes();               // first Esc: back to the results table
+    } else { selected = null; closeDrawer(); stopTour(); }
+  });
+
+  // --- expand overlay: full text, version history, audit trail -----------------------
+  const expandBox = document.getElementById('expand');
+  function fmtTs(ts) {
+    if (!ts) return '—';
+    try { return new Date(ts * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' UTC'; }
+    catch (e) { return String(ts); }
+  }
+  function openExpand(key) {
+    expandBox.querySelector('.xkey').textContent = key;
+    expandBox.querySelector('.xbody').innerHTML = '<p class="xempty">loading…</p>';
+    expandBox.querySelector('.xmeta').innerHTML = '';
+    expandBox.querySelector('.xvers').innerHTML = '';
+    expandBox.querySelector('.xaudit').innerHTML = '';
+    expandBox.hidden = false;
+    fetch('memory?key=' + encodeURIComponent(key))
+      .then(r => r.ok ? r.json() : Promise.reject(new Error('memory ' + r.status)))
+      .then(body => {
+        if (expandBox.hidden || expandBox.querySelector('.xkey').textContent !== key) return;
+        const rec = body.record;
+        expandBox.querySelector('.xbody').innerHTML = md(rec.content || rec.content_summary || '');
+        const meta = [['agent', rec.agent_id], ['stored by', rec.stored_by || rec.agent_id],
+          ['team', rec.team_id], ['task', rec.task_id], ['type', rec.memory_type],
+          ['status', rec.status], ['origin', rec.origin], ['version', 'v' + (rec.version || 1)],
+          ['created', fmtTs(rec.created_at)], ['updated', fmtTs(rec.updated_at)],
+          ['expires', fmtTs(rec.expires_at)], ['supersedes', rec.supersedes || '—'],
+          ['hash', (rec.content_hash || '').slice(0, 16)]];
+        expandBox.querySelector('.xmeta').innerHTML =
+          meta.map(([k, v]) => `<dt>${k}</dt><dd>${esc(String(v ?? '—'))}</dd>`).join('');
+        const vers = body.versions || [];
+        expandBox.querySelector('.xvers').innerHTML = vers.length ? vers.map(v =>
+          `<div class="ver"><div class="vm">v${v.version} · ` +
+          `<span class="st-${esc(v.status)}">${esc(v.status)}</span> · ${esc(v.agent_id)} · ${fmtTs(v.created_at)}</div>` +
+          (v.content == null
+            ? '<div class="xempty">content failed its integrity check — restore from a peer pack</div>'
+            : `<div class="vb">${md(v.content)}</div>`)).join('')
+          : '<div class="xempty">no versions</div>';
+        const audit = body.audit || [];
+        expandBox.querySelector('.xaudit').innerHTML = audit.length ? audit.map(a => {
+          const rest = Object.entries(a)
+            .filter(([k]) => !['ts', 'agent', 'action'].includes(k))
+            .map(([k, v]) => `${esc(k)}=${esc(String(v).slice(0, 80))}`).join(' ');
+          return `<div class="ar"><span>${fmtTs(a.ts)}</span>` +
+            `<span class="aa">${esc(a.action)}</span><span>${rest}</span>` +
+            `<span class="ag">${esc(a.agent || '')}</span></div>`;
+        }).join('') : '<div class="xempty">no audit entries for this memory</div>';
+      })
+      .catch(() => {
+        if (!expandBox.hidden)
+          expandBox.querySelector('.xbody').innerHTML =
+            '<p class="xempty">could not load full memory (offline export?)</p>';
+      });
+  }
+  function closeExpand() { expandBox.hidden = true; }
+  expandBox.querySelector('.xback').onclick = closeExpand;
+  expandBox.querySelector('#xx').onclick = closeExpand;
+  expandBox.querySelector('#xcopy').onclick = e => {
+    const key = expandBox.querySelector('.xkey').textContent;
+    const done = () => {
+      e.target.textContent = 'copied ✓';
+      setTimeout(() => e.target.textContent = '⧉ key', 1200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(key).then(done, () => {});
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = key; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch (err) { /* noop */ }
+      document.body.removeChild(ta);
+    }
+  };
+
+  const searchInput = document.getElementById('search');
+  searchInput.title = 'BM25 keyword search (server) with instant local filtering';
+  function runServerSearch(my, q) {
+    fetch('search?q=' + encodeURIComponent(q) + '&limit=2000')
+      .then(r => r.ok ? r.json() : Promise.reject(new Error('search ' + r.status)))
+      .then(body => {
+        if (my !== searchSeq) return;                 // stale keystrokes lose
+        serverMatch.clear();
+        (body.keys || []).forEach((k, i) => { if (!serverMatch.has(k)) serverMatch.set(k, i); });
+        DATA.forEach(d => d._sr = serverMatch.has(d.key) ? serverMatch.get(d.key) : 999);
+        serverActive = true; serverVer++;
+        if (query && drawerMode === 'res') renderResults();   // …upgraded to BM25 order
+        const plotted = DATA.reduce((s, d) => s + (serverMatch.has(d.key) ? 1 : 0), 0);
+        if (!tourTimer && serverMatch.size > plotted)
+          flashCaption(`🔍 ${serverMatch.size} matches · ${plotted} in view — zoom in or raise --limit`);
+      })
+      .catch(() => { if (my === searchSeq) serverActive = false; });
+  }
+  searchInput.addEventListener('input', e => {
+    query = e.target.value.trim().toLowerCase();
+    serverActive = false;
+    clearTimeout(serverTimer);
+    if (!query) {
+      serverMatch.clear();
+      if (drawerMode === 'res') closeDrawer();
+      return;
+    }
+    renderResults(); openRes();                  // instant local table…
+    const my = ++searchSeq;
+    serverTimer = setTimeout(() => runServerSearch(my, e.target.value.trim()), 250);
+  });
+
+  function esc(s) { return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+  // --- markdown (dependency-free, safe by construction: escape first, then
+  // add our own tags; code spans stashed so nothing transforms inside them) --
+  function mdInline(src) {
+    const stash = [];
+    let s = String(src).replace(/`([^`\n]+)`/g, (m, c) => {
+      stash.push(c); return '\u0000' + (stash.length - 1) + '\u0000';
+    });
+    s = esc(s);
+    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '$1');   // images -> alt text
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, t, u) =>
+      /^(https?:|#|\/|mailto:)/i.test(u)
+        ? `<a href="${u}" target="_blank" rel="noopener">${t}</a>` : `${t} (${u})`);
+    s = s.replace(/(^|[\s(])(https?:\/\/[^\s<]+)/g,
+      '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+    s = s.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+    s = s.replace(/\u0000(\d+)\u0000/g, (m, i) => '<code>' + esc(stash[+i] ?? '') + '</code>');
+    return s.replace(/\u0001/g, '<mark>').replace(/\u0002/g, '</mark>');  // query hits
+  }
+  function markTerms(raw, q) {                        // sentinel-wrap query terms
+    let s = String(raw);
+    q.split(/\s+/).filter(Boolean).forEach(term => {
+      const t = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      s = s.replace(new RegExp('(' + t + ')', 'ig'), '\u0001$1\u0002');
+    });
+    return s;
+  }
+  function mdCompact(src) {                           // block syntax -> flowing raw
+    let s = String(src).replace(/```(\w*\n)?([\s\S]*?)```/g, (m, l, code) => ' ' + code + ' ');
+    s = s.split('\n').map(l => l
+      .replace(/^(#{1,4}\s+|>\s*|[-*+]\s+|\d{1,3}[.)]\s+|\|)/, '').replace(/\|/g, ' ')).join(' ');
+    return s.replace(/\s+/g, ' ').trim();
+  }
+  function md(src) {                                  // full block markdown -> HTML
+    const lines = String(src).split('\n');
+    let html = '', i = 0, inCode = false, codeBuf = [];
+    const stack = [];                                 // open list tags [{tag, ind}]
+    const closeLists = () => { while (stack.length) html += '</' + stack.pop().tag + '>'; };
+    const isDelim = l => l.includes('|') && /^\s*\|?[\s:|-]+\|[\s:|-]*\s*$/.test(l);
+    const isItem = l => /^(\s*)([-*+]|\d{1,3}[.)])\s+/.test(l);
+    const isBlock = (j, l) =>
+      /^(#{1,4}\s+|```|>\s?|---+\s*$|\*\*\*+\s*$|___+\s*$)/.test(l) || isItem(l) ||
+      (l.includes('|') && j + 1 < lines.length && isDelim(lines[j + 1]));
+    while (i < lines.length) {
+      const line = lines[i];
+      if (!inCode && /^```/.test(line)) { inCode = true; codeBuf = []; i++; continue; }
+      if (inCode) {
+        if (/^```\s*$/.test(line)) {
+          html += '<pre><code>' + esc(codeBuf.join('\n')) + '</code></pre>'; inCode = false;
+        } else codeBuf.push(line);
+        i++; continue;
+      }
+      if (/^\s*$/.test(line)) { closeLists(); i++; continue; }
+      let m;
+      if (m = line.match(/^(#{1,4})\s+(.*)/)) {
+        closeLists();
+        html += `<h${m[1].length}>${mdInline(m[2])}</h${m[1].length}>`; i++; continue;
+      }
+      if (/^(---+\s*|\*\*\*+\s*|___+\s*)$/.test(line.trim())) { closeLists(); html += '<hr>'; i++; continue; }
+      if (/^>\s?/.test(line)) {
+        closeLists();
+        const bq = [];
+        while (i < lines.length && /^>\s?/.test(lines[i])) { bq.push(lines[i].replace(/^>\s?/, '')); i++; }
+        html += '<blockquote>' + md(bq.join('\n')) + '</blockquote>'; continue;
+      }
+      if (m = line.match(/^(\s*)([-*+]|\d{1,3}[.)])\s+(.*)/)) {
+        const ind = m[1].length, tag = /^\d/.test(m[2]) ? 'ol' : 'ul';
+        let text = m[3], cb = '';
+        const c = tag === 'ul' && text.match(/^\[([ xX])\]\s+(.*)/);
+        if (c) { cb = `<input type="checkbox" disabled${c[1] === ' ' ? '' : ' checked'}> `; text = c[2]; }
+        while (stack.length && ind < stack[stack.length - 1].ind)
+          html += '</' + stack.pop().tag + '>';
+        if (!stack.length || ind > stack[stack.length - 1].ind) {
+          html += '<' + tag + '>'; stack.push({ tag, ind });
+        } else if (stack[stack.length - 1].tag !== tag) {
+          html += '</' + stack.pop().tag + '><' + tag + '>'; stack.push({ tag, ind });
+        }
+        html += '<li>' + cb + mdInline(text) + '</li>'; i++; continue;
+      }
+      if (line.includes('|') && i + 1 < lines.length && isDelim(lines[i + 1])) {
+        closeLists();
+        const cells = r => r.trim().replace(/^\||\|$/g, '').split('|').map(c => mdInline(c.trim()));
+        let tbl = '<table><thead><tr>' +
+          cells(line).map(c => `<th>${c}</th>`).join('') + '</tr></thead><tbody>';
+        i += 2;
+        while (i < lines.length && lines[i].trim() !== '' && lines[i].includes('|'))
+          tbl += '<tr>' + cells(lines[i++]).map(c => `<td>${c}</td>`).join('') + '</tr>';
+        html += tbl + '</tbody></table>';
+        continue;
+      }
+      closeLists();
+      const para = [];
+      while (i < lines.length && lines[i].trim() !== '' && !isBlock(i, lines[i])) {
+        para.push(lines[i].trim()); i++;
+      }
+      if (para.length) html += '<p>' + mdInline(para.join(' ')) + '</p>';
+      else i++;
+    }
+    if (inCode) html += '<pre><code>' + esc(codeBuf.join('\n')) + '</code></pre>';
+    closeLists();
+    return html;
+  }
+
+  // --- 3D warp mode: WebGL point cloud, orbit + dive, hyperspace tour -------------------
+  // Same DATA, same DOM (tooltip/drawer/search/legend/caption all shared). Projection,
+  // picking and sizing run on the CPU per frame; WebGL only splats additive glow points.
+  let mode3 = false;
+  let gl = null, glOK = false;
+  const S3 = 1.7;                       // world spread scale
+  const CHASE3 = reduced ? 1 : 0.075;
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  const c3 = { yaw: 0.6, pitch: 0.42, dist: 4.6, tx: 0, ty: 0, tz: 0,
+               tyaw: 0.6, tpitch: 0.42, tdist: 4.6, ttx: 0, tty: 0, ttz: 0 };
+  let dragging3 = false, moved3 = false, lx3 = 0, ly3 = 0, lastOrbitT = 0;
+  let warpAmt = 0, prevErr = 0, capT = null;
+  let P3 = null, SZ3 = null, AL3 = null, P3N = -1;
+  let isleList = null;                  // [{team, g, cx, cy, cz, rad}] in world units
+  const isleTags = {};
+  let lastQ3 = '', lastSV3 = 0, match3 = new Set();
+  const rings = [];                     // arrival shockwaves {x, y, r, a}
+  const labelsBox = document.getElementById('labels');
+  const halo = document.getElementById('halo');
+  const modeBtn = document.getElementById('mode3d');
+  const glCv = document.getElementById('gl');
+  const warpCv = document.getElementById('warp'), wx = warpCv.getContext('2d');
+
+  DATA.forEach(d => { d.z = (typeof d.z === 'number' && isFinite(d.z)) ? d.z : 0; });
+
+  // dust shell — far background motes fixed in world space
+  const dust = [];
+  { let seed = 42; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    for (let i = 0; i < 520; i++) {
+      const th = rnd() * Math.PI * 2, ph = Math.acos(rnd() * 2 - 1), rr = 6 + rnd() * 4;
+      dust.push([rr * Math.sin(ph) * Math.cos(th), rr * Math.cos(ph) * 0.7,
+                 rr * Math.sin(ph) * Math.sin(th), rnd() * 6.28]);
+    } }
+
+  function hexRgb(h) {
+    const n = parseInt(String(h || '#8ea2ff').slice(1), 16);
+    return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255];
+  }
+  function worldOf(d) { return [d.x * S3, -d.y * S3, d.z * S3 * 0.75]; }
+
+  // orbit (yaw about Y, pitch about X) + perspective divide. Returns [sx, sy, scale] or null.
+  function project3(px, py, pz, focal) {
+    const x = px - c3.tx, y = py - c3.ty, z = pz - c3.ttz;
+    const cy = Math.cos(c3.yaw), sy = Math.sin(c3.yaw);
+    const x1 = x * cy - z * sy, z1 = x * sy + z * cy;
+    const cp = Math.cos(c3.pitch), sp = Math.sin(c3.pitch);
+    const y2 = y * cp - z1 * sp, z2 = y * sp + z1 * cp;
+    const depth = c3.dist + z2;         // camera sits at -dist looking +Z
+    if (depth < 0.15) return null;
+    const s = focal / depth;
+    return [W / 2 + x1 * s, H / 2 - y2 * s, s];
+  }
+
+  function initGL() {
+    if (gl) return glOK;
+    try { gl = glCv.getContext('webgl', { antialias: true, alpha: false }) ||
+               glCv.getContext('experimental-webgl'); }
+    catch (e) { gl = null; }
+    if (!gl) return (glOK = false);
+    const vs = 'attribute vec3 p; attribute float s; attribute vec3 c; attribute float a;' +
+      'varying vec3 vc; varying float va;' +
+      'void main(){ gl_Position = vec4(p, 1.0); gl_PointSize = s; vc = c; va = a; }';
+    const fs = 'precision mediump float; varying vec3 vc; varying float va;' +
+      'void main(){ vec2 q = gl_PointCoord - vec2(0.5); float dd = length(q);' +
+      ' float core = smoothstep(0.5, 0.0, dd); float g = pow(core, 2.4);' +
+      ' vec3 col = vc * g + vec3(1.0) * pow(core, 9.0) * 0.85;' +
+      ' gl_FragColor = vec4(col * va, g * va); }';
+    const sh = (type, src) => {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src); gl.compileShader(s);
+      return gl.getShaderParameter(s, gl.COMPILE_STATUS) ? s : null;
+    };
+    const v = sh(gl.VERTEX_SHADER, vs), f = sh(gl.FRAGMENT_SHADER, fs);
+    if (!v || !f) return (glOK = false);
+    const pr = gl.createProgram();
+    gl.attachShader(pr, v); gl.attachShader(pr, f); gl.linkProgram(pr);
+    if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) return (glOK = false);
+    gl.useProgram(pr);
+    gl.disable(gl.DEPTH_TEST);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE);   // additive glow
+    gl.clearColor(0x06 / 255, 0x08 / 255, 0x0f / 255, 1);
+    gl.A = { p: gl.getAttribLocation(pr, 'p'), s: gl.getAttribLocation(pr, 's'),
+             c: gl.getAttribLocation(pr, 'c'), a: gl.getAttribLocation(pr, 'a'),
+             bp: gl.createBuffer(), bs: gl.createBuffer(),
+             ba: gl.createBuffer(), bc: gl.createBuffer() };
+    // cluster labels + nebulae (created once; repositioned every frame)
+    clusters.forEach(c => {
+      if (c.tag) return;
+      let ax = 0, ay = 0, az = 0;
+      c.g.forEach(d => { const w = worldOf(d); ax += w[0]; ay += w[1]; az += w[2]; });
+      c.wx = ax / c.g.length; c.wy = ay / c.g.length; c.wz = az / c.g.length;
+      const col = color[c.g[0].agent] || '#8ea2ff';
+      const tag = document.createElement('div');
+      tag.className = 'tag'; tag.style.color = col;
+      tag.innerHTML = `${esc(c.task)}<span class="n">${c.g.length}</span>`;
+      labelsBox.appendChild(tag); c.tag = tag;
+      const neb = document.createElement('div');
+      neb.className = 'neb';
+      neb.style.background = `radial-gradient(circle, ${col}2b 0%, ${col}0f 45%, transparent 70%)`;
+      labelsBox.appendChild(neb); c.neb = neb;
+    });
+    // team islands: world-space bounding spheres for culling + floating names
+    isleList = Object.entries(isles).map(([team, g]) => {
+      let ax = 0, ay = 0, az = 0;
+      const ws = g.map(d => { const w = worldOf(d); ax += w[0]; ay += w[1]; az += w[2]; return w; });
+      const cx0 = ax / g.length, cy0 = ay / g.length, cz0 = az / g.length;
+      let rad = 0;
+      ws.forEach(w => { rad = Math.max(rad, Math.hypot(w[0] - cx0, w[1] - cy0, w[2] - cz0)); });
+      if (multiIsle && !isleTags[team]) {
+        const tag = document.createElement('div');
+        tag.className = 'isle';
+        tag.textContent = String(team).toUpperCase();
+        labelsBox.appendChild(tag); isleTags[team] = tag;
+      }
+      return { team, g, cx: cx0, cy: cy0, cz: cz0, rad: rad + 0.3, pr: null, off: false };
+    });
+    return (glOK = true);
+  }
+
+  function sizeGL() {
+    glCv.width = W * dpr; glCv.height = H * dpr;
+    glCv.style.width = W + 'px'; glCv.style.height = H + 'px';
+    if (gl) gl.viewport(0, 0, glCv.width, glCv.height);
+    warpCv.width = W; warpCv.height = H;
+    warpCv.style.width = W + 'px'; warpCv.style.height = H + 'px';
+  }
+
+  function flashCaption(text) {
+    if (tourTimer) return;
+    caption.textContent = text;
+    caption.classList.add('show');
+    clearTimeout(capT);
+    capT = setTimeout(() => { if (!tourTimer) caption.classList.remove('show'); }, 2600);
+  }
+
+  function flyTo3(d) {
+    const w = worldOf(d);
+    c3.ttx = w[0]; c3.tty = w[1]; c3.ttz = w[2];
+    c3.tdist = clamp(c3.dist * 0.45, 1.3, 4.4);   // dive at the star
+  }
+  function flyCluster3(c) {
+    c3.ttx = c.wx || 0; c3.tty = c.wy || 0; c3.ttz = c.wz || 0;
+    c3.tdist = clamp(2.3 + c.spread * 3.4, 2.6, 9.5);
+  }
+  function reset3() {
+    c3.tyaw = 0.6; c3.tpitch = 0.42; c3.tdist = 4.6;
+    c3.ttx = c3.tty = c3.ttz = 0;
+  }
+
+  function setMode3(on) {
+    if (on && !initGL()) { flashCaption('WebGL unavailable in this browser — staying flat'); return; }
+    mode3 = on;
+    document.body.classList.toggle('warp3d', on);
+    modeBtn.classList.toggle('on', on);
+    modeBtn.setAttribute('aria-pressed', String(on));
+    modeBtn.textContent = on ? '▦ flat' : '🌀 3D';
+    stopTour();
+    if (on) {
+      sizeGL();
+      if (!reduced) { warpAmt = 1; }              // entry flash: warp in
+      prevErr = 0;
+      flashCaption('🌀 warp engaged — drag to orbit · scroll to dive · click a star · ✦ tour for hyperspace');
+    } else {
+      halo.style.display = 'none';
+      wx.clearRect(0, 0, W, H);
+      clusters.forEach(c => { if (c.tag) c.tag.style.display = 'none'; if (c.neb) c.neb.style.display = 'none'; });
+      Object.values(isleTags).forEach(tag => tag.style.display = 'none');
+    }
+  }
+  modeBtn.onclick = () => setMode3(!mode3);
+
+  function hoverTip(d, x, y, cvEl) {
+    if (d) {
+      tip.innerHTML = `<div class="k">${esc(d.key)}</div>` +
+        `<div class="m">${esc(d.agent)} · ${esc(d.team)}/${esc(d.task)} · ${esc(d.type)} · v${d.version}${d.dim ? ' · ' + esc(d.status) : ''}</div>` +
+        `<div class="t">${esc(d.text)}${d.text.length >= 280 ? '…' : ''}</div>`;
+      tip.style.display = 'block';
+      const pw = tip.offsetWidth, ph = tip.offsetHeight;
+      tip.style.left = Math.min(x + 16, W - pw - 10) + 'px';
+      tip.style.top = Math.min(y + 16, H - ph - 10) + 'px';
+      cvEl.style.cursor = 'pointer';
+    } else { tip.style.display = 'none'; cvEl.style.cursor = 'grab'; }
+  }
+
+  function draw3(t) {
+    // camera chase
+    c3.yaw += (c3.tyaw - c3.yaw) * CHASE3;
+    c3.pitch += (c3.tpitch - c3.pitch) * CHASE3;
+    c3.dist += (c3.tdist - c3.dist) * CHASE3;
+    c3.tx += (c3.ttx - c3.tx) * CHASE3;
+    c3.ty += (c3.tty - c3.ty) * CHASE3;
+    c3.tz += (c3.ttz - c3.tz) * CHASE3;
+    // idle auto-orbit — the galaxy is alive even when untouched
+    if (!reduced && !dragging3 && !tourTimer && t - lastOrbitT > 4000) {
+      c3.yaw += 0.0009; c3.tyaw += 0.0009;
+    }
+    // warp drive follows chase error; arrival rings fire when a flight settles
+    const err = Math.abs(c3.tdist - c3.dist) +
+      (Math.abs(c3.tyaw - c3.yaw) + Math.abs(c3.tpitch - c3.pitch)) * c3.dist +
+      Math.abs(c3.ttx - c3.tx) + Math.abs(c3.tty - c3.ty) + Math.abs(c3.ttz - c3.tz);
+    warpAmt += ((reduced ? 0 : Math.min(1, err * 0.3)) - warpAmt) * (reduced ? 1 : 0.12);
+    const focal = H * 0.9 * (1 + warpAmt * 0.3);   // FOV kick at warp
+
+    if (query !== lastQ3 || serverVer !== lastSV3) {   // cache search hits
+      lastQ3 = query; lastSV3 = serverVer; match3 = new Set();
+      if (query) DATA.forEach(d => { if (matches(d)) match3.add(d.i); });
+    }
+
+    const n = DATA.length, m = dust.length, N = n + m;
+    if (!P3 || P3N !== N) {
+      P3 = new Float32Array(N * 3); SZ3 = new Float32Array(N); AL3 = new Float32Array(N);
+      const C3 = new Float32Array(N * 3);
+      DATA.forEach((d, i) => C3.set(hexRgb(color[d.agent]), i * 3));
+      for (let j = 0; j < m; j++) C3.set([0.55, 0.62, 0.9], (n + j) * 3);
+      gl.bindBuffer(gl.ARRAY_BUFFER, gl.A.bc);
+      gl.bufferData(gl.ARRAY_BUFFER, C3, gl.STATIC_DRAW);
+      P3N = N;
+    }
+
+    // island culling — islands fully off-screen skip projection entirely
+    const culled = new Set();
+    if (multiIsle) for (const isl of isleList) {
+      const pr = project3(isl.cx, isl.cy, isl.cz, focal);
+      isl.pr = pr;
+      const R = pr ? isl.rad * pr[2] : 0;
+      isl.off = !pr || pr[0] + R < -80 || pr[0] - R > W + 80 || pr[1] + R < -80 || pr[1] - R > H + 80;
+      if (isl.off) culled.add(isl.team);
+    }
+
+    for (let i = 0; i < n; i++) {
+      const d = DATA[i];
+      if (culled.has(d.team ?? 'lobby')) { d._sx = -1e4; d._sy = -1e4; AL3[i] = 0; continue; }
+      const w = worldOf(d), pr = project3(w[0], w[1], w[2], focal);
+      if (!pr) { d._sx = -1e4; d._sy = -1e4; AL3[i] = 0; P3[i * 3 + 2] = 0; continue; }
+      d._sx = pr[0]; d._sy = pr[1];
+      P3[i * 3] = pr[0] / W * 2 - 1; P3[i * 3 + 1] = 1 - pr[1] / H * 2; P3[i * 3 + 2] = 0;
+      const vis = visible(d);
+      AL3[i] = vis ? (d.dim ? 0.34 : 1) : 0.05;
+      let px = d.r * pr[2] * 0.006 * (reduced ? 1 : 0.82 + 0.18 * Math.sin(t / 850 + d.phase));
+      if (match3.has(d.i) && !reduced) px *= 1 + 0.22 * Math.sin(t / 240 + d.phase) * rankW(d);
+      if (hover === d) px *= 1.7;
+      if (selected === d) px *= 1.4;
+      SZ3[i] = Math.min(120, px) * dpr;
+    }
+    for (let j = 0; j < m; j++) {
+      const u = dust[j], pr = project3(u[0], u[1], u[2], focal), k = n + j;
+      if (!pr) { AL3[k] = 0; continue; }
+      P3[k * 3] = pr[0] / W * 2 - 1; P3[k * 3 + 1] = 1 - pr[1] / H * 2; P3[k * 3 + 2] = 0;
+      SZ3[k] = Math.max(1, 0.0045 * pr[2]) * dpr;
+      AL3[k] = reduced ? 0.5 : 0.38 + 0.14 * Math.sin(t / 1500 + u[3]);
+    }
+    const attrib = (loc, buf, data, size, dyn) => {
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      if (dyn) gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(loc);
+    };
+    attrib(gl.A.c, gl.A.bc, null, 3, false);
+    attrib(gl.A.p, gl.A.bp, P3, 3, true);
+    attrib(gl.A.s, gl.A.bs, SZ3, 1, true);
+    attrib(gl.A.a, gl.A.ba, AL3, 1, true);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArrays(gl.POINTS, 0, N);
+
+    // hyperspace streaks radiating from the flight target + arrival shockwaves
+    wx.clearRect(0, 0, W, H);
+    if (!reduced) {
+      if (prevErr > 1.0 && err <= 1.0 && rings.length < 6) {
+        const vp = project3(c3.ttx, c3.tty, c3.ttz, focal);
+        if (vp) rings.push({ x: vp[0], y: vp[1], r: 8, a: 0.75 });
+      }
+      if (warpAmt > 0.03) {
+        const vp = project3(c3.ttx, c3.tty, c3.ttz, focal) || [W / 2, H / 2];
+        const maxR = Math.hypot(W, H) / 2, K = Math.floor(40 + 110 * warpAmt);
+        wx.globalCompositeOperation = 'lighter';
+        for (let i = 0; i < K; i++) {
+          const a = Math.random() * Math.PI * 2, dx = Math.cos(a), dy = Math.sin(a);
+          const r0 = Math.random() * maxR, len = (24 + Math.random() * 150) * warpAmt;
+          const x0 = vp[0] + dx * r0, y0 = vp[1] + dy * r0;
+          const al = (0.05 + Math.random() * 0.25) * warpAmt;
+          const g = wx.createLinearGradient(x0, y0, x0 + dx * len, y0 + dy * len);
+          g.addColorStop(0, 'rgba(160,180,255,0)');
+          g.addColorStop(0.7, `rgba(190,205,255,${al.toFixed(3)})`);
+          g.addColorStop(1, 'rgba(255,255,255,0)');
+          wx.strokeStyle = g; wx.lineWidth = 1.2 + Math.random() * 1.4;
+          wx.beginPath(); wx.moveTo(x0, y0); wx.lineTo(x0 + dx * len, y0 + dy * len); wx.stroke();
+        }
+        wx.globalCompositeOperation = 'source-over';
+      }
+      for (let i = rings.length - 1; i >= 0; i--) {
+        const rg = rings[i];
+        rg.r += 3.4; rg.a *= 0.93;
+        if (rg.a < 0.02) { rings.splice(i, 1); continue; }
+        wx.strokeStyle = `rgba(142,162,255,${rg.a.toFixed(3)})`;
+        wx.lineWidth = 2;
+        wx.beginPath(); wx.arc(rg.x, rg.y, rg.r, 0, 7); wx.stroke();
+        wx.strokeStyle = `rgba(255,255,255,${(rg.a * 0.5).toFixed(3)})`;
+        wx.lineWidth = 1;
+        wx.beginPath(); wx.arc(rg.x, rg.y, rg.r * 0.82, 0, 7); wx.stroke();
+      }
+    }
+    prevErr = err;
+
+    // constellation labels + nebulae ride the projection
+    for (const c of clusters) {
+      const pr = project3(c.wx, c.wy, c.wz, focal);
+      if (!pr) { c.tag.style.display = 'none'; c.neb.style.display = 'none'; continue; }
+      const lively = c.g.some(visible);
+      c.tag.style.display = c.neb.style.display = 'block';
+      c.tag.style.opacity = lively ? '1' : '0.22';
+      c.tag.style.left = pr[0].toFixed(1) + 'px';
+      c.tag.style.top = pr[1].toFixed(1) + 'px';
+      const dia = Math.min(900, (c.spread * S3 * 2.4 + 0.4) * pr[2]);
+      c.neb.style.opacity = lively ? '0.55' : '0.15';
+      c.neb.style.width = c.neb.style.height = dia.toFixed(0) + 'px';
+      c.neb.style.left = pr[0].toFixed(1) + 'px';
+      c.neb.style.top = pr[1].toFixed(1) + 'px';
+    }
+
+    // team island names ride their bounding spheres (hidden when solo-filtered out)
+    if (multiIsle) for (const isl of isleList) {
+      const tag = isleTags[isl.team];
+      if (!tag) continue;
+      const lively = !isl.off && isl.g.some(visible);
+      if (!lively || !isl.pr) { tag.style.display = 'none'; continue; }
+      tag.style.display = 'block';
+      tag.style.left = isl.pr[0].toFixed(1) + 'px';
+      tag.style.top = (isl.pr[1] - isl.rad * isl.pr[2] - 18).toFixed(1) + 'px';
+    }
+
+    // selection halo tracks the star
+    if (selected) {
+      const w = worldOf(selected), pr = project3(w[0], w[1], w[2], focal);
+      if (pr) {
+        const dia = Math.min(220, selected.r * pr[2] * 0.006 * 2 + 30);
+        halo.style.display = 'block';
+        halo.style.width = halo.style.height = dia.toFixed(0) + 'px';
+        halo.style.left = (pr[0] - dia / 2).toFixed(1) + 'px';
+        halo.style.top = (pr[1] - dia / 2).toFixed(1) + 'px';
+        halo.style.borderColor = color[selected.agent] || 'var(--accent)';
+      } else halo.style.display = 'none';
+    } else halo.style.display = 'none';
+  }
+
+  // 3D input: drag orbits, wheel dives, click flies, double-click resets
+  glCv.addEventListener('pointerdown', e => {
+    stopTour();
+    dragging3 = true; moved3 = false; lx3 = e.clientX; ly3 = e.clientY;
+    glCv.classList.add('dragging'); glCv.setPointerCapture(e.pointerId);
+  });
+  glCv.addEventListener('pointerup', e => {
+    dragging3 = false; glCv.classList.remove('dragging');
+    if (!moved3) {
+      const d = pick(e.clientX, e.clientY);
+      if (d) { selected = d; openDrawer(d); flyTo3(d); }
+      else { selected = null; closeDrawer(); }
+    }
+  });
+  glCv.addEventListener('pointermove', e => {
+    if (dragging3) {
+      const dx = e.clientX - lx3, dy = e.clientY - ly3;
+      if (Math.abs(dx) + Math.abs(dy) > 3) moved3 = true;
+      c3.tyaw -= dx * 0.0052;
+      c3.tpitch = clamp(c3.tpitch + dy * 0.0042, -1.35, 1.35);
+      lastOrbitT = performance.now();
+      lx3 = e.clientX; ly3 = e.clientY;
+      tip.style.display = 'none'; hover = null;
+      return;
+    }
+    hover = pick(e.clientX, e.clientY);
+    hoverTip(hover, e.clientX, e.clientY, glCv);
+  });
+  glCv.addEventListener('wheel', e => {
+    e.preventDefault(); stopTour();
+    c3.tdist = clamp(c3.tdist * Math.exp(e.deltaY * 0.0012), 1.4, 12);
+  }, { passive: false });
+  glCv.addEventListener('dblclick', () => {
+    stopTour(); selected = null; closeDrawer(); reset3();
+  });
+
+  addEventListener('resize', () => { resize(); makeBg(); fitTargets(); snap(); if (mode3) sizeGL(); });
+  resize(); makeBg(); fitTargets(); snap();
+  // 3D is the default view — warp in unless ?flat is in the URL or WebGL is missing
+  let flat = false;
+  try { flat = new URLSearchParams(location.search).has('flat'); } catch (e) { flat = false; }
+  if (!flat) setMode3(true);
+  requestAnimationFrame(draw);
+})();
+</script>
