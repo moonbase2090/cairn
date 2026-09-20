@@ -19,7 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-urls = { Homepage = "https://github.com/mb2090/cairn" }
+urls = { Homepage = "https://github.com/moonbase2090/cairn" }
 dependencies = [
     "numpy>=1.26",
     "sqlite-vec>=0.1.0",
