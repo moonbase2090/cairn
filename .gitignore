@@ -4,3 +4,8 @@ __pycache__/
 dist/
 build/
 .cairn/
+website/node_modules/
+website/dist/
+website/
+src-repo/
+*.zip
