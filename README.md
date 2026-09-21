@@ -117,5 +117,6 @@ Old vaults migrate on open (rowids preserved) after a `vault.db.pre2.bak` backup
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MPL-2.0 — see [LICENSE](LICENSE). File-level copyleft: improve cairn's files,
+share the improvements; tools that *use* cairn stay yours.
 
