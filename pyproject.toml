@@ -7,7 +7,7 @@ name = "cairn"
 version = "0.3.2"
 description = "Local-first shared memory for CLI agents — six verbs, keyless, git-syncable"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "MPL-2.0" }
 requires-python = ">=3.11"
 authors = [{ name = "Brandan Majeske" }]
 keywords = ["memory", "agents", "vector-search", "cli", "rag"]
@@ -15,7 +15,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
