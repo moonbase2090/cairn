@@ -1,0 +1,24 @@
+name: semver
+# Enforces conventional-commit PR titles + single-step semver bumps (see
+# .github/scripts/semver_check.py and BRANCHING.md). Required check on
+# both main and develop via branch rulesets.
+on:
+  pull_request:
+    branches: [main, develop]
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate title and version bump
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: python3 .github/scripts/semver_check.py
