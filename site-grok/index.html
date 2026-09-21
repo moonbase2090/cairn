@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cairn — three homepage directions</title>
+<link rel="icon" href="../cairn-brand/assets/favicon-32.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --void:#0A0C11; --basalt:#151820; --ridge:#232730;
+    --stone-700:#3C3730; --stone-500:#6B6259; --stone-300:#A79C90; --stone-100:#D6CDC2;
+    --starlight:#F4F0E9; --ember:#D96A3C; --ember-glow:#F0A468;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--void);color:var(--starlight);font-family:"IBM Plex Sans",system-ui,sans-serif}
+  a{color:var(--ember)} a:hover{color:var(--ember-glow)}
+  .wrap{max-width:1080px;margin:0 auto;padding:56px 24px 80px}
+  header{display:flex;align-items:center;gap:14px;margin-bottom:40px}
+  header img{height:40px;width:40px}
+  .word{font-family:"IBM Plex Mono",monospace;font-weight:600;letter-spacing:-.045em;font-size:22px}
+  .kicker{font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--ember);margin:0 0 10px}
+  h1{font-size:clamp(28px,4vw,40px);font-weight:600;letter-spacing:-.02em;margin:0 0 12px;line-height:1.15}
+  .lede{color:var(--stone-300);max-width:62ch;line-height:1.6;margin:0 0 36px}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  a.opt{display:flex;flex-direction:column;gap:10px;padding:22px 20px 20px;background:var(--basalt);border:1px solid var(--ridge);border-radius:4px;text-decoration:none;color:inherit;min-height:280px}
+  a.opt:hover{border-color:var(--ember)}
+  a.opt:focus-visible{outline:2px solid var(--ember);outline-offset:3px}
+  .num{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--ember);letter-spacing:.08em}
+  a.opt h2{font-family:"IBM Plex Mono",monospace;font-weight:600;letter-spacing:-.045em;font-size:22px;margin:0}
+  a.opt p{margin:0;color:var(--stone-300);font-size:14.5px;line-height:1.55;flex:1}
+  .meta{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--stone-500)}
+  footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--ridge);font-size:13px;color:var(--stone-500);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  @media (max-width:860px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <img src="../cairn-brand/assets/cairn-mark.svg" alt="">
+    <span class="word">cairn</span>
+  </header>
+  <p class="kicker">Homepage directions · not the Spark set</p>
+  <h1>Three brand sites. Same vault, three jobs.</h1>
+  <p class="lede">Built from the brand sheet (void, basalt, ember at ~3%) and from how CLI products like Bun, Atuin, and Starship sell: install as a verb, the product as the hero, a second door for agents. These are not the terminal / galaxy / readme options in <a href="../site-options/">site-options</a>.</p>
+  <div class="grid">
+    <a class="opt" href="vault.html">
+      <span class="num">01 / vault</span>
+      <h2>the product</h2>
+      <p>Wide split. A CSS vault inspector is the hero — memories, seats, versions — not ASCII art and not a starfield.</p>
+      <span class="meta">Linear pattern · product shot</span>
+    </a>
+    <a class="opt" href="install.html">
+      <span class="num">02 / install</span>
+      <h2>the command</h2>
+      <p>Bun / Atuin pattern. Copy the install, switch CLI · MCP · AGENTS.md, then a comparison table. Human / agent toggle.</p>
+      <span class="meta">Install CTA · two front doors</span>
+    </a>
+    <a class="opt" href="trail.html">
+      <span class="num">03 / trail</span>
+      <h2>the problem</h2>
+      <p>Editorial trail. Ember line, stacked stones as version history, problem-oriented copy. Type carries the page.</p>
+      <span class="meta">Field guide · no cards grid</span>
+    </a>
+  </div>
+  <footer>
+    <span>brand: <a href="../cairn-brand/brand-sheet.html">brand-sheet.html</a></span>
+    <span>spark set: <a href="../site-options/">site-options/</a></span>
+  </footer>
+</div>
+</body>
+</html>
