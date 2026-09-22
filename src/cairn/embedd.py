@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fcntl
 import json
 import os
 import socket
@@ -22,6 +23,7 @@ import struct
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -116,28 +118,46 @@ def ping(path: Path | None = None) -> bool:
         return False
 
 
+def lock_path(path: Path) -> Path:
+    return path.with_name(path.name + ".lock")
+
+
+@contextmanager
+def spawn_lock(path: Path):
+    """Exclusive lock so two clients cannot unlink each other's socket."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path(path), "a")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
 def spawn(spec: str, path: Path | None = None, idle: int = DEFAULT_IDLE) -> None:
     """Start cairn-embedd in a new session if the socket is dead."""
     path = path or sock_path()
-    if ping(path):
-        return
-    cmd = [sys.executable, "-m", "cairn.embedd", "--spec", spec,
-           "--sock", str(path), "--idle", str(idle)]
-    import subprocess
-    subprocess.Popen(
-        cmd,
-        start_new_session=True,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-    )
-    deadline = time.time() + 30
-    while time.time() < deadline:
+    with spawn_lock(path):
         if ping(path):
             return
-        time.sleep(0.1)
-    raise RuntimeError(f"cairn-embedd did not come up at {path}")
+        cmd = [sys.executable, "-m", "cairn.embedd", "--spec", spec,
+               "--sock", str(path), "--idle", str(idle)]
+        import subprocess
+        subprocess.Popen(
+            cmd,
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if ping(path):
+                return
+            time.sleep(0.1)
+        raise RuntimeError(f"cairn-embedd did not come up at {path}")
 
 
 def _handle(conn: socket.socket, embedder, lock: threading.Lock, last: list) -> None:

@@ -49,7 +49,8 @@ def test_reads_resolve_everywhere(tmp_path):
     from cairn.galaxy import to_points
 
     pts = to_points(c)
-    assert any(p.get("full") == BIG + " zebra" for p in pts)
+    assert pts and pts[0]["text"].startswith("# Runbook")
+    assert "full" not in pts[0]
     pack = c.export()["memories"][0]
     assert pack["content"] == BIG + " zebra" and "content_ref" not in pack
 
@@ -65,6 +66,16 @@ def test_shared_content_single_file_refcounted(tmp_path):
     assert c.get_memory(b.key).content == BIG
     c.vault.delete_by_keys([b.key])
     assert not p.exists()
+
+
+def test_gc_keeps_live_spilled_docs(tmp_path):
+    c = make_client(tmp_path / "v.db")
+    r = c.store_memory(BIG, team_id="t", task_id="k")
+    p = c.vault.doc_path(c.vault.get(r.key)["content_ref"])
+    assert p.exists()
+    assert c.gc(dry_run=False)["orphan_docs"] == 0
+    assert p.exists()
+    assert c.get_memory(r.key).content == BIG
 
 
 def test_gc_sweeps_stray_docs(tmp_path):

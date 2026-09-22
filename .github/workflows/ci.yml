@@ -1,0 +1,29 @@
+name: CI
+
+# Same file for GitHub Actions and Local Actions (act).
+# Job key agents pass to `local-actions run --job`: build
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project and dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: pytest
+        run: pytest -q
