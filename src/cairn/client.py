@@ -27,6 +27,8 @@ from .store import Vault
 
 NEAR_DUP_SIM = 0.95
 OVERSAMPLE = 20
+EXPORT_CAP = 100_000
+GC_CAP = 10_000
 
 
 def _decode_embedding(raw) -> np.ndarray:
@@ -117,18 +119,19 @@ class CairnClient:
             key = build_key(self.agent_id, task_id, digest, version)
             summary = (content[:200] or "").strip()
             vec = np.asarray(vector, dtype=np.float32) if vector is not None else self._embed_one(content)
-            self.vault.insert(
-                {"key": key, "canonical_id": canonical_id, "content": content,
-                 "content_summary": summary, "memory_type": memory_type,
-                 "status": Status.ACTIVE.value, "origin": origin, "task_id": task_id,
-                 "agent_id": self.agent_id, "team_id": team_id, "version": version,
-                 "created_at": now, "updated_at": now, "expires_at": expires_at,
-                 "archived_at": None, "supersedes": supersedes_key, "parent_key": None,
-                 "provenance": provenance, "confidence": confidence,
-                 "content_hash": f"sha256:{digest}"},
-                vec,
-            )
-            self.vault.set_status(supersedes_key, Status.SUPERSEDED.value, now)
+            with self.vault.transaction():
+                self.vault.insert(
+                    {"key": key, "canonical_id": canonical_id, "content": content,
+                     "content_summary": summary, "memory_type": memory_type,
+                     "status": Status.ACTIVE.value, "origin": origin, "task_id": task_id,
+                     "agent_id": self.agent_id, "team_id": team_id, "version": version,
+                     "created_at": now, "updated_at": now, "expires_at": expires_at,
+                     "archived_at": None, "supersedes": supersedes_key, "parent_key": None,
+                     "provenance": provenance, "confidence": confidence,
+                     "content_hash": f"sha256:{digest}"},
+                    vec,
+                )
+                self.vault.set_status(supersedes_key, Status.SUPERSEDED.value, now)
             self._audit("store", {"key": key, "result": "superseded", "supersedes": supersedes_key})
             return StoreResult(key=key, version=version, action=StoreAction.SUPERSEDED, canonical_id=canonical_id)
 
@@ -168,11 +171,7 @@ class CairnClient:
     def _near_duplicates(self, vec: np.ndarray, task_id: str, top: int) -> list[MemoryRecord]:
         now = now_epoch()
         out: list[MemoryRecord] = []
-        for row, dist in self.vault.knn(vec, OVERSAMPLE):
-            if row["task_id"] != task_id:
-                continue
-            if row["expires_at"] is not None and row["expires_at"] <= now:
-                continue
+        for row, dist in self.vault.knn(vec, OVERSAMPLE, filters={"task_id": task_id}, now=now):
             sim = 1.0 - dist
             if sim >= NEAR_DUP_SIM:
                 out.append(self._record(row, sim))
@@ -187,16 +186,11 @@ class CairnClient:
         filters = filters or {}
         now = now_epoch()
         qvec = self._embed_one(query)
+        meta = {k: filters[k] for k in ("task_id", "memory_type", "team_id") if filters.get(k) is not None}
         best: dict[str, tuple[tuple[int, int], MemoryRecord]] = {}
-        for row, dist in self.vault.knn(qvec, max(top_k * 4, OVERSAMPLE)):
-            if row["expires_at"] is not None and row["expires_at"] <= now:
-                continue
-            if "task_id" in filters and row["task_id"] != filters["task_id"]:
-                continue
-            if "memory_type" in filters and row["memory_type"] != filters["memory_type"]:
-                continue
-            if "team_id" in filters and row["team_id"] != filters["team_id"]:
-                continue
+        for row, dist in self.vault.knn(
+            qvec, max(top_k * 4, OVERSAMPLE), filters=meta or None, now=now
+        ):
             sim = 1.0 - dist
             if min_similarity is not None and sim < min_similarity:
                 continue
@@ -255,20 +249,20 @@ class CairnClient:
             return {"key": key, "status": "active", "note": "already active"}
         now = now_epoch()
         retired: list[str] = []
-        if row["status"] == Status.SUPERSEDED.value:
-            # undoing a correction: the active rival(s) that replaced this memory
-            # were the mistake — archive them so exactly one version stays active
-            rivals = self.vault.scan(
-                "canonical_id=? AND status=? AND key!=?",
-                (row["canonical_id"], Status.ACTIVE.value, key), 100)
-            for r in rivals:
-                self.vault.set_status(r["key"], Status.ARCHIVED.value, now, archived_at=now)
-                retired.append(r["key"])
-        self.vault.conn.execute(
-            "UPDATE memories SET status=?, updated_at=?, archived_at=NULL WHERE key=?",
-            (Status.ACTIVE.value, now, key),
-        )
-        self.vault.conn.commit()
+        with self.vault.transaction():
+            if row["status"] == Status.SUPERSEDED.value:
+                # undoing a correction: the active rival(s) that replaced this memory
+                # were the mistake — archive them so exactly one version stays active
+                rivals = self.vault.scan(
+                    "canonical_id=? AND status=? AND key!=?",
+                    (row["canonical_id"], Status.ACTIVE.value, key), 100)
+                for r in rivals:
+                    self.vault.set_status(r["key"], Status.ARCHIVED.value, now, archived_at=now)
+                    retired.append(r["key"])
+            self.vault.conn.execute(
+                "UPDATE memories SET status=?, updated_at=?, archived_at=NULL WHERE key=?",
+                (Status.ACTIVE.value, now, key),
+            )
         self._audit("restore", {"key": key, "retired": retired})
         return {"key": key, "status": "active", "retired": retired}
 
@@ -286,11 +280,15 @@ class CairnClient:
         """
         now = now_epoch()
         total = self.vault.count()
-        promote = [
-            r["key"] for r in self.vault.scan("status=? AND updated_at<=?", (Status.SUPERSEDED.value, now - 7 * 86400), 10000)
-        ]
-        doomed = {r["key"] for r in self.vault.scan("status=? AND archived_at IS NOT NULL AND archived_at<=?", (Status.ARCHIVED.value, now - 30 * 86400), 10000)}
-        doomed |= {r["key"] for r in self.vault.scan("expires_at IS NOT NULL AND expires_at<=?", (now,), 10000)}
+        promote_rows = self._capped(
+            "status=? AND updated_at<=?", (Status.SUPERSEDED.value, now - 7 * 86400), "promote")
+        archived_rows = self._capped(
+            "status=? AND archived_at IS NOT NULL AND archived_at<=?",
+            (Status.ARCHIVED.value, now - 30 * 86400), "archived")
+        expired_rows = self._capped(
+            "expires_at IS NOT NULL AND expires_at<=?", (now,), "expired")
+        promote = [r["key"] for r in promote_rows]
+        doomed = {r["key"] for r in archived_rows} | {r["key"] for r in expired_rows}
         breaker = len(doomed) > max(10, int(total * 0.05))
         result: dict = {"promoted": len(promote), "to_delete": len(doomed),
                         "dry_run": dry_run, "breaker_tripped": breaker}
@@ -300,15 +298,24 @@ class CairnClient:
         if breaker:
             result["aborted"] = True
             return result
-        for k in promote:
-            self.vault.set_status(k, Status.ARCHIVED.value, now, archived_at=now)
-        deleted = self.vault.delete_by_keys(sorted(doomed))
+        with self.vault.transaction():
+            for k in promote:
+                self.vault.set_status(k, Status.ARCHIVED.value, now, archived_at=now)
+            deleted = self.vault.delete_by_keys(sorted(doomed))
         orphans = self.vault.sweep_orphan_docs()
         self._audit("gc", {"promoted": len(promote), "deleted": deleted,
                            "orphan_docs": orphans})
         result["deleted"] = deleted
         result["orphan_docs"] = orphans
         return result
+
+    def _capped(self, where: str, args: tuple, label: str) -> list:
+        rows = self.vault.scan(where, args, GC_CAP + 1)
+        if len(rows) > GC_CAP:
+            raise RuntimeError(
+                f"gc {label} hit the {GC_CAP} row cap; refusing a partial sweep"
+            )
+        return rows
 
     # -- stats -----------------------------------------------------------------
     def stats(self) -> dict:
@@ -323,7 +330,11 @@ class CairnClient:
     # -- sync packs (git-native team mode) -----------------------------------------
     def export(self, since: int | None = None) -> dict:
         where, args = ("", ()) if since is None else ("updated_at>=?", (since,))
-        rows = self.vault.scan(where, args, 100000)
+        rows = self.vault.scan(where, args, EXPORT_CAP + 1, with_embedding=True)
+        if len(rows) > EXPORT_CAP:
+            raise RuntimeError(
+                f"export hit the {EXPORT_CAP} row cap; refusing a partial pack"
+            )
         mems = []
         for r in rows:
             d = dict(r)
@@ -347,12 +358,13 @@ class CairnClient:
                 f"{self.embedder.name}/{self.embedder.dims}d — refusing cross-space import"
             )
         added, skipped = 0, 0
-        for m in pack.get("memories", []):
-            if self.vault.get(m["key"]) is not None:
-                skipped += 1
-                continue
-            vec = _decode_embedding(m.pop("embedding"))
-            self.vault.insert(m, vec)
-            added += 1
+        with self.vault.transaction():
+            for m in pack.get("memories", []):
+                if self.vault.get(m["key"]) is not None:
+                    skipped += 1
+                    continue
+                vec = _decode_embedding(m.pop("embedding"))
+                self.vault.insert(m, vec)
+                added += 1
         self._audit("import", {"added": added, "skipped": skipped})
         return {"added": added, "skipped": skipped}
