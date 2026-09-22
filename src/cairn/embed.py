@@ -1,8 +1,8 @@
 """Pluggable embedders. Default is offline + keyless; upgrades are opt-in.
 
-- HashEmbedder: deterministic token-hash projection. Zero deps beyond numpy,
-  zero downloads — exact matches score 1.0, paraphrases score high. Good enough
-  for tests, demos, and small vaults; swap for fastembed/ollama when quality matters.
+- HashEmbedder: deterministic feature hash (token + character trigram).
+  Zero deps beyond numpy, zero downloads. Exact matches score 1.0.
+  Name is hash-v2. A hash-v1 vault does not open: the spaces differ.
 - FastEmbedder: `pip install cairn[embed]`, ONNX BGE model, still keyless/local.
   CLI/MCP prefer `cairn-embedd` (one ONNX process) and fall back in-process.
 - OllamaEmbedder: local Ollama server (`ollama pull mxbai-embed-large`), keyless.
@@ -31,28 +31,38 @@ class Embedder:
 
 
 class HashEmbedder(Embedder):
-    """Deterministic offline embedder — no downloads, no keys, no server."""
+    """Deterministic offline embedder — no downloads, no keys, no server.
 
-    name = "hash-v1"
+    Feature hashing: each token and character trigram adds +1 or -1 into one
+    bin. This is hash-v2. Do not compare these vectors with hash-v1 vaults.
+    """
+
+    name = "hash-v2"
 
     def __init__(self, dims: int = 384):
         self.dims = dims
 
+    def _accumulate(self, vec: np.ndarray, blob: bytes) -> None:
+        digest = hashlib.blake2s(blob, digest_size=8).digest()
+        idx = int.from_bytes(digest[:4], "little") % self.dims
+        vec[idx] += 1.0 if digest[4] & 1 else -1.0
+
     def _one(self, text: str) -> np.ndarray:
-        vec = np.zeros(self.dims, dtype=np.float64)
-        tokens = text.strip().lower().split()
-        # character trigrams add robustness for short strings / paraphrase
-        grams = ["".join(t) for t in zip(*[text.strip().lower()[i:] for i in range(3)])]
-        for tok in tokens + grams:
-            seed = int(hashlib.sha256(tok.encode()).hexdigest()[:8], 16)
-            rng = np.random.default_rng(seed)
-            vec += rng.standard_normal(self.dims)
-        norm = np.linalg.norm(vec)
+        vec = np.zeros(self.dims, dtype=np.float32)
+        raw = text.strip().lower()
+        for tok in raw.split():
+            self._accumulate(vec, tok.encode())
+        encoded = raw.encode()
+        for i in range(max(0, len(encoded) - 2)):
+            self._accumulate(vec, encoded[i:i + 3])
+        norm = float(np.linalg.norm(vec))
         if norm > 0:
             vec /= norm
-        return vec.astype(np.float32)
+        return vec
 
     def embed(self, texts: list[str]) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, self.dims), dtype=np.float32)
         return np.stack([self._one(t) for t in texts]).astype(np.float32)
 
 
@@ -93,18 +103,21 @@ class OllamaEmbedder(Embedder):
         self.dims = int(dims) if dims else len(self.embed(["probe"])[0])
 
     def embed(self, texts: list[str]) -> np.ndarray:
-        out = []
-        for t in texts:
-            req = urllib.request.Request(
-                f"{self.host}/api/embed",
-                data=json.dumps({"model": self.model_id, "input": t}).encode(),
-                headers={"Content-Type": "application/json"},
+        if not texts:
+            return np.zeros((0, self.dims or 0), dtype=np.float32)
+        req = urllib.request.Request(
+            f"{self.host}/api/embed",
+            data=json.dumps({"model": self.model_id, "input": list(texts)}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            body = json.load(resp)
+        rows = body["embeddings"]
+        if len(rows) != len(texts):
+            raise RuntimeError(
+                f"ollama returned {len(rows)} vectors for {len(texts)} inputs"
             )
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                body = json.load(resp)
-            vec = np.asarray(body["embeddings"][0], dtype=np.float32)
-            out.append(vec)
-        arr = np.stack(out)
+        arr = np.stack([np.asarray(v, dtype=np.float32) for v in rows])
         norms = np.linalg.norm(arr, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         return (arr / norms).astype(np.float32)
@@ -151,8 +164,11 @@ def get_embedder(spec: str, dims: int | None = None, skip_socket: bool = False) 
                 se = SocketEmbedder(spec, path=path, dims=dims)
                 se.info()
                 return se
-            except Exception:
-                pass
+            except Exception as exc:
+                import sys
+                sys.stderr.write(
+                    f"cairn-embedd unavailable ({exc}); loading fastembed in-process\n"
+                )
         model = spec.split(":", 1)[1] if ":" in spec else "BAAI/bge-small-en-v1.5"
         return FastEmbedder(model, dims=dims)
     if spec == "ollama" or spec.startswith("ollama:"):
