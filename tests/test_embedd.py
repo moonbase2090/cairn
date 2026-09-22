@@ -2,6 +2,7 @@
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import numpy as np
 import pytest
 
 from cairn.embed import HashEmbedder
-from cairn.embedd import SocketEmbedder, ping
+from cairn.embedd import SocketEmbedder, ping, spawn_lock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -55,7 +56,7 @@ def test_socket_embed_matches_local_hash(embedd_hash):
     assert a.shape == b.shape == (2, 384)
     assert np.allclose(a, b, atol=1e-6)
     info = remote.info()
-    assert info["name"] == "hash-v1" and info["dims"] == 384
+    assert info["name"] == "hash-v2" and info["dims"] == 384
 
 
 def test_ping_false_when_missing(tmp_path):
@@ -82,3 +83,22 @@ def test_idle_exit(tmp_path):
         time.sleep(0.1)
     assert proc.poll() is not None, "embedd should idle-exit"
     assert ping(sock) is False
+
+
+def test_spawn_lock_is_exclusive(tmp_path):
+    sock = tmp_path / "embed.sock"
+    order = []
+
+    def hold():
+        with spawn_lock(sock):
+            order.append("hold")
+            time.sleep(0.2)
+            order.append("release")
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    time.sleep(0.05)
+    with spawn_lock(sock):
+        order.append("next")
+    thread.join()
+    assert order == ["hold", "release", "next"]

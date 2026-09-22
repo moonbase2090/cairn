@@ -73,7 +73,7 @@ Only `cairn serve` stays CLI-only.
 
 | Embedder | Setup | Dims | Related-pair sim | Notes |
 |---|---|---|---|---|
-| `hash` (default) | nothing | 384 | 0.33 | offline, zero downloads. Coarse — fine for tests/demos |
+| `hash` (default) | nothing | 384 | coarse | offline feature hash, `hash-v2`. A `hash-v1` vault does not open |
 | `fastembed` | `pip install -e ".[embed]"`, `init --embed-spec fastembed` | 384 | **0.80** | local ONNX BGE-small. CLI/MCP share one process via `cairn-embedd` (idle-exit 15m, `CAIRN_EMBEDD=0` forces in-process) |
 | `ollama[:model]` | `ollama pull mxbai-embed-large`, `--embed ollama` | 1024 | **0.75** | best separation (unrelated pairs score 0.31 vs 0.42/0.0) |
 
@@ -82,6 +82,7 @@ Measured 2026-09-18 on `Q2 revenue grew…` / `how did Q2 revenue do?`; near-dup
 no false block, explicit `--supersedes` still works). Thresholds are
 embedder-sensitive by nature; 0.95 stays the default. Pinned in
 `tests/test_real_embedders.py` (auto-skips when a backend is absent).
+`hash-v2` is a feature hash. It does not open a `hash-v1` vault.
 
 Each vault is tagged `embed_model+dims` at init; cross-space open/import is refused.
 
@@ -114,6 +115,24 @@ one file (refcounted — deleted with its last row, plus `gc` sweeps strays).
 Packs carry full content, so `export`/`import` and git-sync are unchanged.
 Doc files are hash-verified on read; corruption raises loudly, never silently.
 Old vaults migrate on open (rowids preserved) after a `vault.db.pre2.bak` backup.
+
+## CI
+
+`.github/workflows/ci.yml` job **`build`** installs the package and runs `pytest`.
+GitHub Actions runs it on pull requests to `main` and `develop`. Local Actions
+runs the same file. A local pass is `status: succeeded` and `exit_code: 0`.
+
+```bash
+# once, from the LocalActions checkout — pass this cairn checkout as --root
+scripts/install.sh cairn --root /path/to/cairn
+systemctl --user enable --now local-actionsd-cairn.service
+
+# from the cairn checkout
+export LOCAL_ACTIONS_SOCKET=$PWD/.local-actions/daemon.sock
+local-actions doctor
+local-actions run --event pull_request --job build
+local-actions status <run-id>
+```
 
 ## License
 

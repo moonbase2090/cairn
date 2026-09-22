@@ -7,6 +7,7 @@ spaces are never mixed.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -76,6 +77,8 @@ COLUMNS = [
     "created_at", "updated_at", "expires_at", "archived_at", "supersedes",
     "parent_key",     "provenance", "confidence", "content_hash", "embedding",
 ]
+# Reads that do not score vectors skip the embedding blob.
+READ_COLUMNS = [c for c in COLUMNS if c != "embedding"]
 
 DEFAULT_DOC_THRESHOLD = 2048  # memories larger than this spill content to docs/
 
@@ -158,6 +161,8 @@ class Vault:
             self._doc_threshold = int(self._get_meta("doc_threshold") or DEFAULT_DOC_THRESHOLD)
         except ValueError:
             self._doc_threshold = DEFAULT_DOC_THRESHOLD
+        self._txn = False
+        self._vec_ok = self._vec_index_ok()
 
     # -- content-addressed docs -------------------------------------------
     # Memories over the threshold spill full text to docs/<aa>/<bb>/<hash>.md
@@ -211,18 +216,28 @@ class Vault:
             return False
 
     def sweep_orphan_docs(self) -> int:
-        """Remove doc files with zero referencing rows (crash orphans, etc)."""
+        """Remove doc files with zero referencing rows (crash orphans, etc).
+
+        Filenames are the bare hex. Rows store ``sha256:<hex>``. Compare stems
+        to the hex half, or every live file looks orphaned.
+        """
         removed = 0
         if not self.docs_root.is_dir():
             return 0
+        live = {
+            (r["content_hash"] or "").split(":", 1)[-1]
+            for r in self.conn.execute(
+                "SELECT DISTINCT content_hash FROM memories WHERE content_ref IS NOT NULL"
+            )
+        }
         for p in sorted(self.docs_root.rglob("*.md")):
-            h = p.stem
-            if not self.content_refcount(h):
-                try:
-                    p.unlink()
-                    removed += 1
-                except OSError:
-                    pass
+            if p.stem in live:
+                continue
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                pass
         return removed
 
     def doc_stats(self) -> dict:
@@ -365,6 +380,87 @@ class Vault:
     def _set_meta(self, k: str, v: str) -> None:
         self.conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES(?, ?)", (k, v))
 
+    def _vec_table(self) -> bool:
+        if not self._vec:
+            return False
+        row = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mem_vec'"
+        ).fetchone()
+        return row is not None
+
+    def _vec_index_ok(self) -> bool:
+        """True when mem_vec has one row per memory. A hole means brute force."""
+        if not self._vec_table():
+            return False
+        try:
+            n_mem = self.conn.execute("SELECT COUNT(*) c FROM memories").fetchone()["c"]
+            n_vec = self.conn.execute("SELECT COUNT(*) c FROM mem_vec").fetchone()["c"]
+        except sqlite3.Error:
+            return False
+        return n_mem == n_vec
+
+    def vec_status(self) -> dict:
+        rows = None
+        if self._vec_table():
+            try:
+                rows = self.conn.execute("SELECT COUNT(*) c FROM mem_vec").fetchone()["c"]
+            except sqlite3.Error:
+                rows = None
+        return {
+            "vec_extension": self._vec,
+            "vec_rows": rows,
+            "vec_in_sync": self._vec_index_ok(),
+        }
+
+    def rebuild_vec(self) -> dict:
+        """Rebuild mem_vec from stored blobs. Searches use brute force until this matches."""
+        if not self._vec:
+            raise RuntimeError("sqlite-vec is not loaded")
+        dims = int(self._get_meta("dims") or 0)
+        if dims <= 0:
+            raise RuntimeError("vault has no dims meta; refusing to rebuild mem_vec")
+        import sqlite_vec as _sv
+
+        rows = self.conn.execute("SELECT rowid, embedding FROM memories").fetchall()
+        try:
+            self.conn.execute("DROP TABLE IF EXISTS mem_vec")
+            self.conn.execute(
+                f"CREATE VIRTUAL TABLE mem_vec USING vec0(embedding float[{dims}])"
+            )
+            for r in rows:
+                vec = np.frombuffer(r["embedding"], dtype=np.float32)
+                if vec.size != dims:
+                    raise RuntimeError(
+                        f"row {r['rowid']} embedding is {vec.size}d, vault is {dims}d"
+                    )
+                self.conn.execute(
+                    "INSERT INTO mem_vec(rowid, embedding) VALUES(?, ?)",
+                    (r["rowid"], _sv.serialize_float32(vec.tolist())),
+                )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            self._vec_ok = False
+            raise
+        self._vec_ok = True
+        return {"rebuilt": len(rows)}
+
+    @contextmanager
+    def transaction(self):
+        """One commit for the block. Nested calls join the open transaction."""
+        if self._txn:
+            yield
+            return
+        self._txn = True
+        try:
+            yield
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self._txn = False
+
     # -- writes ------------------------------------------------------------
     def insert(self, rec: dict, vector: np.ndarray) -> int:
         # rec["content"] is ALWAYS full text at this boundary (client, import);
@@ -396,67 +492,75 @@ class Vault:
             else:
                 vals.append(rec[c])
         cols = [c for c in COLUMNS if c != "rowid"]
-        cur = self.conn.execute(
-            f"INSERT INTO memories({','.join(cols)}) VALUES({','.join('?' for _ in cols)})",
-            vals,
-        )
-        rowid = cur.lastrowid
-        if ref is not None and self._fts:
-            # trigger skips NULL-content rows (WHEN guard) — index explicitly
-            try:
-                self.conn.execute(
-                    "INSERT INTO mem_fts(rowid, key, content) VALUES(?, ?, ?)",
-                    (rowid, rec["key"], text),
-                )
-            except Exception:
-                pass
-        if self._vec:
-            try:
+        try:
+            cur = self.conn.execute(
+                f"INSERT INTO memories({','.join(cols)}) VALUES({','.join('?' for _ in cols)})",
+                vals,
+            )
+            rowid = cur.lastrowid
+            if ref is not None and self._fts:
+                # trigger skips NULL-content rows (WHEN guard) — index explicitly
+                try:
+                    self.conn.execute(
+                        "INSERT INTO mem_fts(rowid, key, content) VALUES(?, ?, ?)",
+                        (rowid, rec["key"], text),
+                    )
+                except sqlite3.Error:
+                    pass
+            if self._vec_ok:
                 import sqlite_vec as _sv
 
                 self.conn.execute(
                     "INSERT INTO mem_vec(rowid, embedding) VALUES(?, ?)",
-                    (rowid, _sv.serialize_float32(vector.astype(np.float32).tolist())),
+                    (rowid, _sv.serialize_float32(np.asarray(vector, dtype=np.float32).tolist())),
                 )
-            except Exception:
-                self._vec = False  # fall back to brute force from here on
-        self.conn.commit()
-        return rowid
+            if not self._txn:
+                self.conn.commit()
+            return rowid
+        except Exception:
+            if not self._txn:
+                self.conn.rollback()
+            raise
 
     def set_status(self, key: str, status: str, now: int, archived_at: int | None = None) -> int:
         cur = self.conn.execute(
             "UPDATE memories SET status=?, updated_at=?, archived_at=? WHERE key=?",
             (status, now, archived_at, key),
         )
-        self.conn.commit()
+        if not self._txn:
+            self.conn.commit()
         return cur.rowcount
 
     def delete_by_keys(self, keys: list[str]) -> int:
         if not keys:
             return 0
-        rows = self.conn.execute(
-            f"SELECT rowid, content_hash FROM memories WHERE key IN ({','.join('?' for _ in keys)})",
-            keys,
-        ).fetchall()
-        rowids = [r["rowid"] for r in rows]
-        hashes = [r["content_hash"] for r in rows]
-        self.conn.execute(
-            f"DELETE FROM memories WHERE key IN ({','.join('?' for _ in keys)})", keys
-        )
-        if self._vec and rowids:
-            try:
+        try:
+            rows = self.conn.execute(
+                f"SELECT rowid, content_hash FROM memories WHERE key IN ({','.join('?' for _ in keys)})",
+                keys,
+            ).fetchall()
+            rowids = [r["rowid"] for r in rows]
+            hashes = [r["content_hash"] for r in rows]
+            self.conn.execute(
+                f"DELETE FROM memories WHERE key IN ({','.join('?' for _ in keys)})", keys
+            )
+            if self._vec_ok and rowids:
                 self.conn.execute(
                     f"DELETE FROM mem_vec WHERE rowid IN ({','.join('?' for _ in rowids)})",
                     rowids,
                 )
-            except Exception:
-                self._vec = False
-        self.conn.commit()
-        for h in dict.fromkeys(hashes):  # refcounted: file goes only with its last row
-            try:
-                self.delete_doc_if_orphan(h)
-            except Exception:
-                pass
+            if not self._txn:
+                self.conn.commit()
+        except Exception:
+            if not self._txn:
+                self.conn.rollback()
+            raise
+        if not self._txn:
+            for h in dict.fromkeys(hashes):  # refcounted: file goes only with its last row
+                try:
+                    self.delete_doc_if_orphan(h)
+                except OSError:
+                    pass
         return len(rowids)
 
     def delete_by_canonical(self, canonical_id: str) -> int:
@@ -470,16 +574,22 @@ class Vault:
 
     # -- reads --------------------------------------------------------------
     def get(self, key: str) -> sqlite3.Row | None:
-        return self.conn.execute("SELECT * FROM memories WHERE key=?", (key,)).fetchone()
+        cols = ", ".join(READ_COLUMNS)
+        return self.conn.execute(
+            f"SELECT {cols} FROM memories WHERE key=?", (key,)
+        ).fetchone()
 
     def by_hash(self, content_hash: str, task_id: str, status: str = "active") -> list[sqlite3.Row]:
+        cols = ", ".join(READ_COLUMNS)
         return self.conn.execute(
-            "SELECT * FROM memories WHERE content_hash=? AND task_id=? AND status=?",
+            f"SELECT {cols} FROM memories WHERE content_hash=? AND task_id=? AND status=?",
             (content_hash, task_id, status),
         ).fetchall()
 
-    def scan(self, where: str = "", args: tuple = (), limit: int = 100) -> list[sqlite3.Row]:
-        q = "SELECT * FROM memories"
+    def scan(self, where: str = "", args: tuple = (), limit: int = 100,
+             with_embedding: bool = False) -> list[sqlite3.Row]:
+        cols = "*" if with_embedding else ", ".join(READ_COLUMNS)
+        q = f"SELECT {cols} FROM memories"
         if where:
             q += f" WHERE {where}"
         q += " ORDER BY created_at ASC LIMIT ?"
@@ -517,8 +627,9 @@ class Vault:
                 clauses.append(f"m.{col}=?")
                 args.append(extra[col])
         args.append(limit)
+        cols = ", ".join(f"m.{c}" for c in READ_COLUMNS)
         return self.conn.execute(
-            "SELECT m.*, f.rank AS _rank FROM mem_fts AS f "
+            f"SELECT {cols}, f.rank AS _rank FROM mem_fts AS f "
             "JOIN memories AS m ON m.rowid = f.rowid "
             f"WHERE {' AND '.join(clauses)} ORDER BY _rank LIMIT ?",
             args,
@@ -530,49 +641,85 @@ class Vault:
             for r in self.conn.execute("SELECT rowid, embedding FROM memories").fetchall()
         ]
 
-    # -- vector search -------------------------------------------------------
-    def knn(self, query: np.ndarray, k: int, status: str = "active") -> list[tuple[sqlite3.Row, float]]:
-        """Returns [(memory_row, cosine_distance)] ordered closest-first.
+    def _filter_sql(self, status: str, filters: dict | None, now: int | None) -> tuple[str, tuple]:
+        clauses = ["status=?"]
+        args: list = [status]
+        for col in ("task_id", "memory_type", "team_id", "agent_id"):
+            if filters and filters.get(col) is not None:
+                clauses.append(f"{col}=?")
+                args.append(filters[col])
+        if now is not None:
+            clauses.append("(expires_at IS NULL OR expires_at>?)")
+            args.append(now)
+        return " AND ".join(clauses), tuple(args)
 
-        sqlite-vec proposes candidates (oversampled so inactive rows can be
-        dropped); similarity is recomputed in numpy from stored blobs so
-        dup/collapse thresholds are metric-exact. One joined SELECT fetches
-        survivors — callers must not N+1 by rowid.
-        """
-        q = np.asarray(query, dtype=np.float32).ravel()
-        if self._vec:
-            try:
-                import sqlite_vec as _sv
-
-                n_cand = max(k * 8, 64)
-                hits = self.conn.execute(
-                    "SELECT rowid FROM mem_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
-                    (_sv.serialize_float32(q.tolist()), n_cand),
-                ).fetchall()
-                if hits:
-                    wanted = [r["rowid"] for r in hits]
-                    rows = self.conn.execute(
-                        f"SELECT * FROM memories WHERE rowid IN ({','.join('?' for _ in wanted)}) AND status=?",
-                        (*wanted, status),
-                    ).fetchall()
-                    scored = [
-                        (r, _cos_dist(q, np.frombuffer(r["embedding"], dtype=np.float32)))
-                        for r in rows
-                    ]
-                    scored.sort(key=lambda t: t[1])
-                    return scored[:k]
-            except Exception:
-                self._vec = False
-        # brute force — exact, active-only, fine at local-first scale
-        rows = self.conn.execute(
-            "SELECT * FROM memories WHERE status=?", (status,)
-        ).fetchall()
+    def _score_rows(self, q: np.ndarray, rows) -> list[tuple[int, float]]:
         scored = [
-            (r, _cos_dist(q, np.frombuffer(r["embedding"], dtype=np.float32)))
+            (r["rowid"], _cos_dist(q, np.frombuffer(r["embedding"], dtype=np.float32)))
             for r in rows
         ]
         scored.sort(key=lambda t: t[1])
-        return scored[:k]
+        return scored
+
+    def _hydrate(self, scored: list[tuple[int, float]], k: int) -> list[tuple[sqlite3.Row, float]]:
+        """Load full read columns for the closest k rowids only."""
+        top = scored[:k]
+        if not top:
+            return []
+        dist = {rowid: d for rowid, d in top}
+        ids = list(dist)
+        cols = ", ".join(READ_COLUMNS)
+        rows = self.conn.execute(
+            f"SELECT {cols} FROM memories WHERE rowid IN ({','.join('?' for _ in ids)})",
+            ids,
+        ).fetchall()
+        out = [(r, dist[r["rowid"]]) for r in rows]
+        out.sort(key=lambda t: t[1])
+        return out
+
+    # -- vector search -------------------------------------------------------
+    def knn(self, query: np.ndarray, k: int, status: str = "active",
+            filters: dict | None = None, now: int | None = None) -> list[tuple[sqlite3.Row, float]]:
+        """Returns [(memory_row, cosine_distance)] ordered closest-first.
+
+        Metadata filters and expiry apply before the top-k cut. sqlite-vec
+        proposes candidates and widens the window until `k` survive; cosine
+        is recomputed from stored blobs. A vec index whose row count does
+        not match memories is ignored (brute force).
+        """
+        q = np.asarray(query, dtype=np.float32).ravel()
+        where, fargs = self._filter_sql(status, filters, now)
+        if self._vec_ok:
+            try:
+                import sqlite_vec as _sv
+
+                qser = _sv.serialize_float32(q.tolist())
+                total = self.count()
+                limit = max(k * 8, 64)
+                while True:
+                    hits = self.conn.execute(
+                        "SELECT rowid FROM mem_vec WHERE embedding MATCH ? "
+                        "ORDER BY distance LIMIT ?",
+                        (qser, limit),
+                    ).fetchall()
+                    if not hits:
+                        return []
+                    ids = [r["rowid"] for r in hits]
+                    rows = self.conn.execute(
+                        "SELECT rowid, embedding FROM memories "
+                        f"WHERE rowid IN ({','.join('?' for _ in ids)}) AND {where}",
+                        (*ids, *fargs),
+                    ).fetchall()
+                    scored = self._score_rows(q, rows)
+                    if len(scored) >= k or len(hits) < limit or limit >= max(total, 1):
+                        return self._hydrate(scored, k)
+                    limit = min(max(total, 1), limit * 2)
+            except sqlite3.Error:
+                pass  # this call uses brute force; do not mark the index unused
+        rows = self.conn.execute(
+            f"SELECT rowid, embedding FROM memories WHERE {where}", fargs
+        ).fetchall()
+        return self._hydrate(self._score_rows(q, rows), k)
 
     def close(self) -> None:
         self.conn.close()

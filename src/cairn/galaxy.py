@@ -72,16 +72,18 @@ def _template() -> str:
 
 
 def to_points(client, limit: int = 2000) -> list[dict]:
-    """Starfield point records with x,y,z in [-1, 1]. Includes archived/superseded (dim)."""
-    rows = client.vault.scan("", (), limit)
-    vec_by_row = dict(client.vault.all_vectors())
+    """Starfield point records with x,y,z in [-1, 1]. Includes archived/superseded (dim).
+
+    Embeddings come from the limited scan. The page carries a short preview.
+    Full text loads from ``/memory`` when the reader expands a star.
+    """
+    rows = client.vault.scan("", (), limit, with_embedding=True)
     mat, meta = [], []
     for r in rows:
-        blob = vec_by_row.get(r["rowid"])
-        if blob is None:
+        blob = r["embedding"]
+        if not blob:
             continue
         mat.append(np.frombuffer(blob, dtype=np.float32).astype(np.float64))
-        content = r["content"] or r["content_summary"] or ""
         meta.append(r)
     if not mat:
         return []
@@ -100,18 +102,12 @@ def to_points(client, limit: int = 2000) -> list[dict]:
     points = []
     isles = _isle_layout([r["team_id"] for r in meta])
     multi = len(isles) > 1
-    from .store import ContentIntegrityError
-
     for r, (x, y, z) in zip(meta, coords):
-        try:
-            content = client.vault.read_content(r)
-        except ContentIntegrityError:
-            continue  # corrupt doc: omit the star, keep the galaxy up
-        content = content or r["content_summary"] or ""
+        preview = (r["content"] or r["content_summary"] or "")[:280]
         if multi:  # shrink the team's PCA cloud onto its own island
             cx, cy, rad = isles[r["team_id"]]
             x, y, z = cx + x * rad, cy + y * rad, z * rad
-        p = {
+        points.append({
             "key": r["key"],
             "x": round(float(x), 4),
             "y": round(float(y), 4),
@@ -124,11 +120,8 @@ def to_points(client, limit: int = 2000) -> list[dict]:
             "version": int(r["version"] or 1),
             "created": int(r["created_at"] or 0),
             "stored_by": r["agent_id"],
-            "text": content[:280],
-        }
-        if len(content) > 280:
-            p["full"] = content
-        points.append(p)
+            "text": preview,
+        })
     return points
 
 
@@ -241,6 +234,8 @@ class _Handler(BaseHTTPRequestHandler):
                     raw = json.dumps({"error": f"not found: {key}"}).encode()
                     self.send_response(404)
                 else:
+                    from .store import ContentIntegrityError
+
                     rows = client.vault.scan("canonical_id=?", (rec.canonical_id,), 50)
                     versions = []
                     for r in rows:
