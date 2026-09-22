@@ -9,3 +9,5 @@ website/dist/
 website/
 src-repo/
 *.zip
+.local-actions/
+.secrets

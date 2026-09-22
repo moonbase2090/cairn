@@ -134,6 +134,87 @@ def test_vault_uses_wal_and_mmap(tmp_path):
     assert cache == -8000
 
 
+def test_filtered_retrieve_keeps_in_task_note(tmp_path):
+    client, _, _ = make_client(tmp_path)
+    query = "how did second quarter revenue do"
+    for i in range(30):
+        client.store_memory(f"{query} variant {i}", team_id="t", task_id="noise", mode="new")
+    want = client.store_memory(
+        "unrelated manifold note kept on the q2 task", team_id="t", task_id="q2", mode="new")
+    hits = client.retrieve_memory(query, {"task_id": "q2"}, top_k=5)
+    assert [h.key for h in hits] == [want.key]
+
+
+def test_vec_hole_does_not_hide_a_memory(tmp_path):
+    client, vault, emb = make_client(tmp_path)
+    res = client.store_memory("unique coolant phrase alpha", team_id="t", task_id="k")
+    vault.conn.execute("DELETE FROM mem_vec")
+    vault.conn.commit()
+    reopened = Vault(vault.db_path, emb.name, emb.dims)
+    assert reopened.vec_status()["vec_in_sync"] is False
+    again = CairnClient(reopened, "claude-cairn", emb)
+    hits = again.retrieve_memory("coolant phrase", {"task_id": "k"})
+    assert hits and hits[0].key == res.key
+    fixed = reopened.rebuild_vec()
+    assert fixed["rebuilt"] == 1 and reopened.vec_status()["vec_in_sync"] is True
+
+
+def test_vec_insert_failure_rolls_back(tmp_path, monkeypatch):
+    import sqlite3
+    import sqlite_vec
+
+    client, vault, _ = make_client(tmp_path)
+    assert vault._vec_ok
+
+    def boom(_vec):
+        raise sqlite3.OperationalError("vec down")
+
+    monkeypatch.setattr(sqlite_vec, "serialize_float32", boom)
+    with pytest.raises(sqlite3.OperationalError):
+        client.store_memory("should not land in the vault", team_id="t", task_id="k")
+    assert vault.count() == 0
+    assert client.retrieve_memory("should not land", {"task_id": "k"}) == []
+
+
+def test_supersede_rolls_back_together(tmp_path, monkeypatch):
+    client, vault, _ = make_client(tmp_path)
+    original = client.store_memory("original claim for the ledger", team_id="t", task_id="k")
+
+    def boom(*_a, **_k):
+        raise RuntimeError("status write failed")
+
+    monkeypatch.setattr(vault, "set_status", boom)
+    with pytest.raises(RuntimeError):
+        client.store_memory(
+            "corrected claim for the ledger", team_id="t", task_id="k",
+            supersedes_key=original.key, mode="new")
+    assert vault.count() == 1
+    assert client.get_memory(original.key).status == "active"
+
+
+def test_export_refuses_a_partial_pack(tmp_path, monkeypatch):
+    import cairn.client as client_mod
+
+    client, _, _ = make_client(tmp_path)
+    client.store_memory("fact one", team_id="t", task_id="k1", mode="new")
+    client.store_memory("fact two", team_id="t", task_id="k2", mode="new")
+    monkeypatch.setattr(client_mod, "EXPORT_CAP", 1)
+    with pytest.raises(RuntimeError, match="row cap"):
+        client.export()
+
+
+def test_gc_refuses_a_partial_sweep(tmp_path, monkeypatch):
+    import cairn.client as client_mod
+
+    client, _, _ = make_client(tmp_path)
+    past = int(time.time()) - 10
+    client.store_memory("expired one", team_id="t", task_id="k1", mode="new", expires_at=past)
+    client.store_memory("expired two", team_id="t", task_id="k2", mode="new", expires_at=past)
+    monkeypatch.setattr(client_mod, "GC_CAP", 1)
+    with pytest.raises(RuntimeError, match="expired"):
+        client.gc(dry_run=True)
+
+
 def test_space_mismatch_refused(tmp_path):
     emb = HashEmbedder()
     Vault(tmp_path / "vault.db", emb.name, emb.dims, create=True).close()

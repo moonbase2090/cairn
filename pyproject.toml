@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cairn"
-version = "0.3.2"
+version = "0.3.3"
 description = "Local-first shared memory for CLI agents — six verbs, keyless, git-syncable"
 readme = "README.md"
 license = { text = "MPL-2.0" }

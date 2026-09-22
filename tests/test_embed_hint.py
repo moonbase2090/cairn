@@ -1,4 +1,6 @@
 """Embedder hint: spec + optional dims so FastEmbed can skip the probe embed."""
+import io
+import json
 from cairn.embed import FastEmbedder, format_embedder_hint, parse_embedder_hint
 
 
@@ -35,3 +37,27 @@ def test_fastembed_skips_probe_when_dims_cached(monkeypatch):
     assert calls["embed"] == 0
     e.embed(["hello"])
     assert calls["embed"] == 1
+
+
+def test_ollama_sends_one_batch(monkeypatch):
+    from cairn.embed import OllamaEmbedder
+
+    seen = {}
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    def fake_urlopen(req, timeout=0):
+        seen["body"] = json.loads(req.data.decode())
+        seen["timeout"] = timeout
+        return Resp(json.dumps({"embeddings": [[1.0, 0.0], [0.0, 1.0]]}).encode())
+
+    monkeypatch.setattr("cairn.embed.urllib.request.urlopen", fake_urlopen)
+    emb = OllamaEmbedder(dims=2)
+    out = emb.embed(["alpha", "beta"])
+    assert seen["body"]["input"] == ["alpha", "beta"]
+    assert out.shape == (2, 2)
