@@ -116,24 +116,6 @@ Packs carry full content, so `export`/`import` and git-sync are unchanged.
 Doc files are hash-verified on read; corruption raises loudly, never silently.
 Old vaults migrate on open (rowids preserved) after a `vault.db.pre2.bak` backup.
 
-## CI
-
-`.github/workflows/ci.yml` job **`build`** installs the package and runs `pytest`.
-GitHub Actions runs it on pull requests to `main` and `develop`. Local Actions
-runs the same file. A local pass is `status: succeeded` and `exit_code: 0`.
-
-```bash
-# once, from the LocalActions checkout — pass this cairn checkout as --root
-scripts/install.sh cairn --root /path/to/cairn
-systemctl --user enable --now local-actionsd-cairn.service
-
-# from the cairn checkout
-export LOCAL_ACTIONS_SOCKET=$PWD/.local-actions/daemon.sock
-local-actions doctor
-local-actions run --event pull_request --job build
-local-actions status <run-id>
-```
-
 ## License
 
 MPL-2.0 — see [LICENSE](LICENSE). File-level copyleft: improve cairn's files,
