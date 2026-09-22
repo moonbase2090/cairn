@@ -18,7 +18,8 @@ def test_whoami_doctor_log_purge_guard(tmp_path, monkeypatch, capsys):
     assert rc == 0 and json.loads(out)["agent"] == "cli-test"
 
     rc, out, _ = run(["doctor", "--json"], capsys)
-    assert rc == 0 and json.loads(out)["memories"] == 0
+    doc = json.loads(out)
+    assert rc == 0 and doc["memories"] == 0 and doc["vec_in_sync"] is True
 
     assert run(["store", "ops memory one two three", "--team", "t", "--task", "k"], capsys)[0] == 0
     rc, out, _ = run(["log", "--json"], capsys)

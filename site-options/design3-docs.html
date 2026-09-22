@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cairn — local-first shared memory for agents</title>
+<style>
+  :root{--void:#0A0C11;--basalt:#151820;--ridge:#232730;--stone-700:#3C3730;--stone-500:#6B6259;--stone-300:#A79C90;--starlight:#F4F0E9;--ember:#D96A3C}
+  *{box-sizing:border-box} body{margin:0;background:var(--starlight);color:var(--void);font-family:"IBM Plex Sans",system-ui,sans-serif}
+  header{display:flex;align-items:center;gap:10px;padding:16px 32px;border-bottom:1px solid #e2dccd;background:var(--starlight);position:sticky;top:0}
+  header img{height:28px} header span{font-family:"IBM Plex Mono",monospace;font-weight:600;letter-spacing:-.045em;font-size:20px}
+  header nav{margin-left:auto;display:flex;gap:20px;font-size:14px} header nav a{color:var(--stone-500);text-decoration:none} header nav a:hover{color:var(--ember)}
+  main{max-width:860px;margin:0 auto;padding:64px 24px 40px}
+  .eyebrow{font-family:"IBM Plex Mono",monospace;font-size:13px;color:var(--ember);letter-spacing:.02em}
+  h1{font-size:clamp(32px,5vw,50px);line-height:1.08;letter-spacing:-.02em;margin:12px 0 16px}
+  .lede{font-size:18px;color:var(--stone-700);line-height:1.6;margin:0 0 28px}
+  .code{background:var(--void);color:var(--starlight);border-radius:12px;padding:22px 24px;font-family:"IBM Plex Mono",monospace;font-size:14px;line-height:2;overflow-x:auto}
+  .code .p{color:var(--ember)} .code .d{color:var(--stone-300)}
+  .btns{display:flex;gap:12px;margin:28px 0 56px}
+  .btns a{padding:12px 26px;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px}
+  .btns .go{background:var(--void);color:var(--starlight)} .btns .go:hover{background:var(--ember)}
+  .btns .gh{border:1.5px solid var(--void);color:var(--void)} .btns .gh:hover{border-color:var(--ember);color:var(--ember)}
+  h2{font-size:22px;margin:40px 0 12px} .feat{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
+  .feat div{border:1px solid #e2dccd;border-radius:12px;padding:20px;background:#faf7f1}
+  .feat b{font-family:"IBM Plex Mono",monospace;font-size:13px;color:var(--ember)}
+  .feat p{margin:8px 0 0;font-size:14.5px;color:var(--stone-700);line-height:1.55}
+  .swatches{display:flex;gap:8px;margin-top:16px}
+  .swatches span{flex:1;height:44px;border-radius:8px}
+  footer{border-top:1px solid #e2dccd;margin-top:64px;padding:22px 32px;font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--stone-500);display:flex;justify-content:space-between}
+  footer a{color:var(--ember);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <img src="../cairn-brand/assets/cairn-mark.svg" alt="cairn"><span>cairn</span>
+  <nav><a href="#">docs</a><a href="#">releases</a><a href="#">github</a></nav>
+</header>
+<main>
+  <div class="eyebrow">v0.3.1 — hybrid storage · schema 2 · BM25 search</div>
+  <h1>Local-first shared memory for teams of AI coding agents.</h1>
+  <p class="lede">No API keys, no server, no AWS account. The agent is the LLM; the vault is a local SQLite file with a vector index. MPL-2.0 licensed, all assets included.</p>
+  <div class="code"><span class="p">$</span> pip install cairn &nbsp;<span class="d"># or: uv tool install cairn</span><br><span class="p">$</span> cairn init --yes<br><span class="p">$</span> cairn retrieve "latest handoff close-out" --top-k 5</div>
+  <div class="btns"><a class="go" href="#">get started</a><a class="gh" href="#">github →</a></div>
+  <h2>Why cairn</h2>
+  <div class="feat">
+    <div><b>local-first</b><p>Vaults never leave your machine unless you export a sync pack. Zero infra to babysit.</p></div>
+    <div><b>trustworthy</b><p>Versions, supersedes, and an audit log. Corrections are loud, never silent.</p></div>
+    <div><b>team-ready</b><p>Git-native packs today; distributed push/pull sync when Phase 2 lands.</p></div>
+  </div>
+  <h2>Palette</h2>
+  <div class="swatches">
+    <span style="background:#0A0C11"></span><span style="background:#151820"></span><span style="background:#3C3730"></span><span style="background:#A79C90"></span><span style="background:#D6CDC2"></span><span style="background:#F4F0E9;border:1px solid #e2dccd"></span><span style="background:#D96A3C"></span>
+  </div>
+</main>
+<footer><span>03 / docs — light readme-style</span><span><a href="index.html">← all options</a></span></footer>
+</body>
+</html>

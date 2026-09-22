@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "cairn": {
+      "command": "/home/brandan/.local/bin/cairn-mcp",
+      "env": {
+        "CAIRN_DIR": "/home/brandan/src/moonbase2090/cairn/.cairn",
+        "CAIRN_AGENT": "spark-cairn"
+      }
+    }
+  }
+}

@@ -252,7 +252,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Write --out only; do not start the HTTP server.")
 
     sub.add_parser("whoami", help="Show effective identity + vault + embedder.")
-    sub.add_parser("doctor", help="Diagnose the vault and environment.")
+    doc = sub.add_parser("doctor", help="Diagnose the vault and environment.")
+    doc.add_argument("--repair-vec", action="store_true",
+                     help="Rebuild mem_vec from stored embeddings when the index is incomplete.")
     bg = sub.add_parser("bootstrap", help="Wire this project for agents: .mcp.json + AGENTS.md + onboarding pack.")
     bg.add_argument("--no-seed", action="store_true", help="Skip seeding the onboarding pack.")
     bg.add_argument("--server", default="cairn-mcp", help="MCP server command for .mcp.json.")
@@ -552,14 +554,26 @@ def main(argv=None) -> int:
                 vec = True
             except ImportError:
                 vec = False
+            if args.repair_vec:
+                try:
+                    repaired = client.vault.rebuild_vec()
+                except RuntimeError as e:
+                    print(f"error: {e}", file=sys.stderr)
+                    return 2
+            else:
+                repaired = None
             st = client.stats()
-            emit({"vault": str(vdir / "vault.db"),
-                  "vault_mb": round((vdir / "vault.db").stat().st_size / 1e6, 2),
-                  "memories": st["total"], "by_status": st["by_status"],
-                  "embedder": f"{st['embedder']}/{st['dims']}d",
-                  "sqlite_vec": vec,
-                  "docs": st["docs"],
-                  "doc_threshold": client.vault._doc_threshold}, args.json)
+            info = {"vault": str(vdir / "vault.db"),
+                    "vault_mb": round((vdir / "vault.db").stat().st_size / 1e6, 2),
+                    "memories": st["total"], "by_status": st["by_status"],
+                    "embedder": f"{st['embedder']}/{st['dims']}d",
+                    "sqlite_vec": vec,
+                    "docs": st["docs"],
+                    "doc_threshold": client.vault._doc_threshold,
+                    **client.vault.vec_status()}
+            if repaired is not None:
+                info["vec_rebuilt"] = repaired["rebuilt"]
+            emit(info, args.json)
         elif args.cmd == "bootstrap":
             from cairn.tutorial import ONBOARDING_TASK, seed_onboarding
 
