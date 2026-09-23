@@ -83,7 +83,7 @@ class FastEmbedder(Embedder):
         if dims:
             self.dims = int(dims)
         else:
-            probe = list(self._model.embed(["probe"]))[0]
+            probe = next(iter(self._model.embed(["probe"])))
             self.dims = len(probe)
 
     def embed(self, texts: list[str]) -> np.ndarray:
@@ -143,6 +143,29 @@ def _socket_disabled() -> bool:
     return os.environ.get("CAIRN_EMBEDD", "1").strip().lower() in {"0", "off", "false", "no"}
 
 
+def _model_id(spec: str, default: str) -> str:
+    return spec.split(":", 1)[1] if ":" in spec else default
+
+
+def _try_socket_embedder(spec: str, dims: int | None):
+    """Return a live socket embedder, or None when the daemon cannot start."""
+    try:
+        from cairn.embedd import SocketEmbedder, ping, sock_path, spawn
+
+        path = sock_path()
+        if not ping(path):
+            spawn(spec, path)
+        embedder = SocketEmbedder(spec, path=path, dims=dims)
+        embedder.info()
+        return embedder
+    except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+        import sys
+        sys.stderr.write(
+            f"cairn-embedd unavailable ({exc}); loading fastembed in-process\n"
+        )
+        return None
+
+
 def get_embedder(spec: str, dims: int | None = None, skip_socket: bool = False) -> Embedder:
     """`hash` (default) | `fastembed[:model]` | `ollama[:model]`.
 
@@ -155,23 +178,10 @@ def get_embedder(spec: str, dims: int | None = None, skip_socket: bool = False) 
         return HashEmbedder(dims=dims or 384)
     if spec == "fastembed" or spec.startswith("fastembed:"):
         if not skip_socket and not _socket_disabled():
-            try:
-                from cairn.embedd import SocketEmbedder, ping, sock_path, spawn
-
-                path = sock_path()
-                if not ping(path):
-                    spawn(spec, path)
-                se = SocketEmbedder(spec, path=path, dims=dims)
-                se.info()
-                return se
-            except Exception as exc:
-                import sys
-                sys.stderr.write(
-                    f"cairn-embedd unavailable ({exc}); loading fastembed in-process\n"
-                )
-        model = spec.split(":", 1)[1] if ":" in spec else "BAAI/bge-small-en-v1.5"
-        return FastEmbedder(model, dims=dims)
+            found = _try_socket_embedder(spec, dims)
+            if found is not None:
+                return found
+        return FastEmbedder(_model_id(spec, "BAAI/bge-small-en-v1.5"), dims=dims)
     if spec == "ollama" or spec.startswith("ollama:"):
-        model = spec.split(":", 1)[1] if ":" in spec else "mxbai-embed-large"
-        return OllamaEmbedder(model, dims=dims)
+        return OllamaEmbedder(_model_id(spec, "mxbai-embed-large"), dims=dims)
     raise ValueError(f"unknown embedder spec: {spec!r} (want hash|fastembed|ollama)")

@@ -1,6 +1,7 @@
 """Embedder hint: spec + optional dims so FastEmbed can skip the probe embed."""
 import io
 import json
+
 from cairn.embed import FastEmbedder, format_embedder_hint, parse_embedder_hint
 
 
