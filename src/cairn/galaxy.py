@@ -170,7 +170,7 @@ class _Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html", "/galaxy.html"):
             client = self.server.client_factory()
             try:
-                body, n = galaxy_html(client, self.server.limit)
+                body, _n = galaxy_html(client, self.server.limit)
             finally:
                 client.vault.close()
             raw = body.encode()
@@ -321,10 +321,11 @@ def galaxy_url(host: str, port: int) -> str:
 def galaxy_alive(host: str, port: int, timeout: float = 1.0) -> bool:
     """True if a cairn galaxy answers /health on host:port."""
     import json
+    from urllib.error import URLError
     from urllib.request import urlopen
 
     try:
         with urlopen(galaxy_url(host, port) + "health", timeout=timeout) as resp:
             return resp.status == 200 and json.loads(resp.read().decode()).get("ok") is True
-    except Exception:
+    except (URLError, TimeoutError, json.JSONDecodeError, OSError):
         return False

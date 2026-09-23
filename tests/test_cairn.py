@@ -161,6 +161,7 @@ def test_vec_hole_does_not_hide_a_memory(tmp_path):
 
 def test_vec_insert_failure_rolls_back(tmp_path, monkeypatch):
     import sqlite3
+
     import sqlite_vec
 
     client, vault, _ = make_client(tmp_path)

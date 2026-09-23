@@ -26,7 +26,7 @@ def sim(e, a, b):
 def ollama_or_skip():
     try:
         return OllamaEmbedder()
-    except Exception as e:
+    except (OSError, TimeoutError, ValueError, KeyError) as e:
         pytest.skip(f"ollama mxbai-embed-large unavailable: {e}")
 
 

@@ -6,11 +6,14 @@ spaces are never mixed.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 try:
     import sqlite_vec  # type: ignore
@@ -115,13 +118,13 @@ class Vault:
                 self.conn.enable_load_extension(True)
                 sqlite_vec.load(self.conn)
                 self._vec = True
-            except Exception:
+            except sqlite3.Error:
                 self._vec = False
         self.conn.executescript(SCHEMA)
         self._fts = True
         try:
             self.conn.executescript(FTS_SCHEMA)
-        except Exception:
+        except sqlite3.Error:
             self._fts = False  # prehistoric sqlite: vault works, keyword search won't
         self._migrate_to_v2()
         # idx_mem_ref lives here (not SCHEMA): SCHEMA must apply cleanly to
@@ -129,8 +132,8 @@ class Vault:
         try:
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_mem_ref ON memories(content_ref)")
             self.conn.commit()
-        except Exception:
-            pass
+        except sqlite3.Error:
+            log.warning("content_ref index was not created", exc_info=True)
         if self._fts:
             self._backfill_fts()
         self.docs_root = self.db_path.parent / "docs"
@@ -140,7 +143,7 @@ class Vault:
                     self.conn.execute(
                         f"CREATE VIRTUAL TABLE IF NOT EXISTS mem_vec USING vec0(embedding float[{dims}])"
                     )
-                except Exception:
+                except sqlite3.Error:
                     self._vec = False
             self._set_meta("embed_model", embed_name)
             self._set_meta("dims", str(dims))
@@ -284,8 +287,8 @@ class Vault:
                         (r["rowid"], r["key"], text),
                     )
                 self.conn.commit()
-        except Exception:
-            pass  # FTS is a best-effort accelerator; writes still succeed
+        except sqlite3.Error:
+            log.warning("FTS backfill skipped; writes still succeed", exc_info=True)
 
     def _migrate_to_v2(self) -> None:
         """Schema 1 -> 2: nullable content + content_ref (+CHECK), FTS triggers
@@ -296,8 +299,7 @@ class Vault:
         Loud on error — a half-migrated vault must never look healthy.
         """
         cols = [r["name"] for r in self.conn.execute("PRAGMA table_info(memories)").fetchall()]
-        if "content_ref" not in cols:
-            if cols:  # existing v1 table to rebuild (fresh DBs already have v2 shape)
+        if cols and "content_ref" not in cols:  # existing v1 table; fresh DBs already have v2
                 backup = self.db_path.parent / (self.db_path.name + ".pre2.bak")
                 try:
                     import sqlite3 as _sq
@@ -311,8 +313,8 @@ class Vault:
                             dst.close()
                     finally:
                         src.close()
-                except Exception as e:
-                    raise RuntimeError(f"pre-migration backup failed, refusing to migrate: {e}")
+                except (OSError, sqlite3.Error) as e:
+                    raise RuntimeError(f"pre-migration backup failed, refusing to migrate: {e}") from e
                 try:
                     self.conn.executescript("""
                         CREATE TABLE memories_new(
@@ -357,12 +359,12 @@ class Vault:
                         CREATE INDEX IF NOT EXISTS idx_mem_status ON memories(status);
                         CREATE INDEX IF NOT EXISTS idx_mem_ref ON memories(content_ref);
                     """)
-                except Exception:
+                except sqlite3.Error:
                     try:
                         self.conn.execute("DROP TABLE IF EXISTS memories_new")
                         self.conn.commit()
-                    except Exception:
-                        pass
+                    except sqlite3.Error:
+                        log.warning("could not drop memories_new after a failed migration", exc_info=True)
                     raise
         if self._fts:
             trigs = {r["name"] for r in self.conn.execute(
