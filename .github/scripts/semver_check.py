@@ -19,7 +19,7 @@ TITLE_RE = re.compile(
     r"^(feat|fix|docs|chore|refactor|test|build|ci|perf|revert)"
     r"(\([^)]+\))?(!)?: .+"
 )
-VERSION_RE = re.compile(r'^version\s*=\s*"(\d+\.\d+\.\d+)"', re.M)
+VERSION_RE = re.compile(r'^version\s*=\s*"(\d+\.\d+\.\d+)"', re.MULTILINE)
 
 
 def sh(*args):
@@ -30,7 +30,8 @@ def version_at(ref):
     """Return the pyproject version at a git ref, or None."""
     try:
         if ref == "WORKTREE":
-            text = open("pyproject.toml").read()
+            with open("pyproject.toml") as fh:
+                text = fh.read()
         else:
             text = sh("git", "show", f"{ref}:pyproject.toml")
     except (subprocess.CalledProcessError, FileNotFoundError):

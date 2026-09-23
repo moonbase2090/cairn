@@ -10,5 +10,13 @@ from .client import CairnClient
 from .embed import Embedder, get_embedder
 from .models import MemoryRecord, Origin, Status, StoreAction
 
-__all__ = ["CairnClient", "Embedder", "get_embedder", "MemoryRecord", "Origin",
-           "Status", "StoreAction", "__version__"]
+__all__ = [
+    "CairnClient",
+    "Embedder",
+    "MemoryRecord",
+    "Origin",
+    "Status",
+    "StoreAction",
+    "__version__",
+    "get_embedder",
+]
