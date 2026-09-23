@@ -126,13 +126,12 @@ def lock_path(path: Path) -> Path:
 def spawn_lock(path: Path):
     """Exclusive lock so two clients cannot unlink each other's socket."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(lock_path(path), "a")
-    try:
+    with open(lock_path(path), "a") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def spawn(spec: str, path: Path | None = None, idle: int = DEFAULT_IDLE) -> None:
@@ -160,37 +159,70 @@ def spawn(spec: str, path: Path | None = None, idle: int = DEFAULT_IDLE) -> None
         raise RuntimeError(f"cairn-embedd did not come up at {path}")
 
 
+def _op_embed(req, embedder, lock) -> None:
+    texts = req.get("texts") or []
+    if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
+        return {"ok": False, "error": "texts must be a string list"}
+    with lock:
+        arr = embedder.embed(texts)
+    return {
+        "ok": True, "name": embedder.name, "dims": embedder.dims,
+        "vectors": encode_vectors(arr),
+    }
+
+
+def _dispatch_op(req, embedder, lock) -> dict:
+    op = req.get("op")
+    if op == "ping":
+        return {"ok": True}
+    if op == "info":
+        return {"ok": True, "name": embedder.name, "dims": embedder.dims}
+    if op == "embed":
+        return _op_embed(req, embedder, lock)
+    return {"ok": False, "error": f"unknown op {op!r}"}
+
+
+def _close_conn(conn: socket.socket) -> None:
+    try:
+        conn.close()
+    except OSError:
+        pass
+
+
 def _handle(conn: socket.socket, embedder, lock: threading.Lock, last: list) -> None:
     try:
         req = recv_msg(conn)
         last[0] = time.monotonic()
-        op = req.get("op")
-        if op == "ping":
-            send_msg(conn, {"ok": True})
-            return
-        if op == "info":
-            send_msg(conn, {"ok": True, "name": embedder.name, "dims": embedder.dims})
-            return
-        if op == "embed":
-            texts = req.get("texts") or []
-            if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
-                send_msg(conn, {"ok": False, "error": "texts must be a string list"})
-                return
-            with lock:
-                arr = embedder.embed(texts)
-            send_msg(conn, {
-                "ok": True, "name": embedder.name, "dims": embedder.dims,
-                "vectors": encode_vectors(arr),
-            })
-            return
-        send_msg(conn, {"ok": False, "error": f"unknown op {op!r}"})
+        send_msg(conn, _dispatch_op(req, embedder, lock))
     except (OSError, ValueError, json.JSONDecodeError):
-        pass
+        return
     finally:
-        try:
-            conn.close()
-        except OSError:
-            pass
+        _close_conn(conn)
+
+
+def _unlink_quiet(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _accept_until_idle(srv, path, embedder, lock, last, idle: int) -> None:
+    try:
+        while True:
+            if idle > 0 and time.monotonic() - last[0] > idle:
+                break
+            try:
+                conn, _ = srv.accept()
+            except TimeoutError:
+                continue
+            conn.settimeout(60)
+            threading.Thread(
+                target=_handle, args=(conn, embedder, lock, last), daemon=True,
+            ).start()
+    finally:
+        srv.close()
+        _unlink_quiet(path)
 
 
 def serve_forever(spec: str, path: Path | None = None, idle: int = DEFAULT_IDLE,
@@ -200,10 +232,7 @@ def serve_forever(spec: str, path: Path | None = None, idle: int = DEFAULT_IDLE,
     path = path or sock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
-        try:
-            path.unlink()
-        except OSError:
-            pass
+        _unlink_quiet(path)
     # in-process load lives only here — clients must not pass skip_socket=False
     embedder = get_embedder(spec, dims, skip_socket=True)
     last = [time.monotonic()]
@@ -212,24 +241,7 @@ def serve_forever(spec: str, path: Path | None = None, idle: int = DEFAULT_IDLE,
     srv.bind(str(path))
     srv.listen(16)
     srv.settimeout(1.0)
-    try:
-        while True:
-            if idle > 0 and time.monotonic() - last[0] > idle:
-                break
-            try:
-                conn, _ = srv.accept()
-            except socket.timeout:
-                continue
-            conn.settimeout(60)
-            threading.Thread(
-                target=_handle, args=(conn, embedder, lock, last), daemon=True,
-            ).start()
-    finally:
-        srv.close()
-        try:
-            path.unlink()
-        except OSError:
-            pass
+    _accept_until_idle(srv, path, embedder, lock, last, idle)
     return 0
 
 

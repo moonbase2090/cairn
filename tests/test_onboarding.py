@@ -19,7 +19,7 @@ def run(argv, capsys):
 def test_init_yes_writes_project_json(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("CAIRN_DIR", str(tmp_path / ".cairn"))
     monkeypatch.setenv("CAIRN_AGENT", "claude-myproj")
-    rc, out, _ = run(["init", "--yes", "--json"], capsys)
+    rc, _out, _ = run(["init", "--yes", "--json"], capsys)
     assert rc == 0
     proj = json.loads((tmp_path / ".cairn" / "project.json").read_text())
     assert proj["agent_id"] == "claude-myproj"
@@ -79,7 +79,7 @@ def test_mcp_stdio_session(tmp_path, monkeypatch):
             [sys.executable, "-m", "cairn.mcp_server"],
             input="\n".join(json.dumps(p) for p in payloads) + "\n",
             capture_output=True, text=True, timeout=120, cwd=str(ROOT),
-            env={**env, "PYTHONPATH": f"{ROOT}/src"},
+            env={**env, "PYTHONPATH": f"{ROOT}/src"}, check=False,
         )
         assert proc.returncode == 0, proc.stderr
         return {json.loads(line)["id"]: json.loads(line) for line in proc.stdout.splitlines() if line.strip()}
@@ -130,7 +130,7 @@ def test_mcp_ops_tools(tmp_path, monkeypatch):
             [sys.executable, "-m", "cairn.mcp_server"],
             input="\n".join(json.dumps(p) for p in payloads) + "\n",
             capture_output=True, text=True, timeout=120, cwd=str(ROOT),
-            env={**env, "PYTHONPATH": f"{ROOT}/src"},
+            env={**env, "PYTHONPATH": f"{ROOT}/src"}, check=False,
         )
         assert proc.returncode == 0, proc.stderr
         return {json.loads(line)["id"]: json.loads(line) for line in proc.stdout.splitlines() if line.strip()}
