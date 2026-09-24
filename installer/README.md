@@ -3,6 +3,20 @@
 Two ways onto a new machine. Both are machine-level only (tool + `PATH`);
 per-project wiring always stays manual: `cairn init --yes && cairn bootstrap`.
 
+## Release archives
+
+GitHub Actions builds three archives when a `vX.Y.Z` tag is pushed:
+`x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, and
+`x86_64-pc-windows-msvc`. Each archive contains its own Python, `cairn`,
+`cairn-mcp`, and `cairn-embedd`. Unix archives install with `./install.sh`.
+The Windows archive installs with `powershell -File .\install.ps1`.
+
+macOS Developer ID signing and notarization run when `CAIRN_CODESIGN_IDENTITY`,
+`APPLE_ID`, `APPLE_TEAM_ID`, and `APPLE_APP_PASSWORD` are repository secrets.
+Windows Authenticode signing runs when `WINDOWS_CERT_BASE64` and
+`WINDOWS_CERT_PASSWORD` are set. Without those secrets the archive is built
+and checksummed, and `SIGNING.txt` says `unsigned`.
+
 ## Shell script (Linux + macOS)
 
 ```sh
