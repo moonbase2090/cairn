@@ -253,12 +253,15 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8778)
     sv.add_argument("--token", default=None, help="Bearer token (default: random, printed once).")
+    sv.add_argument("--tls-cert", default=None, help="Certificate PEM. Required when --host is not localhost.")
+    sv.add_argument("--tls-key", default=None, help="Private key PEM. Pair with --tls-cert.")
 
     for name, helptext in (("push", "Push local memories to a `cairn serve` peer."),
                            ("pull", "Pull memories from a `cairn serve` peer.")):
         peer = sub.add_parser(name, help=helptext)
         peer.add_argument("url")
         peer.add_argument("--token", default=None)
+        peer.add_argument("--tls-ca", default=None, help="CA bundle PEM for an https:// peer.")
     # pull extras (added after the loop so push stays lean)
     sub.choices["pull"].add_argument("--since", type=int, default=None)
     sub.choices["pull"].add_argument("--out", default=None, help="Save pack instead of importing.")
@@ -550,18 +553,19 @@ def _cmd_import(args, client) -> int:
 
 def _cmd_serve(args, client) -> int:
     token = args.token or secrets.token_hex(16)
-    print(f"serving {vault_dir(args) / 'vault.db'} on http://{args.host}:{args.port} (token: {token})")
-    serve_forever(client, args.host, args.port, token)
+    scheme = "https" if args.tls_cert else "http"
+    print(f"serving {vault_dir(args) / 'vault.db'} on {scheme}://{args.host}:{args.port} (token: {token})")
+    serve_forever(client, args.host, args.port, token, args.tls_cert, args.tls_key)
     return 0
 
 
 def _cmd_push(args, client) -> int:
-    emit(push_to(args.url, client.export(), token_for(args)), args.json)
+    emit(push_to(args.url, client.export(), token_for(args), cafile=args.tls_ca), args.json)
     return 0
 
 
 def _cmd_pull(args, client) -> int:
-    pack = pull_from(args.url, token_for(args), args.since)
+    pack = pull_from(args.url, token_for(args), args.since, cafile=args.tls_ca)
     if args.out:
         Path(args.out).write_text(json.dumps(pack, default=str))
         emit({"pulled": len(pack["memories"]), "out": args.out}, args.json)
