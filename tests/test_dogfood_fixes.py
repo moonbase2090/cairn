@@ -80,7 +80,7 @@ def test_human_log_renders_audit_rows(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("CAIRN_AGENT", "log-check")
     assert run(["init", "--yes", "--embed-spec", "hash"], capsys)[0] == 0
     assert run(["store", "logged memory one two", "--team", "t", "--task", "k"], capsys)[0] == 0
-    pack = json.loads((run(["export", "--json"], capsys)[1]))
+    pack = json.loads(run(["export", "--json"], capsys)[1])
     (tmp_path / "pack.json").write_text(json.dumps(pack))
     assert run(["import", str(tmp_path / "pack.json")], capsys)[0] == 0
     rc, out, _ = run(["log"], capsys)

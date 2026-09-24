@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """cairn — local-first shared memory for CLI agents.
 
 No API keys, no server, no AWS account. The agent *is* the LLM; the vault is a
@@ -26,6 +25,7 @@ import argparse
 import json
 import os
 import secrets
+import sqlite3
 import sys
 import tomllib
 from pathlib import Path
@@ -35,8 +35,7 @@ from cairn.client import CairnClient
 from cairn.embed import format_embedder_hint, get_embedder, parse_embedder_hint
 from cairn.galaxy import bind as bind_galaxy
 from cairn.galaxy import galaxy as render_galaxy
-from cairn.galaxy import galaxy_alive
-from cairn.galaxy import galaxy_url
+from cairn.galaxy import galaxy_alive, galaxy_url
 from cairn.ingest import ingest_dir
 from cairn.serve import pull_from, push_to, serve_forever
 from cairn.store import SpaceMismatchError, Vault
@@ -111,36 +110,58 @@ def emit(obj, as_json: bool, full: bool = False) -> None:
         _human(obj, full)
 
 
+def _human_store(obj) -> None:
+    print(f"{obj['action']}: {obj.get('key') or '(no write)'}")
+    for near in obj.get("near_duplicates", []):
+        sim = near.get("similarity", 0)
+        print(f"  ~ {near['key']} sim={sim:.2f} :: {near.get('content_summary', '')[:100]}")
+
+
+def _human_memories(obj, full: bool) -> None:
+    for i, mem in enumerate(obj, 1):
+        sim = f" sim={mem['similarity']:.2f}" if mem.get("similarity") is not None else ""
+        print(f"{i}. {mem['key']}{sim} [{mem.get('memory_type')}/{mem.get('status')}] {mem.get('origin')}")
+        body = mem.get("content") or mem.get("content_summary") or ""
+        shown = body if full else (mem.get("content_summary") or "")[:160]
+        print(f"   {shown}")
+        if full:
+            print()
+
+
+def _human_lines(obj) -> None:
+    for line in obj:
+        if isinstance(line, dict) and "action" in line:
+            detail = line.get("key") or line.get("canonical_id") or line.get("result") or ""
+            print(f"{line.get('ts')} {line.get('agent')} {line.get('action')} {detail}".rstrip())
+        else:
+            print(line)
+
+
+def _human_get(obj) -> None:
+    for key in ("key", "canonical_id", "status", "version", "task_id", "agent_id", "origin"):
+        print(f"{key}: {obj.get(key)}")
+    print(f"content: {obj.get('content')}")
+
+
+def _human_flat(obj) -> None:
+    for key, value in obj.items():
+        print(f"{key}: {value}")
+
+
 def _human(obj, full: bool = False) -> None:
-    if isinstance(obj, dict) and "action" in obj and "key" in obj:  # store result
-        print(f"{obj['action']}: {obj.get('key') or '(no write)'}")
-        for n in obj.get("near_duplicates", []):
-            print(f"  ~ {n['key']} sim={n.get('similarity', 0):.2f} :: {n.get('content_summary', '')[:100]}")
+    if isinstance(obj, dict) and "action" in obj and "key" in obj:
+        _human_store(obj)
     elif isinstance(obj, list):
-        if obj and isinstance(obj[0], dict) and "canonical_id" in obj[0]:  # memories (audit rows have key but no canonical_id)
-            for i, m in enumerate(obj, 1):
-                sim = f" sim={m['similarity']:.2f}" if m.get("similarity") is not None else ""
-                print(f"{i}. {m['key']}{sim} [{m.get('memory_type')}/{m.get('status')}] {m.get('origin')}")
-                print(f"   {(m.get('content') or m.get('content_summary') or '') if full else (m.get('content_summary') or '')[:160]}")
-                if full:
-                    print()
-        else:  # audit lines etc.
-            for line in obj:
-                if isinstance(line, dict) and "action" in line:
-                    detail = (line.get("key") or line.get("canonical_id")
-                              or line.get("result") or "")
-                    print(f"{line.get('ts')} {line.get('agent')} {line.get('action')} {detail}".rstrip())
-                else:
-                    print(line)
+        if obj and isinstance(obj[0], dict) and "canonical_id" in obj[0]:
+            _human_memories(obj, full)
+        else:
+            _human_lines(obj)
         if not obj:
             print("(none)")
-    elif isinstance(obj, dict) and "content" in obj and "key" in obj:  # get
-        for k in ("key", "canonical_id", "status", "version", "task_id", "agent_id", "origin"):
-            print(f"{k}: {obj.get(k)}")
-        print(f"content: {obj.get('content')}")
-    elif isinstance(obj, dict):  # flat status dicts
-        for k, v in obj.items():
-            print(f"{k}: {v}")
+    elif isinstance(obj, dict) and "content" in obj and "key" in obj:
+        _human_get(obj)
+    elif isinstance(obj, dict):
+        _human_flat(obj)
     else:
         print(json.dumps(obj, indent=2, default=str))
 
@@ -350,303 +371,449 @@ def resolve_init_embedder(spec: str):
         return get_embedder("hash"), "hash", notice
 
 
+def _init_fields(args, flag_agent_id):
+    from cairn.ingest import sanitize_task_id
+
+    vdir = vault_dir(args)
+    dirname = vdir.parent.name if vdir.name == ".cairn" else vdir.name
+    slug = sanitize_task_id(args.team or dirname)
+    project = args.project or dirname
+    team = args.team or slug
+    seat = flag_agent_id or os.environ.get("CAIRN_AGENT") or home_config_agent_id()
+    return vdir, dirname, slug, project, team, seat
+
+
+def _init_prompts(args, project, slug, team, seat):
+    from cairn.ingest import sanitize_task_id
+
+    print("cairn init — shared memory for this project (Enter accepts defaults)")
+    project = prompt("Project name", project)
+    slug = sanitize_task_id(prompt("Project slug", slug))
+    team = prompt("Team scope", team if args.team else slug)
+    agent = prompt(
+        "Your agent id (<harness>-<slug>, e.g. claude-myproj)",
+        seat or f"human-{slug}",
+    )
+    return project, slug, team, agent
+
+
+def _cmd_init(args, flag_agent_id) -> int:
+    vdir, _dirname, slug, project, team, seat = _init_fields(args, flag_agent_id)
+    if not args.yes and sys.stdin.isatty():
+        project, slug, team, agent = _init_prompts(args, project, slug, team, seat)
+    elif seat is None:
+        print(
+            "error: init needs an identity — pass --agent-id <harness>-<slug> "
+            "or set $CAIRN_AGENT (one session, one project, one id; never cairn-cli)",
+            file=sys.stderr,
+        )
+        return 2
+    else:
+        agent = seat
+    if (vdir / "vault.db").exists():
+        emit({"initialized": str(vdir / "vault.db"), "note": "already exists"}, args.json)
+        return 0
+    spec = args.embed_spec or "fastembed"
+    try:
+        embedder, effective, notice = resolve_init_embedder(spec)
+        Vault(
+            vdir / "vault.db", embedder.name, embedder.dims, create=True,
+            doc_threshold=args.doc_threshold,
+        ).close()
+    except (ImportError, ValueError, OSError, sqlite3.Error) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    write_embedder_hint(vdir, effective, embedder.dims)
+    ensure_vault_gitignore(vdir)
+    (vdir / "project.json").write_text(json.dumps(
+        {"project": project, "slug": slug, "team": team, "agent_id": agent}, indent=2))
+    out = {
+        "initialized": str(vdir / "vault.db"), "embedder": embedder.name,
+        "dims": embedder.dims, "project": project, "team": team, "agent_id": agent,
+    }
+    if notice:
+        out["notice"] = notice
+    if effective == "hash":
+        coarse = (
+            "hash embedder is coarse — the near-dup screen may miss collisions "
+            "fastembed would catch; treat it as a tripwire, not a guarantee"
+        )
+        out["notice"] = f"{out['notice']} {coarse}" if out.get("notice") else coarse
+    emit(out, args.json)
+    return 0
+
+
+def _cmd_embedd(args) -> int:
+    from cairn.embedd import main as embedd_main
+
+    argv = ["--spec", args.spec, "--idle", str(args.idle)]
+    if args.sock:
+        argv += ["--sock", args.sock]
+    if args.dims is not None:
+        argv += ["--dims", str(args.dims)]
+    return embedd_main(argv)
+
+
+def _open_client(args):
+    try:
+        return build_client(args)
+    except (FileNotFoundError, SpaceMismatchError, ImportError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return None
+
+
+def _cmd_store(args, client) -> int:
+    res = client.store_memory(
+        args.content, args.team, args.task, args.type, args.origin, args.supersedes, args.mode,
+    )
+    emit(res.to_dict(), args.json)
+    return 0
+
+
+def _cmd_retrieve(args, client) -> int:
+    filters = {
+        k: v for k, v in (
+            ("task_id", args.task), ("team_id", args.team), ("memory_type", args.type),
+        ) if v
+    }
+    hits = client.retrieve_memory(args.query, filters or None, args.top_k, args.min_sim)
+    emit([m.to_dict() for m in hits], args.json, full=True)
+    return 0
+
+
+def _cmd_list(args, client) -> int:
+    if args.canonical:
+        filters = {"canonical_id": args.canonical}
+    else:
+        filters = {
+            k: v for k, v in (
+                ("task_id", args.task), ("memory_type", args.type),
+                ("status", args.status), ("search", args.search),
+            ) if v
+        }
+    if not filters:
+        print("error: list needs --task, --canonical, or --search", file=sys.stderr)
+        return 2
+    emit([m.to_dict() for m in client.list_memories(filters, args.limit)], args.json)
+    return 0
+
+
+def _cmd_get(args, client) -> int:
+    rec = client.get_memory(args.key)
+    emit(rec.to_dict() if rec else {"found": False, "key": args.key}, args.json)
+    return 0
+
+
+def _cmd_archive(args, client) -> int:
+    emit(client.archive_memory(args.key), args.json)
+    return 0
+
+
+def _cmd_restore(args, client) -> int:
+    emit(client.restore_memory(args.key), args.json)
+    return 0
+
+
+def _cmd_purge(args, client) -> int:
+    if not args.force:
+        print("error: purge is destructive — re-run with --force", file=sys.stderr)
+        return 2
+    emit(client.purge_memory(args.canonical_id), args.json)
+    return 0
+
+
+def _cmd_gc(args, client) -> int:
+    emit(client.gc(dry_run=not args.apply), args.json)
+    return 0
+
+
+def _cmd_ingest(args, client) -> int:
+    emit(ingest_dir(client, args.team, args.dir, args.type), args.json)
+    return 0
+
+
+def _cmd_export(args, client) -> int:
+    pack = client.export(args.since)
+    if args.out:
+        Path(args.out).write_text(json.dumps(pack))
+        emit({"exported": len(pack["memories"]), "out": args.out}, args.json)
+    else:
+        print(json.dumps(pack, default=str))
+    return 0
+
+
+def _cmd_import(args, client) -> int:
+    pack = json.loads(Path(args.pack).read_text())
+    emit(client.import_pack(pack), args.json)
+    return 0
+
+
+def _cmd_serve(args, client) -> int:
+    token = args.token or secrets.token_hex(16)
+    print(f"serving {vault_dir(args) / 'vault.db'} on http://{args.host}:{args.port} (token: {token})")
+    serve_forever(client, args.host, args.port, token)
+    return 0
+
+
+def _cmd_push(args, client) -> int:
+    emit(push_to(args.url, client.export(), token_for(args)), args.json)
+    return 0
+
+
+def _cmd_pull(args, client) -> int:
+    pack = pull_from(args.url, token_for(args), args.since)
+    if args.out:
+        Path(args.out).write_text(json.dumps(pack, default=str))
+        emit({"pulled": len(pack["memories"]), "out": args.out}, args.json)
+    else:
+        emit(client.import_pack(pack), args.json)
+    return 0
+
+
+def _open_browser(url: str) -> None:
+    import webbrowser
+
+    webbrowser.open(url)
+
+
+def _galaxy_reuse(args, html_info) -> int:
+    url = galaxy_url(args.host, args.port)
+    html_info.update({"url": url, "host": args.host, "port": args.port, "reused": True})
+    emit(html_info, args.json)
+    if not args.json:
+        suffix = "" if args.no_open else "  (opened in browser)"
+        print(f"galaxy already running at {url}{suffix}")
+    if not args.no_open:
+        _open_browser(url)
+    return 0
+
+
+def _galaxy_serve(args, client, html_info) -> int:
+    try:
+        srv = bind_galaxy(client, args.host, args.port, args.limit)
+    except OSError:
+        print(
+            f"error: port {args.port} is busy (and not a cairn galaxy) — "
+            "stop it or pick another with --port N",
+            file=sys.stderr,
+        )
+        return 1
+    host, port = srv.server_address[:2]
+    url = galaxy_url(str(host), int(port))
+    html_info["url"] = url
+    html_info["host"] = host
+    html_info["port"] = port
+    emit(html_info, args.json)
+    if not args.json:
+        print(f"galaxy at {url}  (Ctrl-C to stop)")
+    if not args.no_open:
+        _open_browser(url)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        srv.server_close()
+    return 0
+
+
+def _cmd_galaxy(args, client) -> int:
+    if args.no_serve:
+        if not args.out:
+            print("error: --no-serve needs --out PATH", file=sys.stderr)
+            return 2
+        emit(render_galaxy(client, args.out, args.limit), args.json)
+        return 0
+    html_info = render_galaxy(client, args.out, args.limit)
+    if args.port and galaxy_alive(args.host, args.port):
+        return _galaxy_reuse(args, html_info)
+    return _galaxy_serve(args, client, html_info)
+
+
+def _cmd_whoami(args, client) -> int:
+    emit({
+        "agent": client.agent_id,
+        "vault": str(vault_dir(args) / "vault.db"),
+        "embedder": client.embedder.name,
+        "dims": client.embedder.dims,
+    }, args.json)
+    return 0
+
+
+def _cmd_doctor(args, client) -> int:
+    vdir = vault_dir(args)
+    try:
+        import sqlite_vec  # noqa: F401
+
+        vec = True
+    except ImportError:
+        vec = False
+    repaired = None
+    if args.repair_vec:
+        try:
+            repaired = client.vault.rebuild_vec()
+        except RuntimeError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+    st = client.stats()
+    info = {
+        "vault": str(vdir / "vault.db"),
+        "vault_mb": round((vdir / "vault.db").stat().st_size / 1e6, 2),
+        "memories": st["total"], "by_status": st["by_status"],
+        "embedder": f"{st['embedder']}/{st['dims']}d",
+        "sqlite_vec": vec,
+        "docs": st["docs"],
+        "doc_threshold": client.vault._doc_threshold,
+        **client.vault.vec_status(),
+    }
+    if repaired is not None:
+        info["vec_rebuilt"] = repaired["rebuilt"]
+    emit(info, args.json)
+    return 0
+
+
+def _bootstrap_project(vdir, flag_agent_id, client):
+    try:
+        proj = json.loads((vdir / "project.json").read_text())
+    except (OSError, ValueError):
+        proj = {}
+    team = proj.get("team") or "main"
+    agent = flag_agent_id or proj.get("agent_id") or client.agent_id
+    if flag_agent_id:
+        proj.update({
+            "agent_id": agent,
+            "project": proj.get("project") or Path.cwd().name,
+            "slug": proj.get("slug") or team,
+            "team": team,
+        })
+        (vdir / "project.json").write_text(json.dumps(proj, indent=2))
+    return proj, team, agent
+
+
+def _write_agents_section(path: Path, section: str) -> None:
+    try:
+        text = path.read_text()
+    except OSError:
+        text = ""
+    if AGENTS_BEGIN in text and AGENTS_END in text:
+        pre, rest = text.split(AGENTS_BEGIN, 1)
+        _, post = rest.split(AGENTS_END, 1)
+        text = pre + section + post
+    else:
+        text = (text.rstrip() + "\n\n" if text.strip() else "") + section
+    path.write_text(text)
+
+
+def _cmd_bootstrap(args, client, flag_agent_id) -> int:
+    from cairn.tutorial import ONBOARDING_TASK, seed_onboarding
+
+    vdir = vault_dir(args)
+    if not (vdir / "vault.db").exists():
+        print(f"error: no vault at {vdir / 'vault.db'} — run `cairn init` first", file=sys.stderr)
+        return 2
+    proj, team, agent = _bootstrap_project(vdir, flag_agent_id, client)
+    project = proj.get("project") or Path.cwd().name
+    warnings = []
+    if agent == "cairn-cli":
+        warnings.append(
+            "agent id is cairn-cli — re-run `cairn bootstrap --agent-id <harness>-<slug>` "
+            "so writes attribute to this seat"
+        )
+    ensure_vault_gitignore(vdir)
+    seeded = {} if args.no_seed else seed_onboarding(client, team)
+    mcp_path = Path.cwd() / ".mcp.json"
+    try:
+        mcp = json.loads(mcp_path.read_text())
+    except (OSError, ValueError):
+        mcp = {}
+    mcp.setdefault("mcpServers", {})["cairn"] = {
+        "command": args.server,
+        "env": {"CAIRN_DIR": str(vdir.resolve()), "CAIRN_AGENT": agent},
+    }
+    mcp_path.write_text(json.dumps(mcp, indent=2) + "\n")
+    agents_path = Path.cwd() / "AGENTS.md"
+    _write_agents_section(agents_path, agents_section(project, team, agent))
+    emit({
+        "project": project, "team": team, "agent_id": agent,
+        "mcp_json": str(mcp_path), "agents_md": str(agents_path),
+        "onboarding_task": ONBOARDING_TASK, "seeded": seeded, "warnings": warnings,
+    }, args.json)
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    return 0
+
+
+def _cmd_log(args, _client) -> int:
+    lines = []
+    try:
+        with open(vault_dir(args) / "audit.jsonl") as handle:
+            for line in handle:
+                line = line.strip()
+                if line:
+                    lines.append(json.loads(line))
+    except OSError:
+        pass
+    emit(lines[-args.limit:], args.json)
+    return 0
+
+
+_COMMANDS = {
+    "store": _cmd_store,
+    "retrieve": _cmd_retrieve,
+    "list": _cmd_list,
+    "get": _cmd_get,
+    "archive": _cmd_archive,
+    "restore": _cmd_restore,
+    "purge": _cmd_purge,
+    "gc": _cmd_gc,
+    "ingest": _cmd_ingest,
+    "export": _cmd_export,
+    "import": _cmd_import,
+    "serve": _cmd_serve,
+    "push": _cmd_push,
+    "pull": _cmd_pull,
+    "galaxy": _cmd_galaxy,
+    "whoami": _cmd_whoami,
+    "doctor": _cmd_doctor,
+    "log": _cmd_log,
+}
+
+
+def _run_command(args, client, flag_agent_id) -> int:
+    try:
+        if args.cmd == "bootstrap":
+            return _cmd_bootstrap(args, client, flag_agent_id)
+        return _COMMANDS[args.cmd](args, client)
+    except KeyError as e:
+        if args.cmd not in _COMMANDS:
+            print(f"error: unknown command {args.cmd}", file=sys.stderr)
+            return 2
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except (ValueError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+
 def main(argv=None) -> int:
     # --json works in any position (agents append flags at the end)
     argv = list(sys.argv[1:] if argv is None else argv)
     as_json = "--json" in argv
     argv = [a for a in argv if a != "--json"]
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    args = build_parser().parse_args(argv)
     args.json = as_json or args.json
-    flag_agent_id = args.agent_id  # explicit --agent-id only; captured BEFORE env/config pre-fill below
+    # explicit --agent-id only; captured BEFORE env/config pre-fill below
+    flag_agent_id = args.agent_id
     if args.agent_id is None and args.cmd != "init":
         args.agent_id = default_agent_id(vault_dir(args))
-
     if args.cmd == "init":
-        from cairn.ingest import sanitize_task_id
-
-        vdir = vault_dir(args)
-        dirname = vdir.parent.name if vdir.name == ".cairn" else vdir.name
-        slug = sanitize_task_id(args.team or dirname)
-        project = args.project or dirname
-        team = args.team or slug
-        seat = flag_agent_id or os.environ.get("CAIRN_AGENT") or home_config_agent_id()
-        if not args.yes and sys.stdin.isatty():
-            print("cairn init — shared memory for this project (Enter accepts defaults)")
-            project = prompt("Project name", project)
-            slug = sanitize_task_id(prompt("Project slug", slug))
-            team = prompt("Team scope", team if args.team else slug)
-            agent = prompt("Your agent id (<harness>-<slug>, e.g. claude-myproj)", seat or f"human-{slug}")
-        else:
-            if seat is None:
-                print("error: init needs an identity — pass --agent-id <harness>-<slug> "
-                      "or set $CAIRN_AGENT (one session, one project, one id; never cairn-cli)",
-                      file=sys.stderr)
-                return 2
-            agent = seat
-        if (vdir / "vault.db").exists():
-            emit({"initialized": str(vdir / "vault.db"), "note": "already exists"}, args.json)
-            return 0
-        spec = args.embed_spec or "fastembed"
-        try:
-            embedder, effective, notice = resolve_init_embedder(spec)
-            Vault(vdir / "vault.db", embedder.name, embedder.dims, create=True,
-                  doc_threshold=args.doc_threshold).close()
-        except (ImportError, ValueError) as e:
-            print(f"error: {e}", file=sys.stderr)
-            return 2
-        except Exception as e:
-            print(f"error: {e}", file=sys.stderr)
-            return 2
-        write_embedder_hint(vdir, effective, embedder.dims)
-        ensure_vault_gitignore(vdir)
-        (vdir / "project.json").write_text(json.dumps(
-            {"project": project, "slug": slug, "team": team, "agent_id": agent}, indent=2))
-        out = {"initialized": str(vdir / "vault.db"), "embedder": embedder.name,
-               "dims": embedder.dims, "project": project, "team": team, "agent_id": agent}
-        if notice:
-            out["notice"] = notice
-        if effective == "hash":
-            coarse = ("hash embedder is coarse — the near-dup screen may miss collisions "
-                      "fastembed would catch; treat it as a tripwire, not a guarantee")
-            out["notice"] = f"{out['notice']} {coarse}" if out.get("notice") else coarse
-        emit(out, args.json)
-        return 0
-
+        return _cmd_init(args, flag_agent_id)
     if args.cmd == "embedd":
-        from cairn.embedd import main as embedd_main
-
-        argv = ["--spec", args.spec, "--idle", str(args.idle)]
-        if args.sock:
-            argv += ["--sock", args.sock]
-        if args.dims is not None:
-            argv += ["--dims", str(args.dims)]
-        return embedd_main(argv)
-
-    # serve needs the client but must not fail on... it needs the vault too
-    try:
-        client = build_client(args)
-    except FileNotFoundError as e:
-        print(f"error: {e}", file=sys.stderr)
+        return _cmd_embedd(args)
+    client = _open_client(args)
+    if client is None:
         return 2
-    except SpaceMismatchError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 2
-    except ImportError as e:  # hinted embedder (e.g. fastembed) not installed here
-        print(f"error: {e}", file=sys.stderr)
-        return 2
-    except ValueError as e:  # unknown embedder spec
-        print(f"error: {e}", file=sys.stderr)
-        return 2
-
-    try:
-        if args.cmd == "store":
-            res = client.store_memory(args.content, args.team, args.task, args.type,
-                                      args.origin, args.supersedes, args.mode)
-            emit(res.to_dict(), args.json)
-        elif args.cmd == "retrieve":
-            filters = {k: v for k, v in (("task_id", args.task), ("team_id", args.team),
-                                         ("memory_type", args.type)) if v}
-            emit([m.to_dict() for m in client.retrieve_memory(args.query, filters or None, args.top_k, args.min_sim)], args.json, full=True)
-        elif args.cmd == "list":
-            if args.canonical:
-                filters = {"canonical_id": args.canonical}
-            else:
-                filters = {k: v for k, v in (("task_id", args.task), ("memory_type", args.type),
-                                             ("status", args.status),
-                                             ("search", args.search)) if v}
-            if not filters:
-                print("error: list needs --task, --canonical, or --search", file=sys.stderr)
-                return 2
-            emit([m.to_dict() for m in client.list_memories(filters, args.limit)], args.json)
-        elif args.cmd == "get":
-            rec = client.get_memory(args.key)
-            emit(rec.to_dict() if rec else {"found": False, "key": args.key}, args.json)
-        elif args.cmd == "archive":
-            emit(client.archive_memory(args.key), args.json)
-        elif args.cmd == "restore":
-            emit(client.restore_memory(args.key), args.json)
-        elif args.cmd == "purge":
-            if not args.force:
-                print("error: purge is destructive — re-run with --force", file=sys.stderr)
-                return 2
-            emit(client.purge_memory(args.canonical_id), args.json)
-        elif args.cmd == "gc":
-            emit(client.gc(dry_run=not args.apply), args.json)
-        elif args.cmd == "ingest":
-            emit(ingest_dir(client, args.team, args.dir, args.type), args.json)
-        elif args.cmd == "export":
-            pack = client.export(args.since)
-            if args.out:
-                Path(args.out).write_text(json.dumps(pack))
-                emit({"exported": len(pack["memories"]), "out": args.out}, args.json)
-            else:
-                print(json.dumps(pack, default=str))
-        elif args.cmd == "import":
-            pack = json.loads(Path(args.pack).read_text())
-            emit(client.import_pack(pack), args.json)
-        elif args.cmd == "serve":
-            token = args.token or secrets.token_hex(16)
-            print(f"serving {vault_dir(args) / 'vault.db'} on http://{args.host}:{args.port} (token: {token})")
-            serve_forever(client, args.host, args.port, token)
-        elif args.cmd == "push":
-            emit(push_to(args.url, client.export(), token_for(args)), args.json)
-        elif args.cmd == "pull":
-            pack = pull_from(args.url, token_for(args), args.since)
-            if args.out:
-                Path(args.out).write_text(json.dumps(pack, default=str))
-                emit({"pulled": len(pack["memories"]), "out": args.out}, args.json)
-            else:
-                emit(client.import_pack(pack), args.json)
-        elif args.cmd == "galaxy":
-            if args.no_serve:
-                if not args.out:
-                    print("error: --no-serve needs --out PATH", file=sys.stderr)
-                    return 2
-                emit(render_galaxy(client, args.out, args.limit), args.json)
-            else:
-                html_info = render_galaxy(client, args.out, args.limit)
-                if args.port and galaxy_alive(args.host, args.port):
-                    # a universe is already running here — hand it over
-                    # instead of dying on EADDRINUSE
-                    url = galaxy_url(args.host, args.port)
-                    html_info.update({"url": url, "host": args.host,
-                                      "port": args.port, "reused": True})
-                    emit(html_info, args.json)
-                    if not args.json:
-                        print(f"galaxy already running at {url}"
-                              + ("" if args.no_open else "  (opened in browser)"))
-                    if not args.no_open:
-                        import webbrowser
-                        webbrowser.open(url)
-                    return 0
-                try:
-                    srv = bind_galaxy(client, args.host, args.port, args.limit)
-                except OSError:
-                    print(f"error: port {args.port} is busy (and not a cairn galaxy) — "
-                          "stop it or pick another with --port N", file=sys.stderr)
-                    return 1
-                host, port = srv.server_address[:2]
-                url = galaxy_url(str(host), int(port))
-                html_info["url"] = url
-                html_info["host"] = host
-                html_info["port"] = port
-                emit(html_info, args.json)
-                if not args.json:
-                    print(f"galaxy at {url}  (Ctrl-C to stop)")
-                if not args.no_open:
-                    import webbrowser
-                    webbrowser.open(url)
-                try:
-                    srv.serve_forever()
-                except KeyboardInterrupt:
-                    pass
-                finally:
-                    srv.server_close()
-        elif args.cmd == "whoami":
-            emit({"agent": client.agent_id, "vault": str(vault_dir(args) / "vault.db"),
-                  "embedder": client.embedder.name, "dims": client.embedder.dims}, args.json)
-        elif args.cmd == "doctor":
-            vdir = vault_dir(args)
-            try:
-                import sqlite_vec  # noqa: F401
-
-                vec = True
-            except ImportError:
-                vec = False
-            if args.repair_vec:
-                try:
-                    repaired = client.vault.rebuild_vec()
-                except RuntimeError as e:
-                    print(f"error: {e}", file=sys.stderr)
-                    return 2
-            else:
-                repaired = None
-            st = client.stats()
-            info = {"vault": str(vdir / "vault.db"),
-                    "vault_mb": round((vdir / "vault.db").stat().st_size / 1e6, 2),
-                    "memories": st["total"], "by_status": st["by_status"],
-                    "embedder": f"{st['embedder']}/{st['dims']}d",
-                    "sqlite_vec": vec,
-                    "docs": st["docs"],
-                    "doc_threshold": client.vault._doc_threshold,
-                    **client.vault.vec_status()}
-            if repaired is not None:
-                info["vec_rebuilt"] = repaired["rebuilt"]
-            emit(info, args.json)
-        elif args.cmd == "bootstrap":
-            from cairn.tutorial import ONBOARDING_TASK, seed_onboarding
-
-            vdir = vault_dir(args)
-            if not (vdir / "vault.db").exists():
-                print(f"error: no vault at {vdir / 'vault.db'} — run `cairn init` first", file=sys.stderr)
-                return 2
-            try:
-                proj = json.loads((vdir / "project.json").read_text())
-            except (OSError, ValueError):
-                proj = {}
-            team = proj.get("team") or "main"
-            agent = flag_agent_id or proj.get("agent_id") or client.agent_id
-            if flag_agent_id:
-                proj.update({"agent_id": agent,
-                             "project": proj.get("project") or Path.cwd().name,
-                             "slug": proj.get("slug") or team, "team": team})
-                (vdir / "project.json").write_text(json.dumps(proj, indent=2))
-            project = proj.get("project") or Path.cwd().name
-            warnings = []
-            if agent == "cairn-cli":
-                warnings.append("agent id is cairn-cli — re-run `cairn bootstrap --agent-id <harness>-<slug>` so writes attribute to this seat")
-            ensure_vault_gitignore(vdir)
-            seeded = {} if args.no_seed else seed_onboarding(client, team)
-            # .mcp.json — merge, never clobber other servers
-            mcp_path = Path.cwd() / ".mcp.json"
-            try:
-                mcp = json.loads(mcp_path.read_text())
-            except (OSError, ValueError):
-                mcp = {}
-            mcp.setdefault("mcpServers", {})["cairn"] = {
-                "command": args.server,
-                "env": {"CAIRN_DIR": str(vdir.resolve()), "CAIRN_AGENT": agent},
-            }
-            mcp_path.write_text(json.dumps(mcp, indent=2) + "\n")
-            # AGENTS.md — idempotent marked section
-            agents_path = Path.cwd() / "AGENTS.md"
-            section = agents_section(project, team, agent)
-            try:
-                text = agents_path.read_text()
-            except OSError:
-                text = ""
-            if AGENTS_BEGIN in text and AGENTS_END in text:
-                pre, rest = text.split(AGENTS_BEGIN, 1)
-                _, post = rest.split(AGENTS_END, 1)
-                text = pre + section + post
-            else:
-                text = (text.rstrip() + "\n\n" if text.strip() else "") + section
-            agents_path.write_text(text)
-            emit({"project": project, "team": team, "agent_id": agent,
-                  "mcp_json": str(mcp_path), "agents_md": str(agents_path),
-                  "onboarding_task": ONBOARDING_TASK, "seeded": seeded,
-                  "warnings": warnings}, args.json)
-            for w in warnings:
-                print(f"warning: {w}", file=sys.stderr)
-        elif args.cmd == "log":
-            lines = []
-            try:
-                with open(vault_dir(args) / "audit.jsonl") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line:
-                            lines.append(json.loads(line))
-            except OSError:
-                pass
-            emit(lines[-args.limit:], args.json)
-    except (KeyError, ValueError) as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 2
-    except OSError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 2
-    return 0
+    return _run_command(args, client, flag_agent_id)
 
 
 if __name__ == "__main__":
