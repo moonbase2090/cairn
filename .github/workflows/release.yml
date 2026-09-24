@@ -57,4 +57,8 @@ jobs:
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${GITHUB_REF_NAME}" dist/* --repo "${GITHUB_REPOSITORY}" --clobber
+        run: |
+          cd dist
+          rm -f SHA256SUMS
+          sha256sum cairn-* | sort -k2 > SHA256SUMS
+          gh release upload "${GITHUB_REF_NAME}" cairn-* SHA256SUMS --repo "${GITHUB_REPOSITORY}" --clobber
