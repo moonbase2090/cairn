@@ -1,8 +1,9 @@
-"""Team sync over HTTP — stdlib only. One vault serves, others push/pull packs.
+"""Team sync over HTTP or HTTPS — stdlib only. One vault serves, others push/pull packs.
 
 Server holds its own vault; `push` imports a pack into it, `pull` exports from
-it. Merge semantics are identical to file packs (idempotent key-union), so HTTP
-is just a transport. Bearer-token auth; bind localhost by default.
+it. Merge semantics are identical to file packs (idempotent key-union).
+Bearer-token auth. Plain HTTP is allowed only on a loopback address.
+A host other than loopback requires TLS 1.2+ and a bearer token.
 
 Threading: every request opens its own Vault connection (SQLite connections
 never cross threads); the embedder is stateless and shared.
@@ -10,11 +11,15 @@ never cross threads); the embedder is stateless and shared.
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
+import ssl
 import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib import request as urlrequest
+from urllib.parse import urlparse
 
 from .client import CairnClient
 from .store import Vault
@@ -106,41 +111,79 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(200, out)
 
 
-def _attach(srv, client, token: str):
+def _is_loopback(host: str) -> bool:
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _tls_context(cert: str | Path, key: str | Path) -> ssl.SSLContext:
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(certfile=str(cert), keyfile=str(key))
+    return ctx
+
+
+def _bind(client, host: str, port: int, token: str, tls_cert: str | None, tls_key: str | None):
+    if bool(tls_cert) != bool(tls_key):
+        raise ValueError("HTTPS needs both --tls-cert and --tls-key")
+    if not _is_loopback(host):
+        if not tls_cert:
+            raise ValueError("plain HTTP is only allowed on localhost; pass --tls-cert and --tls-key")
+        if not token:
+            raise ValueError("a bearer token is required when serving beyond localhost")
+    srv = ThreadingHTTPServer((host, port), _Handler)
     srv.client_factory = _factory_for(client)
     srv.token = token
+    if tls_cert:
+        srv.socket = _tls_context(tls_cert, tls_key).wrap_socket(srv.socket, server_side=True)
     return srv
 
 
-def start_background(client, host: str = "127.0.0.1", port: int = 0, token: str = ""):
+def start_background(client, host: str = "127.0.0.1", port: int = 0, token: str = "",
+                     tls_cert: str | None = None, tls_key: str | None = None):
     """Start the sync server in a daemon thread. Returns the server (has .server_address)."""
-    srv = _attach(ThreadingHTTPServer((host, port), _Handler), client, token)
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
-    t.start()
+    srv = _bind(client, host, port, token, tls_cert, tls_key)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
 
-def serve_forever(client, host: str = "127.0.0.1", port: int = 8778, token: str = "") -> None:
-    srv = _attach(ThreadingHTTPServer((host, port), _Handler), client, token)
+def serve_forever(client, host: str = "127.0.0.1", port: int = 8778, token: str = "",
+                  tls_cert: str | None = None, tls_key: str | None = None) -> None:
+    srv = _bind(client, host, port, token, tls_cert, tls_key)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
 
 
-def pull_from(base_url: str, token: str = "", since: int | None = None) -> dict:
+def _client_context(base_url: str, cafile: str | None):
+    parsed = urlparse(base_url)
+    host = parsed.hostname or ""
+    if parsed.scheme == "https":
+        return ssl.create_default_context(cafile=cafile)
+    if parsed.scheme == "http" and not _is_loopback(host):
+        raise ValueError("refusing plain HTTP to a non-local host; use https://")
+    return None
+
+
+def pull_from(base_url: str, token: str = "", since: int | None = None,
+              cafile: str | None = None) -> dict:
     url = base_url.rstrip("/") + "/pull" + (f"?since={since}" if since is not None else "")
     req = urlrequest.Request(url, headers={"Authorization": f"Bearer {token}"})
-    with urlrequest.urlopen(req, timeout=30) as resp:
+    with urlrequest.urlopen(req, timeout=30, context=_client_context(base_url, cafile)) as resp:
         return json.load(resp)
 
 
-def push_to(base_url: str, pack: dict, token: str = "") -> dict:
+def push_to(base_url: str, pack: dict, token: str = "", cafile: str | None = None) -> dict:
     data = json.dumps(pack, default=str).encode()
     req = urlrequest.Request(
         base_url.rstrip("/") + "/push",
         data=data,
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
     )
-    with urlrequest.urlopen(req, timeout=60) as resp:
+    with urlrequest.urlopen(req, timeout=60, context=_client_context(base_url, cafile)) as resp:
         return json.load(resp)
