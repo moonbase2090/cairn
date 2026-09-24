@@ -92,50 +92,105 @@ def make_client() -> CairnClient:
                        audit_path=vdir / "audit.jsonl")
 
 
-def call_tool(client: CairnClient, name: str, args: dict) -> str:
-    if name == "retrieve_memory":
-        filters = {k: args[k] for k in ("task_id", "team_id", "memory_type") if args.get(k)}
-        recs = client.retrieve_memory(args["query"], filters or None, int(args.get("top_k", 5)),
-                                      args.get("min_sim"))
-        return json.dumps([m.to_dict() for m in recs], indent=2, default=str)
-    if name == "store_memory":
-        res = client.store_memory(args["content"], args["team_id"], args["task_id"],
-                                  args.get("memory_type", "semantic"), args.get("origin", "agent"),
-                                  args.get("supersedes_key"), args.get("mode", "auto"))
-        return json.dumps(res.to_dict(), indent=2, default=str)
-    if name == "list_memories":
-        filters = {k: args[k] for k in ("task_id", "canonical_id", "memory_type", "status", "search") if args.get(k)}
-        if not filters:
-            raise ValueError("list_memories needs task_id, canonical_id, or search")
-        recs = client.list_memories(filters, int(args.get("limit", 100)))
-        return json.dumps([m.to_dict() for m in recs], indent=2, default=str)
-    if name == "get_memory":
-        rec = client.get_memory(args["key"])
-        return json.dumps(rec.to_dict() if rec else {"found": False}, indent=2, default=str)
-    if name == "archive_memory":
-        return json.dumps(client.archive_memory(args["key"]), default=str)
-    if name == "restore_memory":
-        return json.dumps(client.restore_memory(args["key"]), default=str)
-    if name == "cairn_howto":
-        return howto_text(args.get("topic"))
-    if name == "cairn_whoami":
-        return json.dumps({"agent": client.agent_id, "embedder": client.embedder.name,
-                           "dims": client.embedder.dims,
-                           "memories": client.vault.count()}, default=str)
-    if name == "cairn_gc":
-        return json.dumps(client.gc(dry_run=not bool(args.get("apply", False))), default=str)
-    if name == "cairn_export":
-        return json.dumps(client.export(args.get("since")), default=str)
-    if name == "cairn_import":
-        if not isinstance(args.get("pack"), dict):
-            raise ValueError("cairn_import needs a pack object from cairn_export")
-        return json.dumps(client.import_pack(args["pack"]), default=str)
-    if name == "cairn_ingest":
-        from cairn.ingest import ingest_dir
+def _dump(obj) -> str:
+    return json.dumps(obj, indent=2, default=str)
 
-        return json.dumps(ingest_dir(client, args["team"], args["dir"],
-                                     args.get("memory_type", "document")), default=str)
-    raise ValueError(f"unknown tool: {name}")
+
+def _tool_retrieve(client: CairnClient, args: dict) -> str:
+    filters = {k: args[k] for k in ("task_id", "team_id", "memory_type") if args.get(k)}
+    recs = client.retrieve_memory(
+        args["query"], filters or None, int(args.get("top_k", 5)), args.get("min_sim"),
+    )
+    return _dump([m.to_dict() for m in recs])
+
+
+def _tool_store(client: CairnClient, args: dict) -> str:
+    res = client.store_memory(
+        args["content"], args["team_id"], args["task_id"],
+        args.get("memory_type", "semantic"), args.get("origin", "agent"),
+        args.get("supersedes_key"), args.get("mode", "auto"),
+    )
+    return _dump(res.to_dict())
+
+
+def _tool_list(client: CairnClient, args: dict) -> str:
+    filters = {
+        k: args[k] for k in ("task_id", "canonical_id", "memory_type", "status", "search")
+        if args.get(k)
+    }
+    if not filters:
+        raise ValueError("list_memories needs task_id, canonical_id, or search")
+    recs = client.list_memories(filters, int(args.get("limit", 100)))
+    return _dump([m.to_dict() for m in recs])
+
+
+def _tool_get(client: CairnClient, args: dict) -> str:
+    rec = client.get_memory(args["key"])
+    return _dump(rec.to_dict() if rec else {"found": False})
+
+
+def _tool_archive(client: CairnClient, args: dict) -> str:
+    return json.dumps(client.archive_memory(args["key"]), default=str)
+
+
+def _tool_restore(client: CairnClient, args: dict) -> str:
+    return json.dumps(client.restore_memory(args["key"]), default=str)
+
+
+def _tool_howto(_client: CairnClient, args: dict) -> str:
+    return howto_text(args.get("topic"))
+
+
+def _tool_whoami(client: CairnClient, _args: dict) -> str:
+    return json.dumps({
+        "agent": client.agent_id, "embedder": client.embedder.name,
+        "dims": client.embedder.dims, "memories": client.vault.count(),
+    }, default=str)
+
+
+def _tool_gc(client: CairnClient, args: dict) -> str:
+    return json.dumps(client.gc(dry_run=not bool(args.get("apply", False))), default=str)
+
+
+def _tool_export(client: CairnClient, args: dict) -> str:
+    return json.dumps(client.export(args.get("since")), default=str)
+
+
+def _tool_import(client: CairnClient, args: dict) -> str:
+    if not isinstance(args.get("pack"), dict):
+        raise TypeError("cairn_import needs a pack object from cairn_export")
+    return json.dumps(client.import_pack(args["pack"]), default=str)
+
+
+def _tool_ingest(client: CairnClient, args: dict) -> str:
+    from cairn.ingest import ingest_dir
+
+    return json.dumps(ingest_dir(
+        client, args["team"], args["dir"], args.get("memory_type", "document"),
+    ), default=str)
+
+
+_TOOLS = {
+    "retrieve_memory": _tool_retrieve,
+    "store_memory": _tool_store,
+    "list_memories": _tool_list,
+    "get_memory": _tool_get,
+    "archive_memory": _tool_archive,
+    "restore_memory": _tool_restore,
+    "cairn_howto": _tool_howto,
+    "cairn_whoami": _tool_whoami,
+    "cairn_gc": _tool_gc,
+    "cairn_export": _tool_export,
+    "cairn_import": _tool_import,
+    "cairn_ingest": _tool_ingest,
+}
+
+
+def call_tool(client: CairnClient, name: str, args: dict) -> str:
+    fn = _TOOLS.get(name)
+    if fn is None:
+        raise ValueError(f"unknown tool: {name}")
+    return fn(client, args)
 
 
 def respond(msg_id, result=None, error=None) -> None:
@@ -148,40 +203,60 @@ def respond(msg_id, result=None, error=None) -> None:
     sys.stdout.flush()
 
 
+def _rpc_initialize(_client, msg_id, _msg) -> None:
+    respond(msg_id, {
+        "protocolVersion": PROTOCOL_VERSION,
+        "capabilities": {"tools": {}},
+        "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+    })
+
+
+def _rpc_ping(_client, msg_id, _msg) -> None:
+    respond(msg_id, {})
+
+
+def _rpc_tools(_client, msg_id, _msg) -> None:
+    respond(msg_id, {"tools": TOOL_DEFS})
+
+
+def _rpc_call(client, msg_id, msg) -> None:
+    params = msg.get("params", {})
+    try:
+        text = call_tool(client, params.get("name", ""), params.get("arguments", {}))
+        respond(msg_id, {"content": [{"type": "text", "text": text}]})
+    except (KeyError, ValueError, TypeError) as e:
+        respond(msg_id, error={"code": -32602, "message": str(e)})
+    except Exception as e:  # noqa: BLE001 — a tool bug must return JSON-RPC, not kill stdio
+        sys.stderr.write(f"cairn-mcp tool error: {type(e).__name__}: {e}\n")
+        respond(msg_id, error={"code": -32603, "message": f"{type(e).__name__}: {e}"})
+
+
+def _rpc_noop(_client, _msg_id, _msg) -> None:
+    return None
+
+
+_RPC = {
+    "initialize": _rpc_initialize,
+    "notifications/initialized": _rpc_noop,
+    "ping": _rpc_ping,
+    "tools/list": _rpc_tools,
+    "tools/call": _rpc_call,
+}
+
+
 def handle(client: CairnClient, msg: dict) -> bool:
     """Returns False to shut down."""
     method = msg.get("method")
     msg_id = msg.get("id")
-    if method == "initialize":
-        respond(msg_id, {"protocolVersion": PROTOCOL_VERSION,
-                         "capabilities": {"tools": {}},
-                         "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}})
-    elif method == "notifications/initialized":
-        pass  # no response to notifications
-    elif method == "ping":
-        respond(msg_id, {})
-    elif method == "tools/list":
-        respond(msg_id, {"tools": TOOL_DEFS})
-    elif method == "tools/call":
-        params = msg.get("params", {})
-        try:
-            text = call_tool(client, params.get("name", ""), params.get("arguments", {}))
-            respond(msg_id, {"content": [{"type": "text", "text": text}]})
-        except (KeyError, ValueError) as e:
-            respond(msg_id, error={"code": -32602, "message": str(e)})
-        except Exception as e:  # never kill the session on a tool bug
-            respond(msg_id, error={"code": -32603, "message": f"{type(e).__name__}: {e}"})
+    fn = _RPC.get(method)
+    if fn is not None:
+        fn(client, msg_id, msg)
     elif method is not None and msg_id is not None:
         respond(msg_id, error={"code": -32601, "message": f"unknown method: {method}"})
     return True
 
 
-def main() -> int:
-    try:
-        client = make_client()
-    except (FileNotFoundError, ValueError, ImportError) as e:
-        sys.stderr.write(f"cairn-mcp: {e}\n")
-        return 2
+def _read_stdio(client: CairnClient) -> int:
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -193,6 +268,15 @@ def main() -> int:
         if not handle(client, msg):
             break
     return 0
+
+
+def main() -> int:
+    try:
+        client = make_client()
+    except (FileNotFoundError, ValueError, ImportError) as e:
+        sys.stderr.write(f"cairn-mcp: {e}\n")
+        return 2
+    return _read_stdio(client)
 
 
 if __name__ == "__main__":

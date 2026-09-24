@@ -315,7 +315,7 @@ def test_galaxy_memory_endpoint(tmp_path):
     client = CairnClient(Vault(db, emb.name, emb.dims, create=True), "md-test", emb,
                          audit_path=Path(tmp_path) / "audit.jsonl")
     v1 = client.store_memory("# Title\n\nbody **bold**", team_id="t", task_id="k")
-    v2 = client.store_memory("## V2\n\n- item", team_id="t", task_id="k", supersedes_key=v1.key)
+    client.store_memory("## V2\n\n- item", team_id="t", task_id="k", supersedes_key=v1.key)
     srv = start_background(client, host="127.0.0.1", port=0)
     try:
         import json
@@ -328,11 +328,13 @@ def test_galaxy_memory_endpoint(tmp_path):
         assert [(v["version"], v["status"]) for v in body["versions"]] == [(1, "superseded"), (2, "active")]
         actions = [a["action"] for a in body["audit"]]
         assert actions.count("store") == 2  # v1 create + v2 supersede linked via `supersedes`
+        from urllib.error import HTTPError
+
         try:
             urlopen(base + "/memory?key=nope", timeout=5)
             raise AssertionError("expected 404")
-        except Exception as e:
-            assert "404" in str(e)
+        except HTTPError as e:
+            assert e.code == 404
     finally:
         srv.shutdown()
         srv.server_close()
