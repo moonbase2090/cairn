@@ -13,6 +13,13 @@ from pathlib import Path
 
 import numpy as np
 
+from .storage import (
+    ContentIntegrityError,
+    MemoryQuery,
+    SpaceMismatchError,
+    StorageBackend,
+)
+
 log = logging.getLogger(__name__)
 
 try:
@@ -86,19 +93,15 @@ READ_COLUMNS = [c for c in COLUMNS if c != "embedding"]
 DEFAULT_DOC_THRESHOLD = 2048  # memories larger than this spill content to docs/
 
 
-class SpaceMismatchError(ValueError):
-    pass
+class Vault(StorageBackend):
+    """The default `sqlite` storage backend."""
 
+    name = "sqlite"
 
-class ContentIntegrityError(ValueError):
-    """A docs/ file is missing or fails its hash check. Loud by design —
-    integrity failures must never degrade to silent wrong answers."""
-
-
-class Vault:
     def __init__(self, db_path: str | Path, embed_name: str, dims: int, create: bool = False,
                  doc_threshold: int | None = None):
         self.db_path = Path(db_path)
+        self._embed_name, self._dims = embed_name, dims
         if not create and not self.db_path.exists():
             raise FileNotFoundError(
                 f"no vault at {self.db_path} — run `cairn init` first"
@@ -166,6 +169,17 @@ class Vault:
             self._doc_threshold = DEFAULT_DOC_THRESHOLD
         self._txn = False
         self._vec_ok = self._vec_index_ok()
+
+    @property
+    def vault_dir(self) -> Path:
+        return self.db_path.parent
+
+    def reopen(self) -> Vault:
+        return Vault(self.db_path, self._embed_name, self._dims)
+
+    @property
+    def doc_threshold(self) -> int:
+        return self._doc_threshold
 
     # -- content-addressed docs -------------------------------------------
     # Memories over the threshold spill full text to docs/<aa>/<bb>/<hash>.md
@@ -597,8 +611,39 @@ class Vault:
         q += " ORDER BY created_at ASC LIMIT ?"
         return self.conn.execute(q, (*args, limit)).fetchall()
 
+    def find(self, query: MemoryQuery, limit: int = 100,
+             with_embedding: bool = False) -> list[sqlite3.Row]:
+        clauses: list[str] = []
+        args: list = []
+        for col, val in query.eq.items():
+            clauses.append(f"{col}=?")  # col is checked against FILTER_COLUMNS
+            args.append(val)
+        if query.exclude_key is not None:
+            clauses.append("key!=?")
+            args.append(query.exclude_key)
+        if query.updated_before is not None:
+            clauses.append("updated_at<=?")
+            args.append(query.updated_before)
+        if query.updated_since is not None:
+            clauses.append("updated_at>=?")
+            args.append(query.updated_since)
+        if query.archived_before is not None:
+            clauses.append("archived_at IS NOT NULL AND archived_at<=?")
+            args.append(query.archived_before)
+        if query.expired_by is not None:
+            clauses.append("expires_at IS NOT NULL AND expires_at<=?")
+            args.append(query.expired_by)
+        return self.scan(" AND ".join(clauses), tuple(args), limit, with_embedding)
+
     def count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) c FROM memories").fetchone()["c"]
+
+    def count_by_status(self) -> dict[str, int]:
+        return {
+            r["status"]: r["c"]
+            for r in self.conn.execute(
+                "SELECT status, COUNT(*) c FROM memories GROUP BY status").fetchall()
+        }
 
     @staticmethod
     def sanitize_fts(text: str) -> str | None:

@@ -16,6 +16,8 @@ from urllib.parse import urlparse
 
 import numpy as np
 
+from .storage import MemoryQuery
+
 
 def pca2(matrix: np.ndarray) -> np.ndarray:
     """Project (n, d) to (n, 2) via SVD. Deterministic."""
@@ -77,7 +79,7 @@ def to_points(client, limit: int = 2000) -> list[dict]:
     Embeddings come from the limited scan. The page carries a short preview.
     Full text loads from ``/memory`` when the reader expands a star.
     """
-    rows = client.vault.scan("", (), limit, with_embedding=True)
+    rows = client.vault.find(MemoryQuery(), limit, with_embedding=True)
     mat, meta = [], []
     for r in rows:
         blob = r["embedding"]
@@ -148,13 +150,11 @@ def galaxy(client, out_path: str | Path | None = None, limit: int = 2000) -> dic
 
 def _factory_for(client):
     from cairn.client import CairnClient
-    from cairn.store import Vault
 
     vault, embedder, agent = client.vault, client.embedder, client.agent_id
 
     def make():
-        v = Vault(vault.db_path, embedder.name, embedder.dims)
-        return CairnClient(v, agent, embedder)
+        return CairnClient(vault.reopen(), agent, embedder)
 
     return make
 
@@ -234,9 +234,10 @@ class _Handler(BaseHTTPRequestHandler):
                     raw = json.dumps({"error": f"not found: {key}"}).encode()
                     self.send_response(404)
                 else:
-                    from .store import ContentIntegrityError
+                    from .storage import ContentIntegrityError
 
-                    rows = client.vault.scan("canonical_id=?", (rec.canonical_id,), 50)
+                    rows = client.vault.find(
+                        MemoryQuery(eq={"canonical_id": rec.canonical_id}), 50)
                     versions = []
                     for r in rows:
                         try:
@@ -249,7 +250,7 @@ class _Handler(BaseHTTPRequestHandler):
                             "created_at": int(r["created_at"] or 0),
                             "content": vcontent,
                         })
-                    audit = _audit_for(client.vault.db_path.parent, key, rec.canonical_id)
+                    audit = _audit_for(client.vault.vault_dir, key, rec.canonical_id)
                     raw = json.dumps({"record": rec.to_dict(), "versions": versions,
                                       "audit": audit}).encode()
                     self.send_response(200)

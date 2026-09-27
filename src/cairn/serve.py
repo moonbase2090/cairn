@@ -5,7 +5,7 @@ it. Merge semantics are identical to file packs (idempotent key-union).
 Bearer-token auth. Plain HTTP is allowed only on a loopback address.
 A host other than loopback requires TLS 1.2+ and a bearer token.
 
-Threading: every request opens its own Vault connection (SQLite connections
+Threading: every request reopens the storage backend (SQLite connections
 never cross threads); the embedder is stateless and shared.
 """
 from __future__ import annotations
@@ -22,16 +22,14 @@ from urllib import request as urlrequest
 from urllib.parse import urlparse
 
 from .client import CairnClient
-from .store import Vault
 
 
 def _factory_for(client: CairnClient):
     vault, embedder, agent = client.vault, client.embedder, client.agent_id
 
     def make():
-        v = Vault(vault.db_path, embedder.name, embedder.dims)
-        audit = vault.db_path.parent / "audit.jsonl"
-        return CairnClient(v, agent, embedder, audit_path=audit)
+        audit = vault.vault_dir / "audit.jsonl"
+        return CairnClient(vault.reopen(), agent, embedder, audit_path=audit)
 
     return make
 

@@ -38,7 +38,7 @@ from cairn.galaxy import galaxy as render_galaxy
 from cairn.galaxy import galaxy_alive, galaxy_url
 from cairn.ingest import ingest_dir
 from cairn.serve import pull_from, push_to, serve_forever
-from cairn.store import SpaceMismatchError, Vault
+from cairn.storage import SpaceMismatchError, open_backend
 
 DEFAULT_EMBED = "hash"
 
@@ -173,7 +173,7 @@ def build_client(args) -> CairnClient:
     embedder = get_embedder(embed_spec, dims=None if args.embed else dims)
     if not args.embed and dims is None:
         write_embedder_hint(vdir, embed_spec, embedder.dims)
-    vault = Vault(vdir / "vault.db", embedder.name, embedder.dims)
+    vault = open_backend(vdir, embedder.name, embedder.dims)
     return CairnClient(vault, args.agent_id, embedder, audit_path=vdir / "audit.jsonl")
 
 
@@ -419,8 +419,8 @@ def _cmd_init(args, flag_agent_id) -> int:
     spec = args.embed_spec or "fastembed"
     try:
         embedder, effective, notice = resolve_init_embedder(spec)
-        Vault(
-            vdir / "vault.db", embedder.name, embedder.dims, create=True,
+        open_backend(
+            vdir, embedder.name, embedder.dims, create=True,
             doc_threshold=args.doc_threshold,
         ).close()
     except (ImportError, ValueError, OSError, sqlite3.Error) as e:
@@ -667,7 +667,7 @@ def _cmd_doctor(args, client) -> int:
         "embedder": f"{st['embedder']}/{st['dims']}d",
         "sqlite_vec": vec,
         "docs": st["docs"],
-        "doc_threshold": client.vault._doc_threshold,
+        "doc_threshold": client.vault.doc_threshold,
         **client.vault.vec_status(),
     }
     if repaired is not None:

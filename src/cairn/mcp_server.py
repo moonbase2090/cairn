@@ -18,7 +18,7 @@ from pathlib import Path
 from cairn import __version__ as CAIRN_VERSION
 from cairn.client import CairnClient
 from cairn.embed import format_embedder_hint, get_embedder, parse_embedder_hint
-from cairn.store import Vault
+from cairn.storage import open_backend
 from cairn.tutorial import howto_text
 
 SERVER_NAME = "cairn"
@@ -88,7 +88,7 @@ def make_client() -> CairnClient:
             (vdir / "embedder").write_text(format_embedder_hint(spec, embedder.dims))
         except OSError:
             pass
-    return CairnClient(Vault(db, embedder.name, embedder.dims), agent, embedder,
+    return CairnClient(open_backend(vdir, embedder.name, embedder.dims), agent, embedder,
                        audit_path=vdir / "audit.jsonl")
 
 

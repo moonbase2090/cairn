@@ -13,7 +13,12 @@ import pytest
 
 from cairn.embed import HashEmbedder
 from cairn.embedd import (
-    DARWIN_SUN_PATH, SocketEmbedder, check_sock_path, ping, sock_path, spawn,
+    DARWIN_SUN_PATH,
+    SocketEmbedder,
+    check_sock_path,
+    ping,
+    sock_path,
+    spawn,
     spawn_lock,
 )
 

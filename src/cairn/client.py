@@ -23,7 +23,7 @@ from .models import (
     content_digest,
     now_epoch,
 )
-from .store import Vault
+from .storage import MemoryQuery, StorageBackend
 
 NEAR_DUP_SIM = 0.95
 OVERSAMPLE = 20
@@ -62,7 +62,7 @@ def _row_to_record(row, content: str | None, similarity: float | None = None) ->
 
 
 class CairnClient:
-    def __init__(self, vault: Vault, agent_id: str, embedder: Embedder, audit_path: Path | None = None):
+    def __init__(self, vault: StorageBackend, agent_id: str, embedder: Embedder, audit_path: Path | None = None):
         self.vault = vault
         self.agent_id = agent_id
         self.embedder = embedder
@@ -219,14 +219,12 @@ class CairnClient:
                     continue
                 out.append(self._record(r))
             return out
-        clauses, args = [], []
-        for col in ("task_id", "canonical_id", "memory_type", "status", "team_id", "agent_id"):
-            if col in filters and filters[col] is not None:
-                clauses.append(f"{col}=?")
-                args.append(filters[col])
-        if not clauses:
+        eq = {col: filters[col] for col in
+              ("task_id", "canonical_id", "memory_type", "status", "team_id", "agent_id")
+              if filters.get(col) is not None}
+        if not eq:
             raise ValueError("list needs at least one filter (task_id, canonical_id, search, …)")
-        rows = self.vault.scan(" AND ".join(clauses), tuple(args), limit)
+        rows = self.vault.find(MemoryQuery(eq=eq), limit)
         return [self._record(r) for r in rows]
 
     def get_memory(self, key: str) -> MemoryRecord | None:
@@ -253,16 +251,13 @@ class CairnClient:
             if row["status"] == Status.SUPERSEDED.value:
                 # undoing a correction: the active rival(s) that replaced this memory
                 # were the mistake — archive them so exactly one version stays active
-                rivals = self.vault.scan(
-                    "canonical_id=? AND status=? AND key!=?",
-                    (row["canonical_id"], Status.ACTIVE.value, key), 100)
+                rivals = self.vault.find(MemoryQuery(
+                    eq={"canonical_id": row["canonical_id"], "status": Status.ACTIVE.value},
+                    exclude_key=key), 100)
                 for r in rivals:
                     self.vault.set_status(r["key"], Status.ARCHIVED.value, now, archived_at=now)
                     retired.append(r["key"])
-            self.vault.conn.execute(
-                "UPDATE memories SET status=?, updated_at=?, archived_at=NULL WHERE key=?",
-                (Status.ACTIVE.value, now, key),
-            )
+            self.vault.set_status(key, Status.ACTIVE.value, now, archived_at=None)
         self._audit("restore", {"key": key, "retired": retired})
         return {"key": key, "status": "active", "retired": retired}
 
@@ -280,13 +275,11 @@ class CairnClient:
         """
         now = now_epoch()
         total = self.vault.count()
-        promote_rows = self._capped(
-            "status=? AND updated_at<=?", (Status.SUPERSEDED.value, now - 7 * 86400), "promote")
-        archived_rows = self._capped(
-            "status=? AND archived_at IS NOT NULL AND archived_at<=?",
-            (Status.ARCHIVED.value, now - 30 * 86400), "archived")
-        expired_rows = self._capped(
-            "expires_at IS NOT NULL AND expires_at<=?", (now,), "expired")
+        promote_rows = self._capped(MemoryQuery(
+            eq={"status": Status.SUPERSEDED.value}, updated_before=now - 7 * 86400), "promote")
+        archived_rows = self._capped(MemoryQuery(
+            eq={"status": Status.ARCHIVED.value}, archived_before=now - 30 * 86400), "archived")
+        expired_rows = self._capped(MemoryQuery(expired_by=now), "expired")
         promote = [r["key"] for r in promote_rows]
         doomed = {r["key"] for r in archived_rows} | {r["key"] for r in expired_rows}
         breaker = len(doomed) > max(10, int(total * 0.05))
@@ -309,8 +302,8 @@ class CairnClient:
         result["orphan_docs"] = orphans
         return result
 
-    def _capped(self, where: str, args: tuple, label: str) -> list:
-        rows = self.vault.scan(where, args, GC_CAP + 1)
+    def _capped(self, query: MemoryQuery, label: str) -> list:
+        rows = self.vault.find(query, GC_CAP + 1)
         if len(rows) > GC_CAP:
             raise RuntimeError(
                 f"gc {label} hit the {GC_CAP} row cap; refusing a partial sweep"
@@ -319,18 +312,14 @@ class CairnClient:
 
     # -- stats -----------------------------------------------------------------
     def stats(self) -> dict:
-        by_status = {
-            r["status"]: r["c"]
-            for r in self.vault.conn.execute("SELECT status, COUNT(*) c FROM memories GROUP BY status").fetchall()
-        }
-        return {"total": self.vault.count(), "by_status": by_status,
+        return {"total": self.vault.count(), "by_status": self.vault.count_by_status(),
                 "agent": self.agent_id, "embedder": self.embedder.name,
                 "dims": self.embedder.dims, "docs": self.vault.doc_stats()}
 
     # -- sync packs (git-native team mode) -----------------------------------------
     def export(self, since: int | None = None) -> dict:
-        where, args = ("", ()) if since is None else ("updated_at>=?", (since,))
-        rows = self.vault.scan(where, args, EXPORT_CAP + 1, with_embedding=True)
+        rows = self.vault.find(MemoryQuery(updated_since=since), EXPORT_CAP + 1,
+                               with_embedding=True)
         if len(rows) > EXPORT_CAP:
             raise RuntimeError(
                 f"export hit the {EXPORT_CAP} row cap; refusing a partial pack"
