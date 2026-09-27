@@ -166,15 +166,41 @@ class StorageBackend:
 Opener = Callable[..., StorageBackend]
 
 
-def _open_sqlite(vault_dir: Path, embed_name: str, dims: int, create: bool = False,
-                 doc_threshold: int | None = None) -> StorageBackend:
+@dataclass(frozen=True)
+class StorageConfig:
+    """Validated connection settings for the selected live-store backend."""
+
+    backend: str = DEFAULT_BACKEND
+    url: str | None = None
+
+    def __post_init__(self):
+        if not isinstance(self.backend, str) or not self.backend:
+            raise ValueError("[storage] backend must be a non-empty string")
+        if self.url is not None and not isinstance(self.url, str):
+            raise ValueError("[storage] url must be a string")
+        if self.backend == "postgres" and (self.url is None or not self.url.strip()):
+            raise ValueError("[storage] url is required when backend = 'postgres'")
+        if self.backend != "postgres" and self.url is not None:
+            raise ValueError("[storage] url is only supported when backend = 'postgres'")
+
+
+def _open_sqlite(vault_dir: Path, embed_name: str, dims: int, config: StorageConfig,
+                 create: bool = False, doc_threshold: int | None = None) -> StorageBackend:
     from .store import Vault
 
     return Vault(Path(vault_dir) / "vault.db", embed_name, dims, create=create,
                  doc_threshold=doc_threshold)
 
 
-BACKENDS: dict[str, Opener] = {"sqlite": _open_sqlite}
+def _open_postgres(vault_dir: Path, embed_name: str, dims: int, config: StorageConfig,
+                   create: bool = False, doc_threshold: int | None = None) -> StorageBackend:
+    from .postgres import PostgresVault
+
+    return PostgresVault(Path(vault_dir), embed_name, dims, config.url,
+                         create=create, doc_threshold=doc_threshold)
+
+
+BACKENDS: dict[str, Opener] = {"sqlite": _open_sqlite, "postgres": _open_postgres}
 
 
 def backend_names() -> Iterator[str]:
@@ -182,13 +208,22 @@ def backend_names() -> Iterator[str]:
 
 
 def open_backend(vault_dir: Path, embed_name: str, dims: int, *,
-                 backend: str = DEFAULT_BACKEND, create: bool = False,
+                 config: StorageConfig | None = None, backend: str | None = None,
+                 url: str | None = None, create: bool = False,
                  doc_threshold: int | None = None) -> StorageBackend:
     """Open (or with create=True, initialise) a vault on the named backend."""
+    if config is None:
+        config = StorageConfig(
+            backend=DEFAULT_BACKEND if backend is None else backend,
+            url=url,
+        )
+    elif backend is not None or url is not None:
+        raise ValueError("pass either config or backend/url to open_backend, not both")
     try:
-        opener = BACKENDS[backend]
+        opener = BACKENDS[config.backend]
     except KeyError:
         raise UnknownBackendError(
-            f"unknown storage backend {backend!r}; available: {', '.join(backend_names())}"
+            f"unknown storage backend {config.backend!r}; available: {', '.join(backend_names())}"
         ) from None
-    return opener(Path(vault_dir), embed_name, dims, create=create, doc_threshold=doc_threshold)
+    return opener(Path(vault_dir), embed_name, dims, config,
+                  create=create, doc_threshold=doc_threshold)

@@ -6,6 +6,9 @@ must pass unchanged. Nothing in the contract may touch a database driver.
 """
 from __future__ import annotations
 
+import os
+import uuid
+
 import numpy as np
 import pytest
 
@@ -16,13 +19,15 @@ from cairn.storage import (
     ContentIntegrityError,
     MemoryQuery,
     SpaceMismatchError,
+    StorageConfig,
     StorageBackend,
     UnknownBackendError,
     open_backend,
 )
 from cairn.store import Vault
 
-CONTRACT_BACKENDS = ["sqlite"]
+CONTRACT_BACKENDS = ["sqlite", "postgres"]
+POSTGRES_URL = os.environ.get("CAIRN_TEST_POSTGRES_URL")
 
 DIMS = 8
 EMBED = "contract-embed"
@@ -92,10 +97,26 @@ class TestStorageContract:
     @pytest.fixture
     def open_vault(self, backend_name, tmp_path):
         opened: list[StorageBackend] = []
+        schema = None
+        config = StorageConfig()
+        if backend_name == "postgres":
+            if not POSTGRES_URL:
+                pytest.skip("CAIRN_TEST_POSTGRES_URL is not set")
+            import psycopg
+            from psycopg.conninfo import make_conninfo
+            from psycopg.sql import Identifier, SQL
+
+            schema = f"cairn_test_{uuid.uuid4().hex}"
+            with psycopg.connect(POSTGRES_URL, autocommit=True) as conn:
+                conn.execute(SQL("CREATE SCHEMA {}").format(Identifier(schema)))
+            url = make_conninfo(POSTGRES_URL, options=f"-c search_path={schema},public")
+            config = StorageConfig(backend=backend_name, url=url)
+        else:
+            config = StorageConfig(backend=backend_name)
 
         def _open(create: bool = False, embed: str = EMBED, dims: int = DIMS,
                   doc_threshold: int | None = 64) -> StorageBackend:
-            b = open_backend(tmp_path / "vault", embed, dims, backend=backend_name,
+            b = open_backend(tmp_path / "vault", embed, dims, config=config,
                              create=create, doc_threshold=doc_threshold)
             opened.append(b)
             return b
@@ -103,6 +124,11 @@ class TestStorageContract:
         yield _open
         for b in opened:
             b.close()  # close() must be safe to call twice
+        if schema is not None:
+            from psycopg.sql import Identifier, SQL
+
+            with psycopg.connect(POSTGRES_URL, autocommit=True) as conn:
+                conn.execute(SQL("DROP SCHEMA {} CASCADE").format(Identifier(schema)))
 
     @pytest.fixture
     def vault(self, open_vault) -> StorageBackend:
@@ -135,6 +161,15 @@ class TestStorageContract:
         vault.close()
         again = open_vault()
         assert again.get("k1")["content"] == "persisted fact"
+
+    def test_initialization_is_idempotent(self, vault, open_vault):
+        vault.insert(record("k1", "persisted fact"), unit(0))
+        again = open_vault(create=True)
+        try:
+            assert again.count() == 1
+            assert again.get("k1")["content"] == "persisted fact"
+        finally:
+            again.close()
 
     def test_close_is_idempotent(self, open_vault):
         v = open_vault(create=True)
@@ -356,7 +391,16 @@ def test_sqlite_is_the_default_backend(tmp_path):
         v.close()
 
 
+def test_backend_keyword_remains_supported(tmp_path):
+    v = open_backend(tmp_path, EMBED, DIMS, backend="sqlite", create=True)
+    try:
+        assert v.name == "sqlite"
+    finally:
+        v.close()
+
+
 def test_unknown_backend_is_a_clear_error(tmp_path):
-    with pytest.raises(UnknownBackendError, match="unknown storage backend 'nosuch'.*sqlite"):
-        open_backend(tmp_path, EMBED, DIMS, backend="nosuch", create=True)
+    with pytest.raises(UnknownBackendError, match="unknown storage backend 'nosuch'.*postgres.*sqlite"):
+        open_backend(tmp_path, EMBED, DIMS,
+                     config=StorageConfig(backend="nosuch"), create=True)
     assert not (tmp_path / "vault.db").exists()

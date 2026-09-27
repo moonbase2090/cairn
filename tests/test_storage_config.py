@@ -3,9 +3,9 @@ import json
 
 import pytest
 
-from cairn.cli import main, storage_backend
+from cairn.cli import main, storage_config
 from cairn.mcp_server import make_client
-from cairn.storage import UnknownBackendError
+from cairn.storage import StorageConfig, UnknownBackendError
 
 
 @pytest.fixture
@@ -27,27 +27,27 @@ def run(argv, capsys):
 
 def test_default_is_sqlite(dirs):
     _, vdir = dirs
-    assert storage_backend(vdir) == "sqlite"
+    assert storage_config(vdir) == StorageConfig()
 
 
 def test_home_config_selects_backend(dirs):
     home_cfg, vdir = dirs
     home_cfg.write_text('[agent]\nid = "x"\n\n[storage]\nbackend = "from-home"\n')
-    assert storage_backend(vdir) == "from-home"
+    assert storage_config(vdir) == StorageConfig(backend="from-home")
 
 
 def test_vault_config_wins_over_home(dirs):
     home_cfg, vdir = dirs
     home_cfg.write_text('[storage]\nbackend = "from-home"\n')
     (vdir / "config.toml").write_text('[storage]\nbackend = "sqlite"\n')
-    assert storage_backend(vdir) == "sqlite"
+    assert storage_config(vdir) == StorageConfig()
 
 
 def test_config_without_storage_table_falls_through(dirs):
     home_cfg, vdir = dirs
     (vdir / "config.toml").write_text('[agent]\nid = "x"\n')
     home_cfg.write_text('[storage]\nbackend = "from-home"\n')
-    assert storage_backend(vdir) == "from-home"
+    assert storage_config(vdir) == StorageConfig(backend="from-home")
 
 
 @pytest.mark.parametrize("body", [
@@ -59,7 +59,39 @@ def test_malformed_config_is_an_error(dirs, body):
     _, vdir = dirs
     (vdir / "config.toml").write_text(body)
     with pytest.raises(ValueError, match="config.toml"):
-        storage_backend(vdir)
+        storage_config(vdir)
+
+
+def test_postgres_config_reads_connection_url(dirs):
+    home_cfg, vdir = dirs
+    home_cfg.write_text('[storage]\nbackend = "postgres"\nurl = "postgresql://localhost/cairn"\n')
+    assert storage_config(vdir) == StorageConfig(
+        backend="postgres", url="postgresql://localhost/cairn")
+
+
+def test_postgres_config_requires_url(dirs):
+    _, vdir = dirs
+    (vdir / "config.toml").write_text('[storage]\nbackend = "postgres"\n')
+    with pytest.raises(ValueError, match="url is required"):
+        storage_config(vdir)
+
+
+def test_storage_url_without_backend_is_an_error(dirs):
+    _, vdir = dirs
+    (vdir / "config.toml").write_text('[storage]\nurl = "postgresql://localhost/cairn"\n')
+    with pytest.raises(ValueError, match="url requires backend"):
+        storage_config(vdir)
+
+
+def test_postgres_connection_failure_is_a_cli_error(dirs, capsys):
+    _, vdir = dirs
+    (vdir / "config.toml").write_text(
+        '[storage]\nbackend = "postgres"\nurl = "postgresql://localhost:1/cairn"\n'
+    )
+    rc, _, err = run(["doctor"], capsys)
+    assert rc == 2
+    assert "cannot connect to PostgreSQL storage" in err
+    assert "Traceback" not in err
 
 
 def test_init_and_doctor_report_sqlite(dirs, capsys):
