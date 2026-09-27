@@ -38,7 +38,10 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install project and dev dependencies
-        run: pip install -e ".[dev,postgres]"
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -e ".[dev,postgres]"
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Enable pgvector outside public
         run: |
           python - <<'PY'
