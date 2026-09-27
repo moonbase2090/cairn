@@ -87,6 +87,14 @@ COLUMNS = [
     "created_at", "updated_at", "expires_at", "archived_at", "supersedes",
     "parent_key",     "provenance", "confidence", "content_hash", "embedding",
 ]
+# MemoryQuery bounds: field name -> SQL condition on one bound value.
+QUERY_BOUNDS = (
+    ("exclude_key", "key!=?"),
+    ("updated_before", "updated_at<=?"),
+    ("updated_since", "updated_at>=?"),
+    ("archived_before", "archived_at IS NOT NULL AND archived_at<=?"),
+    ("expired_by", "expires_at IS NOT NULL AND expires_at<=?"),
+)
 # Reads that do not score vectors skip the embedding blob.
 READ_COLUMNS = [c for c in COLUMNS if c != "embedding"]
 
@@ -613,26 +621,14 @@ class Vault(StorageBackend):
 
     def find(self, query: MemoryQuery, limit: int = 100,
              with_embedding: bool = False) -> list[sqlite3.Row]:
-        clauses: list[str] = []
-        args: list = []
-        for col, val in query.eq.items():
-            clauses.append(f"{col}=?")  # col is checked against FILTER_COLUMNS
-            args.append(val)
-        if query.exclude_key is not None:
-            clauses.append("key!=?")
-            args.append(query.exclude_key)
-        if query.updated_before is not None:
-            clauses.append("updated_at<=?")
-            args.append(query.updated_before)
-        if query.updated_since is not None:
-            clauses.append("updated_at>=?")
-            args.append(query.updated_since)
-        if query.archived_before is not None:
-            clauses.append("archived_at IS NOT NULL AND archived_at<=?")
-            args.append(query.archived_before)
-        if query.expired_by is not None:
-            clauses.append("expires_at IS NOT NULL AND expires_at<=?")
-            args.append(query.expired_by)
+        # eq columns are checked against FILTER_COLUMNS by MemoryQuery
+        clauses = [f"{col}=?" for col in query.eq]
+        args = list(query.eq.values())
+        for field, sql in QUERY_BOUNDS:
+            value = getattr(query, field)
+            if value is not None:
+                clauses.append(sql)
+                args.append(value)
         return self.scan(" AND ".join(clauses), tuple(args), limit, with_embedding)
 
     def count(self) -> int:

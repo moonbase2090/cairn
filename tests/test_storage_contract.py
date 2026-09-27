@@ -50,6 +50,40 @@ def record(key: str, content: str, **over) -> dict:
     return rec
 
 
+FIND_CASES = [
+    pytest.param(MemoryQuery(), 100, ["a", "b", "c"], id="all-by-created"),
+    pytest.param(MemoryQuery(), 2, ["a", "b"], id="limit"),
+    pytest.param(MemoryQuery(eq={"canonical_id": "c1"}), 100, ["a", "b"], id="eq"),
+    pytest.param(MemoryQuery(eq={"canonical_id": "c1", "status": "active"}), 100, ["a"],
+                 id="eq-and"),
+    pytest.param(MemoryQuery(eq={"team_id": "t2"}), 100, ["c"], id="eq-team"),
+    pytest.param(MemoryQuery(eq={"canonical_id": "c1"}, exclude_key="a"), 100, ["b"],
+                 id="exclude-key"),
+    pytest.param(MemoryQuery(updated_before=NOW), 100, ["a", "b"], id="updated-before"),
+    pytest.param(MemoryQuery(updated_since=NOW), 100, ["b", "c"], id="updated-since"),
+    pytest.param(MemoryQuery(archived_before=NOW), 100, ["c"], id="archived-before"),
+    pytest.param(MemoryQuery(archived_before=NOW - 51), 100, [], id="archived-before-none"),
+    pytest.param(MemoryQuery(expired_by=NOW), 100, ["c"], id="expired-by"),
+    pytest.param(MemoryQuery(expired_by=NOW - 2), 100, [], id="expired-by-none"),
+]
+
+FTS_CASES = [
+    pytest.param("coolant", {}, ["a", "b"], id="active-only"),
+    pytest.param("coolant", {"extra": {"team_id": "t2"}}, ["b"], id="extra-filter"),
+    pytest.param("coolant", {"status": "archived"}, ["d"], id="status"),
+    pytest.param("coolant pressure", {}, ["a"], id="all-terms"),
+]
+
+
+def interface_members():
+    """(name, member) for every public method and property of StorageBackend."""
+    for name, member in vars(StorageBackend).items():
+        if name.startswith("_"):
+            continue
+        if callable(member) or isinstance(member, property):
+            yield name, member
+
+
 class TestStorageContract:
     @pytest.fixture(params=CONTRACT_BACKENDS)
     def backend_name(self, request):
@@ -81,11 +115,8 @@ class TestStorageContract:
         assert vault.vault_dir.is_dir()
 
     def test_overrides_every_interface_member(self, vault):
-        missing = [
-            name for name, member in vars(StorageBackend).items()
-            if not name.startswith("_") and (callable(member) or isinstance(member, property))
-            and getattr(type(vault), name) is member
-        ]
+        missing = [name for name, member in interface_members()
+                   if getattr(type(vault), name) is member]
         assert missing == []
 
     def test_open_missing_vault_fails(self, open_vault):
@@ -139,7 +170,8 @@ class TestStorageContract:
         assert [r["key"] for r in vault.by_hash(rec["content_hash"], "task")] == ["k1"]
         assert vault.by_hash(rec["content_hash"], "task", status="archived") == []
 
-    def test_find_filters(self, vault):
+    @pytest.mark.parametrize(("query", "limit", "want"), FIND_CASES)
+    def test_find_filters(self, vault, query, limit, want):
         vault.insert(record("a", "alpha", created_at=NOW, updated_at=NOW - 100,
                             canonical_id="c1"), unit(0))
         vault.insert(record("b", "beta", created_at=NOW + 1, updated_at=NOW,
@@ -147,22 +179,7 @@ class TestStorageContract:
         vault.insert(record("c", "gamma", created_at=NOW + 2, updated_at=NOW + 100,
                             team_id="t2", status="archived", archived_at=NOW - 50,
                             expires_at=NOW - 1), unit(2))
-
-        def keys(q, **kw):
-            return [r["key"] for r in vault.find(q, **kw)]
-
-        assert keys(MemoryQuery()) == ["a", "b", "c"]  # created_at ascending
-        assert keys(MemoryQuery(), limit=2) == ["a", "b"]
-        assert keys(MemoryQuery(eq={"canonical_id": "c1"})) == ["a", "b"]
-        assert keys(MemoryQuery(eq={"canonical_id": "c1", "status": "active"})) == ["a"]
-        assert keys(MemoryQuery(eq={"team_id": "t2"})) == ["c"]
-        assert keys(MemoryQuery(eq={"canonical_id": "c1"}, exclude_key="a")) == ["b"]
-        assert keys(MemoryQuery(updated_before=NOW)) == ["a", "b"]
-        assert keys(MemoryQuery(updated_since=NOW)) == ["b", "c"]
-        assert keys(MemoryQuery(archived_before=NOW)) == ["c"]
-        assert keys(MemoryQuery(archived_before=NOW - 51)) == []
-        assert keys(MemoryQuery(expired_by=NOW)) == ["c"]
-        assert keys(MemoryQuery(expired_by=NOW - 2)) == []
+        assert [r["key"] for r in vault.find(query, limit)] == want
 
     def test_find_rejects_unknown_columns(self):
         with pytest.raises(ValueError):
@@ -176,13 +193,18 @@ class TestStorageContract:
         got = np.frombuffer(bytes(full["embedding"]), dtype=np.float32)
         assert np.array_equal(got, unit(3))
 
-    def test_set_status(self, vault):
+    def test_set_status_archives(self, vault):
         vault.insert(record("a", "alpha"), unit(0))
         assert vault.set_status("a", "archived", NOW + 5, archived_at=NOW + 5) == 1
         row = vault.get("a")
         assert (row["status"], row["updated_at"], row["archived_at"]) == ("archived", NOW + 5, NOW + 5)
+
+    def test_set_status_clears_archived_at(self, vault):
+        vault.insert(record("a", "alpha", status="archived", archived_at=NOW), unit(0))
         assert vault.set_status("a", "active", NOW + 6) == 1
         assert vault.get("a")["archived_at"] is None
+
+    def test_set_status_on_missing_key(self, vault):
         assert vault.set_status("missing", "active", NOW) == 0
 
     def test_counts(self, vault):
@@ -192,12 +214,16 @@ class TestStorageContract:
         assert vault.count() == 2
         assert vault.count_by_status() == {"active": 1, "archived": 1}
 
-    def test_delete_by_keys_and_canonical(self, vault):
-        vault.insert(record("a", "alpha", canonical_id="c1"), unit(0))
-        vault.insert(record("b", "beta", canonical_id="c1"), unit(1))
+    def test_delete_by_keys(self, vault):
+        vault.insert(record("a", "alpha"), unit(0))
         vault.insert(record("c", "gamma"), unit(2))
         assert vault.delete_by_keys([]) == 0
         assert vault.delete_by_keys(["c", "missing"]) == 1
+        assert [r["key"] for r in vault.find(MemoryQuery())] == ["a"]
+
+    def test_delete_by_canonical_clears_every_index(self, vault):
+        vault.insert(record("a", "alpha", canonical_id="c1"), unit(0))
+        vault.insert(record("b", "beta", canonical_id="c1"), unit(1))
         assert vault.delete_by_canonical("c1") == 2
         assert vault.count() == 0
         assert vault.knn(unit(0), 5) == []
@@ -232,15 +258,17 @@ class TestStorageContract:
         assert vault.get("a")["content"] == "alpha"
 
     # -- keyword search -------------------------------------------------------------------
-    def test_fts_ranks_and_filters(self, vault):
+    @pytest.mark.parametrize(("text", "kwargs", "want"), FTS_CASES)
+    def test_fts_matches_and_filters(self, vault, text, kwargs, want):
         vault.insert(record("a", "coolant pump pressure is nominal"), unit(0))
         vault.insert(record("b", "coolant coolant coolant pump", team_id="t2"), unit(1))
         vault.insert(record("c", "unrelated weather note"), unit(2))
         vault.insert(record("d", "coolant leak archived", status="archived"), unit(3))
-        assert {r["key"] for r in vault.fts_search("coolant")} == {"a", "b"}
-        assert [r["key"] for r in vault.fts_search("coolant", extra={"team_id": "t2"})] == ["b"]
-        assert [r["key"] for r in vault.fts_search("coolant", status="archived")] == ["d"]
-        assert [r["key"] for r in vault.fts_search("coolant pressure")] == ["a"]
+        assert sorted(r["key"] for r in vault.fts_search(text, **kwargs)) == want
+
+    def test_fts_honours_limit(self, vault):
+        vault.insert(record("a", "coolant pump"), unit(0))
+        vault.insert(record("b", "coolant valve"), unit(1))
         assert len(vault.fts_search("coolant", limit=1)) == 1
 
     def test_fts_treats_input_as_literal(self, vault):
@@ -280,14 +308,17 @@ class TestStorageContract:
         assert isinstance(vault.vec_status()["vec_in_sync"], bool)
 
     # -- documents ---------------------------------------------------------------------------
-    def test_large_content_is_a_document(self, vault):
+    def test_small_content_stays_inline(self, vault):
         assert vault.doc_threshold == 64
-        small, big = "short", "x" * 65 + " long body"
-        vault.insert(record("s", small), unit(0))
+        vault.insert(record("s", "short"), unit(0))
+        assert vault.get("s")["content"] == "short"
+        assert vault.read_content(vault.get("s")) == "short"
+        assert vault.doc_stats()["files"] == 0
+
+    def test_large_content_is_a_document(self, vault):
+        big = "x" * 65 + " long body"
         vault.insert(record("b", big), unit(1))
-        assert vault.get("s")["content"] == small
         assert vault.get("b")["content"] is None
-        assert vault.read_content(vault.get("s")) == small
         assert vault.read_content(vault.get("b")) == big
         assert vault.doc_stats()["files"] == 1
 
