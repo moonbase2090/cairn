@@ -27,7 +27,7 @@ Add `--json` anywhere for agent-parseable output. Identity resolves as
 | `gc` | dry-run by default (`--apply` for real); promotes stale `superseded`→`archived` (7d), deletes `archived` (30d) + expired, circuit-breaker capped |
 | `ingest <dir> --team T` | seed from docs (chunked per `##` section, idempotent, flags near-dups) |
 | `export` / `import` | git-native sync: idempotent JSON packs, commit them, merge by key-union |
-| `serve` / `push <url>` / `pull <url>` | HTTP team sync with bearer token (`--token` or `$CAIRN_TOKEN`) |
+| `serve` / `push <url>` / `pull <url>` | team sync with a bearer token. HTTP only on localhost; other hosts need TLS 1.2+ (`--tls-cert`/`--tls-key`, clients pass `--tls-ca`) |
 | `embedd` | Machine-wide embed daemon (`$XDG_RUNTIME_DIR/cairn/embed.sock`). Not `serve`. |
 | `galaxy [--port 8780]` | Memory Galaxy on a local HTTP server: 3D warp by default (`?flat` for 2D), teams on separate islands, BM25 search box |
 | `init` / `bootstrap` | interactive project setup (`--doc-threshold BYTES` sets the docs/ spill size); wires `.mcp.json` + `AGENTS.md`, seeds the onboarding pack |
@@ -48,9 +48,11 @@ cairn export --out memory/q2.jsonl && git commit -m "memory: q2" memory/q2.jsonl
 cairn import memory/q2.jsonl   # union by key — never conflicts
 
 # server (high churn): one peer serves, others push/pull
-cairn serve --port 8778                      # prints its token
-cairn push http://peer:8778 --token $T
-cairn pull http://peer:8778 --token $T
+# plain HTTP is only allowed on localhost; any other host needs TLS 1.2+ and a token
+cairn serve --host 0.0.0.0 --port 8778 --token "$T" \
+  --tls-cert cert.pem --tls-key key.pem
+cairn push https://peer:8778 --token "$T" --tls-ca cert.pem
+cairn pull https://peer:8778 --token "$T" --tls-ca cert.pem
 ```
 
 Identity is the `<agent>-<project-slug>` convention (`claude-cairn`, `ingest-bot`;
