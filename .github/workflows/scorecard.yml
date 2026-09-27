@@ -17,8 +17,38 @@ jobs:
   scorecard:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: cairn_test
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d cairn_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CAIRN_TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/cairn_test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install project and dev dependencies
+        run: pip install -e ".[dev,postgres]"
+      - name: Enable pgvector outside public
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg
+
+          with psycopg.connect(os.environ["CAIRN_TEST_POSTGRES_URL"], autocommit=True) as conn:
+              conn.execute("CREATE SCHEMA extensions")
+              conn.execute("CREATE EXTENSION vector WITH SCHEMA extensions")
+          PY
       - name: Install sc v0.1.1
         run: |
           set -eu

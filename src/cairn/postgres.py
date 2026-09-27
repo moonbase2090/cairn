@@ -10,8 +10,8 @@ import numpy as np
 
 from .models import content_digest
 from .storage import (
-    ContentIntegrityError,
     MEMORY_FIELDS,
+    ContentIntegrityError,
     MemoryQuery,
     SpaceMismatchError,
     StorageBackend,

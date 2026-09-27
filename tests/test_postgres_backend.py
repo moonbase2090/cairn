@@ -23,7 +23,7 @@ def postgres_url():
         pytest.skip("CAIRN_TEST_POSTGRES_URL is not set")
     import psycopg
     from psycopg.conninfo import make_conninfo
-    from psycopg.sql import Identifier, SQL
+    from psycopg.sql import SQL, Identifier
 
     schema = f"cairn_test_{uuid.uuid4().hex}"
     with psycopg.connect(url, autocommit=True) as conn:
