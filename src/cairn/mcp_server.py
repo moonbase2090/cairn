@@ -70,7 +70,7 @@ TOOL_DEFS = [
 
 
 def make_client() -> CairnClient:
-    from cairn.cli import default_agent_id
+    from cairn.cli import default_agent_id, storage_backend
 
     vdir = Path(os.environ["CAIRN_DIR"]) if os.environ.get("CAIRN_DIR") else Path.cwd() / ".cairn"
     db = vdir / "vault.db"
@@ -88,7 +88,8 @@ def make_client() -> CairnClient:
             (vdir / "embedder").write_text(format_embedder_hint(spec, embedder.dims))
         except OSError:
             pass
-    return CairnClient(open_backend(vdir, embedder.name, embedder.dims), agent, embedder,
+    vault = open_backend(vdir, embedder.name, embedder.dims, backend=storage_backend(vdir))
+    return CairnClient(vault, agent, embedder,
                        audit_path=vdir / "audit.jsonl")
 
 

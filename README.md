@@ -94,7 +94,8 @@ Each vault is tagged `embed_model+dims` at init; cross-space open/import is refu
 src/cairn/models.py  # records, deterministic keys, store results
 src/cairn/embed.py   # Embedder protocol + hash/fastembed/ollama + SocketEmbedder
 src/cairn/embedd.py  # cairn-embedd: one ONNX session, Unix socket
-src/cairn/store.py   # vault.db: metadata + sqlite-vec index (brute-force fallback)
+src/cairn/storage.py # StorageBackend interface + backend registry
+src/cairn/store.py   # sqlite backend: vault.db + sqlite-vec index (brute-force fallback)
 src/cairn/client.py  # six verbs + gc + export/import + stats
 src/cairn/serve.py   # HTTP team sync (stdlib only, per-request connections)
 src/cairn/ingest.py  # docs seeding (section chunks, idempotent)
@@ -117,6 +118,12 @@ one file (refcounted — deleted with its last row, plus `gc` sweeps strays).
 Packs carry full content, so `export`/`import` and git-sync are unchanged.
 Doc files are hash-verified on read; corruption raises loudly, never silently.
 Old vaults migrate on open (rowids preserved) after a `vault.db.pre2.bak` backup.
+
+## Storage backends
+
+The live store sits behind `cairn.storage.StorageBackend`. `sqlite` (above) is
+the default; choose a backend with `[storage] backend` in the vault's
+`config.toml` or `~/.cairn/config.toml`. See [docs/STORAGE.md](docs/STORAGE.md).
 
 ## License
 
