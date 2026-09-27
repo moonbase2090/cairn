@@ -27,7 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 embed = ["fastembed>=0.3"]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pytest-cov>=6.0"]
 postgres = ["pgvector>=0.3", "psycopg[binary]>=3.2"]
 
 [project.scripts]
