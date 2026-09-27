@@ -2,6 +2,7 @@
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -10,7 +11,7 @@ import numpy as np
 import pytest
 
 from cairn.embed import HashEmbedder
-from cairn.embedd import SocketEmbedder, ping, spawn_lock
+from cairn.embedd import SocketEmbedder, ping, sock_path, spawn_lock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -102,3 +103,24 @@ def test_spawn_lock_is_exclusive(tmp_path):
         order.append("next")
     thread.join()
     assert order == ["hold", "release", "next"]
+
+
+def test_sock_path_prefers_xdg_runtime_dir(monkeypatch, tmp_path):
+    monkeypatch.delenv("CAIRN_EMBED_SOCK", raising=False)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    assert sock_path() == tmp_path / "cairn" / "embed.sock"
+
+
+def test_sock_path_macos_uses_per_user_temp(monkeypatch, tmp_path):
+    monkeypatch.delenv("CAIRN_EMBED_SOCK", raising=False)
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    assert sock_path() == tmp_path / f"cairn-{os.getuid()}" / "embed.sock"
+
+
+def test_sock_path_linux_uses_run_user(monkeypatch):
+    monkeypatch.delenv("CAIRN_EMBED_SOCK", raising=False)
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert sock_path() == Path(f"/run/user/{os.getuid()}") / "cairn" / "embed.sock"
