@@ -2,16 +2,22 @@ name: Release
 
 on:
   push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+    # A hyphenated tag (v0.3.6-rc.1) publishes as a prerelease.
+    tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-*"]
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   package:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -20,6 +26,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: macos-14
             target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
           - os: windows-2022
             target: x86_64-pc-windows-msvc
     steps:
@@ -27,21 +35,45 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
+      - name: Check tag matches pyproject version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n 1)
+          if [ "${tag%%-*}" != "$version" ]; then
+            echo "error: tag $GITHUB_REF_NAME does not match pyproject version $version" >&2
+            exit 1
+          fi
+
       - name: Package
         shell: bash
         run: uv run --no-project --python 3.12 python scripts/release/package.py --target ${{ matrix.target }} --out dist
         env:
-          CAIRN_CODESIGN_IDENTITY: ${{ secrets.CAIRN_CODESIGN_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          # Tag builds must ship signed and notarized macOS binaries.
+          CAIRN_REQUIRE_SIGNING: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '0' }}
+          CAIRN_SIGNING_DIR: ${{ runner.temp }}/cairn-signing
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
           WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+
+      - name: Remove signing keychain and keys
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          dir="$RUNNER_TEMP/cairn-signing"
+          security delete-keychain "$dir/cairn-signing.keychain-db" 2>/dev/null || true
+          rm -rf "$dir"
 
       - uses: actions/upload-artifact@v4
         with:
           name: cairn-${{ matrix.target }}
-          path: dist/*
+          path: dist/cairn-*
+          if-no-files-found: error
 
   publish:
     name: publish
@@ -58,7 +90,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -eu
           cd dist
           rm -f SHA256SUMS
           sha256sum cairn-* | sort -k2 > SHA256SUMS
-          gh release upload "${GITHUB_REF_NAME}" cairn-* SHA256SUMS --repo "${GITHUB_REPOSITORY}" --clobber
+          set -- --repo "$GITHUB_REPOSITORY"
+          prerelease=false
+          case "$GITHUB_REF_NAME" in
+            *-*) prerelease=true ;;
+          esac
+          if gh release view "$GITHUB_REF_NAME" "$@" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" cairn-* SHA256SUMS "$@" --clobber
+            if [ "$prerelease" = true ]; then
+              gh release edit "$GITHUB_REF_NAME" "$@" --prerelease
+            fi
+          else
+            flags="--verify-tag --title $GITHUB_REF_NAME --generate-notes"
+            if [ "$prerelease" = true ]; then
+              flags="$flags --prerelease"
+            fi
+            # shellcheck disable=SC2086
+            gh release create "$GITHUB_REF_NAME" "$@" $flags cairn-* SHA256SUMS
+          fi
