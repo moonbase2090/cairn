@@ -21,7 +21,9 @@ release for the tag and creates the release if it does not exist.
 
 ## macOS signing and notarization
 
-`scripts/release/sign_macos.sh` runs inside `package.py` on the macOS runners:
+`scripts/release/sign_macos.sh` runs inside `package.py` on the macOS runners.
+It mirrors Scorecard's `scripts/release-apple.sh` and refuses to sign outside
+GitHub Actions; local builds are always unsigned.
 
 1. Imports `APPLE_CERTIFICATE_P12` into a temporary keychain under
    `$RUNNER_TEMP` and selects its `Developer ID Application` identity.

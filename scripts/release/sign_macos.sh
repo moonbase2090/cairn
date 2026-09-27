@@ -1,8 +1,9 @@
 #!/bin/sh
 # Sign and notarize every Mach-O in a cairn prefix.
 #
-# Runs only when APPLE_CERTIFICATE_P12 is set; then the certificate password
-# and the notary API key (APPLE_NOTARY_KEY, _KEY_ID, _ISSUER) are required.
+# Runs only in GitHub Actions, and only when APPLE_CERTIFICATE_P12 is set;
+# then the certificate password and the notary API key (APPLE_NOTARY_KEY,
+# _KEY_ID, _ISSUER) are required.
 # Unsigned builds are recorded in SIGNING.txt, and CAIRN_REQUIRE_SIGNING=1
 # turns a missing certificate into an error.
 #
@@ -23,6 +24,11 @@ if [ -z "${APPLE_CERTIFICATE_P12:-}" ]; then
   fi
   printf 'unsigned\n' > "$root/SIGNING.txt"
   exit 0
+fi
+# Signing happens only in GitHub Actions, as in Scorecard and Prismattyc.
+if [ "${GITHUB_ACTIONS:-}" != true ]; then
+  echo "error: macOS signing runs only in GitHub Actions; unset APPLE_CERTIFICATE_P12 for local builds" >&2
+  exit 1
 fi
 for v in APPLE_CERTIFICATE_PASSWORD APPLE_NOTARY_KEY APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER; do
   eval "val=\${$v:-}"
@@ -57,7 +63,7 @@ if ! security import "$work/cert.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASS
 fi
 rm -f "$work/cert.p12"
 security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
-security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+security list-keychains -d user -s "$keychain"
 identity=$(security find-identity -v -p codesigning "$keychain" \
   | awk '/Developer ID Application/ {print $2; exit}')
 if [ -z "$identity" ]; then
@@ -99,6 +105,8 @@ xcrun notarytool submit "$bundle" --wait --output-format json \
   --issuer "$APPLE_NOTARY_ISSUER" > "$work/notary.json"
 rc=$?
 set -e
+cat "$work/notary.json"
+echo
 sub_id=$(plutil -extract id raw -o - "$work/notary.json" 2>/dev/null || true)
 status=$(plutil -extract status raw -o - "$work/notary.json" 2>/dev/null || true)
 echo "notarization ${sub_id:-<no id>}: ${status:-unknown}"
