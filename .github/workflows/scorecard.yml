@@ -40,7 +40,7 @@ jobs:
       - name: Install project and dev dependencies
         run: |
           python -m venv .venv
-          .venv/bin/pip install -e ".[dev,postgres]"
+          .venv/bin/pip install -e ".[dev,postgres]" uv
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Enable pgvector outside public
         run: |
@@ -67,6 +67,7 @@ jobs:
       - name: Analyze
         run: |
           export PATH="$GITHUB_WORKSPACE/.venv/bin:$HOME/.local/bin:$PATH"
+          uv --version
           pytest --version
           sc analyze . --format all --out scorecard.html --fail-on ""
       - name: Upload report
