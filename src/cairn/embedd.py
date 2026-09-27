@@ -49,6 +49,20 @@ def sock_path() -> Path:
     return Path(f"/run/user/{os.getuid()}") / "cairn" / "embed.sock"
 
 
+# sockaddr_un.sun_path is 104 bytes on macOS, NUL included.
+DARWIN_SUN_PATH = 104
+
+
+def check_sock_path(path: Path) -> None:
+    """Refuse a socket path macOS cannot bind, before a daemon dies on it."""
+    size = len(os.fsencode(path))
+    if sys.platform == "darwin" and size >= DARWIN_SUN_PATH:
+        raise OSError(
+            f"socket path {path} is {size} bytes; macOS allows "
+            f"{DARWIN_SUN_PATH - 1} (set CAIRN_EMBED_SOCK to a shorter path)"
+        )
+
+
 def _recv_exact(conn: socket.socket, n: int) -> bytes:
     buf = bytearray()
     while len(buf) < n:
@@ -146,6 +160,7 @@ def spawn_lock(path: Path):
 def spawn(spec: str, path: Path | None = None, idle: int = DEFAULT_IDLE) -> None:
     """Start cairn-embedd in a new session if the socket is dead."""
     path = path or sock_path()
+    check_sock_path(path)
     with spawn_lock(path):
         if ping(path):
             return
@@ -239,6 +254,7 @@ def serve_forever(spec: str, path: Path | None = None, idle: int = DEFAULT_IDLE,
     from cairn.embed import get_embedder
 
     path = path or sock_path()
+    check_sock_path(path)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if path.exists():
         _unlink_quiet(path)

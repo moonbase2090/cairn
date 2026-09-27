@@ -1,5 +1,6 @@
 """cairn-embedd socket protocol — hash backend, no FastEmbed load."""
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,7 +12,10 @@ import numpy as np
 import pytest
 
 from cairn.embed import HashEmbedder
-from cairn.embedd import SocketEmbedder, ping, sock_path, spawn_lock
+from cairn.embedd import (
+    DARWIN_SUN_PATH, SocketEmbedder, check_sock_path, ping, sock_path, spawn,
+    spawn_lock,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,8 +30,16 @@ def _wait_sock(path: Path, timeout: float = 5.0) -> None:
 
 
 @pytest.fixture
-def embedd_hash(tmp_path):
-    sock = tmp_path / "embed.sock"
+def sock_dir():
+    """A short socket dir: pytest's macOS tmp_path overflows sun_path."""
+    path = Path(tempfile.mkdtemp(prefix="cairn-", dir="/tmp"))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture
+def embedd_hash(sock_dir):
+    sock = sock_dir / "embed.sock"
     proc = subprocess.Popen(
         [sys.executable, "-m", "cairn.embedd", "--spec", "hash",
          "--sock", str(sock), "--idle", "8", "--dims", "384"],
@@ -64,8 +76,8 @@ def test_ping_false_when_missing(tmp_path):
     assert ping(tmp_path / "nope.sock") is False
 
 
-def test_idle_exit(tmp_path):
-    sock = tmp_path / "idle.sock"
+def test_idle_exit(sock_dir):
+    sock = sock_dir / "idle.sock"
     proc = subprocess.Popen(
         [sys.executable, "-m", "cairn.embedd", "--spec", "hash",
          "--sock", str(sock), "--idle", "1", "--dims", "384"],
@@ -124,3 +136,25 @@ def test_sock_path_linux_uses_run_user(monkeypatch):
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     monkeypatch.setattr(sys, "platform", "linux")
     assert sock_path() == Path(f"/run/user/{os.getuid()}") / "cairn" / "embed.sock"
+
+
+def test_check_sock_path_rejects_long_macos_path(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    check_sock_path(Path("/" + "x" * (DARWIN_SUN_PATH - 2)))
+    with pytest.raises(OSError, match="CAIRN_EMBED_SOCK"):
+        check_sock_path(Path("/" + "x" * (DARWIN_SUN_PATH - 1)))
+
+
+def test_check_sock_path_leaves_linux_alone(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    check_sock_path(Path("/" + "x" * 200))
+
+
+def test_spawn_fails_fast_on_long_macos_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    sock = tmp_path / ("x" * DARWIN_SUN_PATH) / "embed.sock"
+    start = time.monotonic()
+    with pytest.raises(OSError):
+        spawn("hash", sock)
+    assert time.monotonic() - start < 1
+    assert not sock.parent.exists()
