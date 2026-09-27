@@ -38,7 +38,7 @@ from cairn.galaxy import galaxy as render_galaxy
 from cairn.galaxy import galaxy_alive, galaxy_url
 from cairn.ingest import ingest_dir
 from cairn.serve import pull_from, push_to, serve_forever
-from cairn.storage import SpaceMismatchError, open_backend
+from cairn.storage import DEFAULT_BACKEND, SpaceMismatchError, open_backend
 
 DEFAULT_EMBED = "hash"
 
@@ -68,6 +68,37 @@ def default_agent_id(vdir: Path | None = None) -> str:
         return cfg.get("agent", {}).get("id", "cairn-cli")
     except (OSError, tomllib.TOMLDecodeError):
         return "cairn-cli"
+
+
+def _read_toml(path: Path) -> dict | None:
+    """Parsed TOML, or None when the file does not exist. Unreadable is an error."""
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        raise ValueError(f"cannot read {path}: {e}") from e
+
+
+def _config_backend(path: Path) -> str | None:
+    storage = (_read_toml(path) or {}).get("storage", {})
+    if not isinstance(storage, dict):
+        # ValueError, not TypeError: the CLI and cairn-mcp report ValueErrors cleanly.
+        raise ValueError(f"{path}: [storage] must be a table")  # noqa: TRY004
+    backend = storage.get("backend")
+    if backend is not None and not isinstance(backend, str):
+        raise ValueError(f"{path}: [storage] backend must be a string")
+    return backend
+
+
+def storage_backend(vdir: Path) -> str:
+    """[storage] backend: the vault's config.toml > ~/.cairn/config.toml > sqlite."""
+    for path in (vdir / "config.toml", Path.home() / ".cairn" / "config.toml"):
+        backend = _config_backend(path)
+        if backend is not None:
+            return backend
+    return DEFAULT_BACKEND
 
 
 def read_embedder_hint(vdir: Path) -> tuple[str, int | None]:
@@ -173,7 +204,7 @@ def build_client(args) -> CairnClient:
     embedder = get_embedder(embed_spec, dims=None if args.embed else dims)
     if not args.embed and dims is None:
         write_embedder_hint(vdir, embed_spec, embedder.dims)
-    vault = open_backend(vdir, embedder.name, embedder.dims)
+    vault = open_backend(vdir, embedder.name, embedder.dims, backend=storage_backend(vdir))
     return CairnClient(vault, args.agent_id, embedder, audit_path=vdir / "audit.jsonl")
 
 
@@ -420,8 +451,8 @@ def _cmd_init(args, flag_agent_id) -> int:
     try:
         embedder, effective, notice = resolve_init_embedder(spec)
         open_backend(
-            vdir, embedder.name, embedder.dims, create=True,
-            doc_threshold=args.doc_threshold,
+            vdir, embedder.name, embedder.dims, backend=storage_backend(vdir),
+            create=True, doc_threshold=args.doc_threshold,
         ).close()
     except (ImportError, ValueError, OSError, sqlite3.Error) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -662,6 +693,7 @@ def _cmd_doctor(args, client) -> int:
     st = client.stats()
     info = {
         "vault": str(vdir / "vault.db"),
+        "storage": client.vault.name,
         "vault_mb": round((vdir / "vault.db").stat().st_size / 1e6, 2),
         "memories": st["total"], "by_status": st["by_status"],
         "embedder": f"{st['embedder']}/{st['dims']}d",
