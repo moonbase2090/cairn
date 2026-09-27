@@ -108,13 +108,14 @@ src/cairn/cli.py     # `cairn` binary (human + position-independent --json)
 `.cairn/` is a vault *directory*, not just a DB:
 
 ```
-.cairn/vault.db        # metadata + embeddings + BM25 index (small, fast)
-.cairn/docs/ab/cd/<hex>.md  # full text of big memories, content-addressed
+.cairn/vault.db        # SQLite metadata + embeddings + BM25 index (small, fast)
+.cairn/docs/ab/cd/<hex>.md  # SQLite full text of big memories, content-addressed
 ```
 
-Memories over `doc_threshold` (default 2048 bytes, `cairn init --doc-threshold`)
-spill to `docs/`; everything else reads identically. Same-content versions share
-one file (refcounted — deleted with its last row, plus `gc` sweeps strays).
+With SQLite, memories over `doc_threshold` (default 2048 bytes,
+`cairn init --doc-threshold`) spill to `.cairn/docs/`; everything else reads
+identically. Same-content versions share one file (refcounted — deleted with
+its last row, plus `gc` sweeps strays).
 Packs carry full content, so `export`/`import` and git-sync are unchanged.
 Doc files are hash-verified on read; corruption raises loudly, never silently.
 Old vaults migrate on open (rowids preserved) after a `vault.db.pre2.bak` backup.
@@ -122,11 +123,12 @@ Old vaults migrate on open (rowids preserved) after a `vault.db.pre2.bak` backup
 ## Storage backends
 
 The live store sits behind `cairn.storage.StorageBackend`. `sqlite` (above) is
-the default; choose a backend with `[storage] backend` in the vault's
-`config.toml` or `~/.cairn/config.toml`. See [docs/STORAGE.md](docs/STORAGE.md).
+the default; `postgres` uses PostgreSQL full-text search and pgvector, with
+large documents shared in the database. To use PostgreSQL, set
+`[storage] backend = "postgres"` and `url` in the vault's `config.toml` or
+`~/.cairn/config.toml`. See [docs/STORAGE.md](docs/STORAGE.md).
 
 ## License
 
 MPL-2.0 — see [LICENSE](LICENSE). File-level copyleft: improve cairn's files,
 share the improvements; tools that *use* cairn stay yours.
-

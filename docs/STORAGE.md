@@ -8,9 +8,10 @@ A vault has two parts:
 - **The live store**: memories, keyword search, vector search, and large
   memory documents. It sits behind `cairn.storage.StorageBackend`.
 
-`sqlite` is the default and, for now, the only backend. It keeps everything in
-the vault directory: `vault.db` (tables, FTS5 index, sqlite-vec index) and
-`docs/` for memories larger than the document threshold.
+`sqlite` is the default. It keeps the live store in the vault directory:
+`vault.db` (tables, FTS5 index, sqlite-vec index) and `docs/` for memories
+larger than the document threshold. `postgres` stores memories, documents,
+full-text search data, and vectors in a PostgreSQL database with pgvector.
 
 ## Choosing a backend
 
@@ -21,7 +22,27 @@ Set `[storage] backend` in a `config.toml`:
 backend = "sqlite"
 ```
 
-cairn reads the first of these that sets it:
+For PostgreSQL, install the optional dependencies and configure a connection
+URL. Use a dedicated database for each vault. Every `cairn serve` instance
+using the same URL shares that vault, including large memory documents.
+
+```sh
+pip install 'cairn[postgres]'
+```
+
+```toml
+[storage]
+backend = "postgres"
+url = "postgresql://cairn:password@db.example/cairn"
+```
+
+Enable pgvector on the PostgreSQL server before you initialize the vault.
+Cairn creates its tables in the connection's active schema. The role needs
+`CREATE` permission there and `USAGE` permission on the schema that contains
+pgvector. Cairn adds the pgvector schema to each connection's search path.
+Treat the connection URL as a secret.
+
+Cairn reads storage settings in this order:
 
 1. `<vault dir>/config.toml`, for this vault only
 2. `~/.cairn/config.toml`, for every vault on the machine
@@ -31,7 +52,7 @@ cairn reads the first of these that sets it:
 unknown name fails before anything is created or opened:
 
 ```
-error: unknown storage backend 'postgres'; available: sqlite
+error: unknown storage backend 'custom'; available: postgres, sqlite
 ```
 
 A `config.toml` that cannot be parsed, or whose `[storage]` section is
@@ -56,20 +77,27 @@ carrying `MEMORY_FIELDS`. `row["content"]` is `None` when the text is stored
 as a document; `read_content(row)` always returns the full text and raises
 `ContentIntegrityError` if it is missing or altered.
 
-Sync packs (`cairn export` / `import`, `cairn serve` push/pull) are built from
-`find(..., with_embedding=True)` and `insert`, so they work on any backend
-that passes the contract.
+`cairn export`, `cairn import`, and `cairn serve` push and pull use sync packs.
+The client builds packs from `find(..., with_embedding=True)` and `insert`, so
+they work with any backend that passes the contract.
+
+PostgreSQL records schema migrations in `cairn_migrations`. It uses
+PostgreSQL full-text search and pgvector cosine distance. Cairn calculates
+exact distances over rows that pass the metadata and expiry filters. It does
+not create an HNSW or IVFFlat index, so query time grows with the number of
+matching rows. Large content lives in a shared database table. SQLite keeps
+large content in content-addressed files under `docs/`.
 
 ## Adding a backend
 
 1. Subclass `StorageBackend` and override every member.
 2. Add an opener to `BACKENDS` in `src/cairn/storage.py`. It is called as
-   `opener(vault_dir, embed_name, dims, create=..., doc_threshold=...)` and
-   must refuse a vault built with another embedder (`SpaceMismatchError`).
+   `opener(vault_dir, embed_name, dims, config, create=..., doc_threshold=...)`
+   and must refuse a vault built with another embedder (`SpaceMismatchError`).
 3. Add the name to `CONTRACT_BACKENDS` in `tests/test_storage_contract.py`,
-   with a skip mark when its server is not configured, and make the whole
-   contract pass unchanged. CI fails if a registered backend is not under
+   skip its fixture when its service URL is not configured, and make the whole
+   contract pass unchanged. CI fails if a registered backend is not under the
    contract.
 
-Planned backends: Postgres with pgvector (#25), as part of bring-your-own
-server (#26).
+CI runs the shared backend contract against SQLite and a pgvector-enabled
+PostgreSQL service.
