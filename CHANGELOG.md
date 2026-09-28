@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0] — 2026-09-28
+
+### Added
+
+- `cairn serve` reads `CAIRN_TOKEN` when `--token` is not set, and does not print a configured token at startup.
+- systemd unit and Caddy hosting guide for a shared-token sync server.
+
 Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
 ## Unreleased
