@@ -115,12 +115,14 @@ cairn init --yes --embed-spec hash
 ~~~
 
 Copy the server token into the client's secret manager or environment. Then
-push local memories and pull the shared vault:
+set the server URL and token for sync commands. You can pass a URL to an
+individual command to use a different server:
 
 ~~~sh
+export CAIRN_URL="https://sync.example.com"
 export CAIRN_TOKEN="the-server-token"
-cairn push https://sync.example.com
-cairn pull https://sync.example.com
+cairn push
+cairn pull
 ~~~
 
 The server imports each memory's original agent identity from its sync pack.

@@ -27,7 +27,7 @@ Add `--json` anywhere for agent-parseable output. Identity resolves as
 | `gc` | dry-run by default (`--apply` for real); promotes stale `superseded`→`archived` (7d), deletes `archived` (30d) + expired, circuit-breaker capped |
 | `ingest <dir> --team T` | seed from docs (chunked per `##` section, idempotent, flags near-dups) |
 | `export` / `import` | git-native sync: idempotent JSON packs, commit them, merge by key-union |
-| `serve` / `push <url>` / `pull <url>` | team sync with a bearer token. HTTP only on localhost; other hosts need TLS 1.2+ (`--tls-cert`/`--tls-key`, clients pass `--tls-ca`) |
+| `serve` / `push [<url>]` / `pull [<url>]` | team sync with a bearer token; sync commands default to `$CAIRN_URL`. HTTP only on localhost; other hosts need TLS 1.2+ (`--tls-cert`/`--tls-key`, clients pass `--tls-ca`) |
 | `embedd` | Machine-wide embed daemon (`$XDG_RUNTIME_DIR/cairn/embed.sock`). Not `serve`. |
 | `galaxy [--port 8780]` | Memory Galaxy on a local HTTP server: 3D warp by default (`?flat` for 2D), teams on separate islands, BM25 search box |
 | `init` / `bootstrap` | interactive project setup (`--doc-threshold BYTES` sets the docs/ spill size); wires `.mcp.json` + `AGENTS.md`, seeds the onboarding pack |
