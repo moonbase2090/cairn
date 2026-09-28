@@ -2,17 +2,12 @@
 
 Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
-## [0.8.0] — 2026-09-28
-
-### Added
-
-- `cairn serve` reads `CAIRN_TOKEN` when `--token` is not set, and does not print a configured token at startup.
-- systemd unit and Caddy hosting guide for a shared-token sync server.
-
 ## Unreleased
 
 ### Added
 
+- `cairn serve` reads `CAIRN_TOKEN` when `--token` is not set.
+- systemd unit and Caddy hosting guide for a shared-token sync server.
 - Storage backend interface (`cairn.storage.StorageBackend`, #24). Memories,
   keyword search, vector search, documents, and the data behind sync packs
   now go through one interface, opened with `cairn.storage.open_backend()`.
@@ -32,6 +27,10 @@ Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
 ### Changed
 
+- `cairn serve` uses an exported `CAIRN_TOKEN` unless `--token` overrides it,
+  so the environment variable also configures a server started from a shell
+  that uses it for client sync.
+- Startup output no longer prints a configured bearer token.
 - `CairnClient`, `cairn serve`, the galaxy view, the CLI, and the MCP server
   use structured `MemoryQuery` scans instead of SQL fragments, and no longer
   touch the SQLite connection directly.

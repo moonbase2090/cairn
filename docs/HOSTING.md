@@ -88,13 +88,20 @@ save its configuration:
 sudo systemctl reload caddy
 ~~~
 
-If Cairn terminates TLS, edit `deploy/cairn.service` and change `--host`
-to an address clients can reach. Add `--tls-cert` and `--tls-key` with
-the certificate paths. Allow only the needed client addresses through the firewall. Make the key
-readable by the `cairn` service account. Cairn requires TLS 1.2 or
-later and a bearer token when it listens beyond loopback. For a private
-certificate authority, pass its certificate to each client with
-`--tls-ca`.
+If Cairn terminates TLS, edit the installed service unit and restart it:
+
+~~~sh
+sudo systemctl edit --full cairn
+sudo systemctl daemon-reload
+sudo systemctl restart cairn
+~~~
+
+In `ExecStart`, change `--host` to an address clients can reach and add
+`--tls-cert` and `--tls-key` with the certificate paths. Allow only the
+needed client addresses through the firewall. Make the key readable by the
+`cairn` service account. Cairn requires TLS 1.2 or later and a bearer token
+when it listens beyond loopback. For a private certificate authority, pass
+its certificate to each client with `--tls-ca`.
 
 ## Sync a client vault
 

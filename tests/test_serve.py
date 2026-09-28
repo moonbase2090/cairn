@@ -94,7 +94,14 @@ def test_cli_serve_uses_environment_token_without_printing_it(tmp_path, monkeypa
     server_client = make_client(tmp_path / "srv" / "vault.db", "server")
     monkeypatch.setenv("CAIRN_TOKEN", "environment-secret")
     calls = []
+    print_kwargs = []
+
+    def capture_startup(*args, **kwargs):
+        print_kwargs.append(kwargs)
+        print(*args, **kwargs)
+
     monkeypatch.setattr(cli, "serve_forever", lambda *args: calls.append(args))
+    monkeypatch.setattr(cli, "print", capture_startup, raising=False)
 
     args = cli.build_parser().parse_args([
         "--vault", str(tmp_path / "srv"), "serve", "--host", "127.0.0.1", "--port", "8778",
@@ -105,6 +112,7 @@ def test_cli_serve_uses_environment_token_without_printing_it(tmp_path, monkeypa
     output = capsys.readouterr().out
     assert "bearer token configured" in output
     assert "environment-secret" not in output
+    assert print_kwargs == [{"flush": True}]
 
 
 def test_cli_serve_token_flag_overrides_environment(tmp_path, monkeypatch, capsys):

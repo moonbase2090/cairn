@@ -605,7 +605,7 @@ def _cmd_serve(args, client) -> int:
     target = (str(vdir / "vault.db") if client.vault.name == "sqlite"
               else f"{client.vault.name} storage at {vdir}")
     auth = "bearer token configured" if configured_token else f"token: {token}"
-    print(f"serving {target} on {scheme}://{args.host}:{args.port} ({auth})")
+    print(f"serving {target} on {scheme}://{args.host}:{args.port} ({auth})", flush=True)
     serve_forever(client, args.host, args.port, token, args.tls_cert, args.tls_key)
     return 0
 
