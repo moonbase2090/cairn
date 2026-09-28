@@ -18,7 +18,7 @@ from pathlib import Path
 from cairn import __version__ as CAIRN_VERSION
 from cairn.client import CairnClient
 from cairn.embed import format_embedder_hint, get_embedder, parse_embedder_hint
-from cairn.store import Vault
+from cairn.storage import open_backend
 from cairn.tutorial import howto_text
 
 SERVER_NAME = "cairn"
@@ -70,12 +70,9 @@ TOOL_DEFS = [
 
 
 def make_client() -> CairnClient:
-    from cairn.cli import default_agent_id
+    from cairn.cli import default_agent_id, storage_config
 
     vdir = Path(os.environ["CAIRN_DIR"]) if os.environ.get("CAIRN_DIR") else Path.cwd() / ".cairn"
-    db = vdir / "vault.db"
-    if not db.exists():
-        raise FileNotFoundError(f"no vault at {db} — run `cairn init` + `cairn bootstrap` first")
     try:
         spec, dims = parse_embedder_hint((vdir / "embedder").read_text())
         spec = spec or "hash"
@@ -88,7 +85,8 @@ def make_client() -> CairnClient:
             (vdir / "embedder").write_text(format_embedder_hint(spec, embedder.dims))
         except OSError:
             pass
-    return CairnClient(Vault(db, embedder.name, embedder.dims), agent, embedder,
+    vault = open_backend(vdir, embedder.name, embedder.dims, config=storage_config(vdir))
+    return CairnClient(vault, agent, embedder,
                        audit_path=vdir / "audit.jsonl")
 
 

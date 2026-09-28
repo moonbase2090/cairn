@@ -1,6 +1,8 @@
 """cairn-embedd — one ONNX session for the machine.
 
 Unix socket at $XDG_RUNTIME_DIR/cairn/embed.sock (override $CAIRN_EMBED_SOCK).
+Without XDG_RUNTIME_DIR: /run/user/<uid>/cairn on Linux, and the per-user
+temp dir ($TMPDIR, /var/folders/...) plus cairn-<uid> on macOS.
 CLI and cairn-mcp send texts; this process holds FastEmbed. Hash stays
 in-process on the client. This is not `cairn serve` (that is per-vault pack
 sync). Vaults still store memories.embedding BLOB + sqlite-vec; this daemon
@@ -21,6 +23,7 @@ import os
 import socket
 import struct
 import sys
+import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -36,8 +39,28 @@ def sock_path() -> Path:
     env = os.environ.get("CAIRN_EMBED_SOCK")
     if env:
         return Path(env)
-    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-    return Path(runtime) / "cairn" / "embed.sock"
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        return Path(runtime) / "cairn" / "embed.sock"
+    if sys.platform == "darwin":
+        # macOS has no /run; $TMPDIR is already per-user, and the uid suffix
+        # keeps users apart if it falls back to the shared /tmp.
+        return Path(tempfile.gettempdir()) / f"cairn-{os.getuid()}" / "embed.sock"
+    return Path(f"/run/user/{os.getuid()}") / "cairn" / "embed.sock"
+
+
+# sockaddr_un.sun_path is 104 bytes on macOS, NUL included.
+DARWIN_SUN_PATH = 104
+
+
+def check_sock_path(path: Path) -> None:
+    """Refuse a socket path macOS cannot bind, before a daemon dies on it."""
+    size = len(os.fsencode(path))
+    if sys.platform == "darwin" and size >= DARWIN_SUN_PATH:
+        raise OSError(
+            f"socket path {path} is {size} bytes; macOS allows "
+            f"{DARWIN_SUN_PATH - 1} (set CAIRN_EMBED_SOCK to a shorter path)"
+        )
 
 
 def _recv_exact(conn: socket.socket, n: int) -> bytes:
@@ -125,7 +148,7 @@ def lock_path(path: Path) -> Path:
 @contextmanager
 def spawn_lock(path: Path):
     """Exclusive lock so two clients cannot unlink each other's socket."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with open(lock_path(path), "a") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
@@ -137,6 +160,7 @@ def spawn_lock(path: Path):
 def spawn(spec: str, path: Path | None = None, idle: int = DEFAULT_IDLE) -> None:
     """Start cairn-embedd in a new session if the socket is dead."""
     path = path or sock_path()
+    check_sock_path(path)
     with spawn_lock(path):
         if ping(path):
             return
@@ -230,7 +254,8 @@ def serve_forever(spec: str, path: Path | None = None, idle: int = DEFAULT_IDLE,
     from cairn.embed import get_embedder
 
     path = path or sock_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    check_sock_path(path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if path.exists():
         _unlink_quiet(path)
     # in-process load lives only here — clients must not pass skip_socket=False

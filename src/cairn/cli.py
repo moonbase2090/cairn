@@ -38,7 +38,7 @@ from cairn.galaxy import galaxy as render_galaxy
 from cairn.galaxy import galaxy_alive, galaxy_url
 from cairn.ingest import ingest_dir
 from cairn.serve import pull_from, push_to, serve_forever
-from cairn.store import SpaceMismatchError, Vault
+from cairn.storage import SpaceMismatchError, StorageConfig, open_backend
 
 DEFAULT_EMBED = "hash"
 
@@ -68,6 +68,47 @@ def default_agent_id(vdir: Path | None = None) -> str:
         return cfg.get("agent", {}).get("id", "cairn-cli")
     except (OSError, tomllib.TOMLDecodeError):
         return "cairn-cli"
+
+
+def _read_toml(path: Path) -> dict | None:
+    """Parsed TOML, or None when the file does not exist. Unreadable is an error."""
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        raise ValueError(f"cannot read {path}: {e}") from e
+
+
+def _config_storage(path: Path) -> StorageConfig | None:
+    storage = (_read_toml(path) or {}).get("storage", {})
+    if not isinstance(storage, dict):
+        # ValueError, not TypeError: the CLI and cairn-mcp report ValueErrors cleanly.
+        raise ValueError(f"{path}: [storage] must be a table")  # noqa: TRY004
+    backend = storage.get("backend")
+    if backend is not None and not isinstance(backend, str):
+        raise ValueError(f"{path}: [storage] backend must be a string")
+    url = storage.get("url")
+    if url is not None and not isinstance(url, str):
+        raise ValueError(f"{path}: [storage] url must be a string")
+    if backend is None:
+        if url is not None:
+            raise ValueError(f"{path}: [storage] url requires backend = 'postgres'")
+        return None
+    try:
+        return StorageConfig(backend=backend, url=url)
+    except ValueError as e:
+        raise ValueError(f"{path}: {e}") from e
+
+
+def storage_config(vdir: Path) -> StorageConfig:
+    """Use the vault's [storage] settings, then ~/.cairn/config.toml, then sqlite."""
+    for path in (vdir / "config.toml", Path.home() / ".cairn" / "config.toml"):
+        config = _config_storage(path)
+        if config is not None:
+            return config
+    return StorageConfig()
 
 
 def read_embedder_hint(vdir: Path) -> tuple[str, int | None]:
@@ -173,7 +214,7 @@ def build_client(args) -> CairnClient:
     embedder = get_embedder(embed_spec, dims=None if args.embed else dims)
     if not args.embed and dims is None:
         write_embedder_hint(vdir, embed_spec, embedder.dims)
-    vault = Vault(vdir / "vault.db", embedder.name, embedder.dims)
+    vault = open_backend(vdir, embedder.name, embedder.dims, config=storage_config(vdir))
     return CairnClient(vault, args.agent_id, embedder, audit_path=vdir / "audit.jsonl")
 
 
@@ -253,12 +294,15 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8778)
     sv.add_argument("--token", default=None, help="Bearer token (default: random, printed once).")
+    sv.add_argument("--tls-cert", default=None, help="Certificate PEM. Required when --host is not localhost.")
+    sv.add_argument("--tls-key", default=None, help="Private key PEM. Pair with --tls-cert.")
 
     for name, helptext in (("push", "Push local memories to a `cairn serve` peer."),
                            ("pull", "Pull memories from a `cairn serve` peer.")):
         peer = sub.add_parser(name, help=helptext)
         peer.add_argument("url")
         peer.add_argument("--token", default=None)
+        peer.add_argument("--tls-ca", default=None, help="CA bundle PEM for an https:// peer.")
     # pull extras (added after the loop so push stays lean)
     sub.choices["pull"].add_argument("--since", type=int, default=None)
     sub.choices["pull"].add_argument("--out", default=None, help="Save pack instead of importing.")
@@ -410,15 +454,16 @@ def _cmd_init(args, flag_agent_id) -> int:
         return 2
     else:
         agent = seat
-    if (vdir / "vault.db").exists():
-        emit({"initialized": str(vdir / "vault.db"), "note": "already exists"}, args.json)
-        return 0
     spec = args.embed_spec or "fastembed"
     try:
+        config = storage_config(vdir)
+        if config.backend == "sqlite" and (vdir / "vault.db").exists():
+            emit({"initialized": str(vdir / "vault.db"), "note": "already exists"}, args.json)
+            return 0
         embedder, effective, notice = resolve_init_embedder(spec)
-        Vault(
-            vdir / "vault.db", embedder.name, embedder.dims, create=True,
-            doc_threshold=args.doc_threshold,
+        open_backend(
+            vdir, embedder.name, embedder.dims, config=config,
+            create=True, doc_threshold=args.doc_threshold,
         ).close()
     except (ImportError, ValueError, OSError, sqlite3.Error) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -428,7 +473,8 @@ def _cmd_init(args, flag_agent_id) -> int:
     (vdir / "project.json").write_text(json.dumps(
         {"project": project, "slug": slug, "team": team, "agent_id": agent}, indent=2))
     out = {
-        "initialized": str(vdir / "vault.db"), "embedder": embedder.name,
+        "initialized": (str(vdir / "vault.db") if config.backend == "sqlite" else config.backend),
+        "storage": config.backend, "embedder": embedder.name,
         "dims": embedder.dims, "project": project, "team": team, "agent_id": agent,
     }
     if notice:
@@ -457,7 +503,7 @@ def _cmd_embedd(args) -> int:
 def _open_client(args):
     try:
         return build_client(args)
-    except (FileNotFoundError, SpaceMismatchError, ImportError, ValueError) as e:
+    except (OSError, SpaceMismatchError, ImportError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return None
 
@@ -550,18 +596,22 @@ def _cmd_import(args, client) -> int:
 
 def _cmd_serve(args, client) -> int:
     token = args.token or secrets.token_hex(16)
-    print(f"serving {vault_dir(args) / 'vault.db'} on http://{args.host}:{args.port} (token: {token})")
-    serve_forever(client, args.host, args.port, token)
+    scheme = "https" if args.tls_cert else "http"
+    vdir = vault_dir(args)
+    target = (str(vdir / "vault.db") if client.vault.name == "sqlite"
+              else f"{client.vault.name} storage at {vdir}")
+    print(f"serving {target} on {scheme}://{args.host}:{args.port} (token: {token})")
+    serve_forever(client, args.host, args.port, token, args.tls_cert, args.tls_key)
     return 0
 
 
 def _cmd_push(args, client) -> int:
-    emit(push_to(args.url, client.export(), token_for(args)), args.json)
+    emit(push_to(args.url, client.export(), token_for(args), cafile=args.tls_ca), args.json)
     return 0
 
 
 def _cmd_pull(args, client) -> int:
-    pack = pull_from(args.url, token_for(args), args.since)
+    pack = pull_from(args.url, token_for(args), args.since, cafile=args.tls_ca)
     if args.out:
         Path(args.out).write_text(json.dumps(pack, default=str))
         emit({"pulled": len(pack["memories"]), "out": args.out}, args.json)
@@ -631,9 +681,11 @@ def _cmd_galaxy(args, client) -> int:
 
 
 def _cmd_whoami(args, client) -> int:
+    vdir = vault_dir(args)
     emit({
         "agent": client.agent_id,
-        "vault": str(vault_dir(args) / "vault.db"),
+        "vault": str(vdir / "vault.db") if client.vault.name == "sqlite" else str(vdir),
+        "storage": client.vault.name,
         "embedder": client.embedder.name,
         "dims": client.embedder.dims,
     }, args.json)
@@ -642,12 +694,6 @@ def _cmd_whoami(args, client) -> int:
 
 def _cmd_doctor(args, client) -> int:
     vdir = vault_dir(args)
-    try:
-        import sqlite_vec  # noqa: F401
-
-        vec = True
-    except ImportError:
-        vec = False
     repaired = None
     if args.repair_vec:
         try:
@@ -655,17 +701,21 @@ def _cmd_doctor(args, client) -> int:
         except RuntimeError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
+    vec_status = client.vault.vec_status()
+    vec = client.vault.name == "sqlite" and vec_status.get("vec_extension", False)
     st = client.stats()
     info = {
-        "vault": str(vdir / "vault.db"),
-        "vault_mb": round((vdir / "vault.db").stat().st_size / 1e6, 2),
+        "vault": str(vdir / "vault.db") if client.vault.name == "sqlite" else str(vdir),
+        "storage": client.vault.name,
         "memories": st["total"], "by_status": st["by_status"],
         "embedder": f"{st['embedder']}/{st['dims']}d",
         "sqlite_vec": vec,
         "docs": st["docs"],
-        "doc_threshold": client.vault._doc_threshold,
-        **client.vault.vec_status(),
+        "doc_threshold": client.vault.doc_threshold,
+        **vec_status,
     }
+    if client.vault.name == "sqlite":
+        info["vault_mb"] = round((vdir / "vault.db").stat().st_size / 1e6, 2)
     if repaired is not None:
         info["vec_rebuilt"] = repaired["rebuilt"]
     emit(info, args.json)
@@ -708,9 +758,6 @@ def _cmd_bootstrap(args, client, flag_agent_id) -> int:
     from cairn.tutorial import ONBOARDING_TASK, seed_onboarding
 
     vdir = vault_dir(args)
-    if not (vdir / "vault.db").exists():
-        print(f"error: no vault at {vdir / 'vault.db'} — run `cairn init` first", file=sys.stderr)
-        return 2
     proj, team, agent = _bootstrap_project(vdir, flag_agent_id, client)
     project = proj.get("project") or Path.cwd().name
     warnings = []

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cairn"
-version = "0.3.5"
+version = "0.7.0"
 description = "Local-first shared memory for CLI agents — six verbs, keyless, git-syncable"
 readme = "README.md"
 license = { text = "MPL-2.0" }
@@ -27,7 +27,8 @@ dependencies = [
 
 [project.optional-dependencies]
 embed = ["fastembed>=0.3"]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pytest-cov>=6.0"]
+postgres = ["pgvector>=0.3", "psycopg[binary]>=3.2"]
 
 [project.scripts]
 cairn = "cairn.cli:main"

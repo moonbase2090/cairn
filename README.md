@@ -27,7 +27,7 @@ Add `--json` anywhere for agent-parseable output. Identity resolves as
 | `gc` | dry-run by default (`--apply` for real); promotes stale `superseded`→`archived` (7d), deletes `archived` (30d) + expired, circuit-breaker capped |
 | `ingest <dir> --team T` | seed from docs (chunked per `##` section, idempotent, flags near-dups) |
 | `export` / `import` | git-native sync: idempotent JSON packs, commit them, merge by key-union |
-| `serve` / `push <url>` / `pull <url>` | HTTP team sync with bearer token (`--token` or `$CAIRN_TOKEN`) |
+| `serve` / `push <url>` / `pull <url>` | team sync with a bearer token. HTTP only on localhost; other hosts need TLS 1.2+ (`--tls-cert`/`--tls-key`, clients pass `--tls-ca`) |
 | `embedd` | Machine-wide embed daemon (`$XDG_RUNTIME_DIR/cairn/embed.sock`). Not `serve`. |
 | `galaxy [--port 8780]` | Memory Galaxy on a local HTTP server: 3D warp by default (`?flat` for 2D), teams on separate islands, BM25 search box |
 | `init` / `bootstrap` | interactive project setup (`--doc-threshold BYTES` sets the docs/ spill size); wires `.mcp.json` + `AGENTS.md`, seeds the onboarding pack |
@@ -48,9 +48,11 @@ cairn export --out memory/q2.jsonl && git commit -m "memory: q2" memory/q2.jsonl
 cairn import memory/q2.jsonl   # union by key — never conflicts
 
 # server (high churn): one peer serves, others push/pull
-cairn serve --port 8778                      # prints its token
-cairn push http://peer:8778 --token $T
-cairn pull http://peer:8778 --token $T
+# plain HTTP is only allowed on localhost; any other host needs TLS 1.2+ and a token
+cairn serve --host 0.0.0.0 --port 8778 --token "$T" \
+  --tls-cert cert.pem --tls-key key.pem
+cairn push https://peer:8778 --token "$T" --tls-ca cert.pem
+cairn pull https://peer:8778 --token "$T" --tls-ca cert.pem
 ```
 
 Identity is the `<agent>-<project-slug>` convention (`claude-cairn`, `ingest-bot`;
@@ -92,7 +94,8 @@ Each vault is tagged `embed_model+dims` at init; cross-space open/import is refu
 src/cairn/models.py  # records, deterministic keys, store results
 src/cairn/embed.py   # Embedder protocol + hash/fastembed/ollama + SocketEmbedder
 src/cairn/embedd.py  # cairn-embedd: one ONNX session, Unix socket
-src/cairn/store.py   # vault.db: metadata + sqlite-vec index (brute-force fallback)
+src/cairn/storage.py # StorageBackend interface + backend registry
+src/cairn/store.py   # sqlite backend: vault.db + sqlite-vec index (brute-force fallback)
 src/cairn/client.py  # six verbs + gc + export/import + stats
 src/cairn/serve.py   # HTTP team sync (stdlib only, per-request connections)
 src/cairn/ingest.py  # docs seeding (section chunks, idempotent)
@@ -105,19 +108,27 @@ src/cairn/cli.py     # `cairn` binary (human + position-independent --json)
 `.cairn/` is a vault *directory*, not just a DB:
 
 ```
-.cairn/vault.db        # metadata + embeddings + BM25 index (small, fast)
-.cairn/docs/ab/cd/<hex>.md  # full text of big memories, content-addressed
+.cairn/vault.db        # SQLite metadata + embeddings + BM25 index (small, fast)
+.cairn/docs/ab/cd/<hex>.md  # SQLite full text of big memories, content-addressed
 ```
 
-Memories over `doc_threshold` (default 2048 bytes, `cairn init --doc-threshold`)
-spill to `docs/`; everything else reads identically. Same-content versions share
-one file (refcounted — deleted with its last row, plus `gc` sweeps strays).
+With SQLite, memories over `doc_threshold` (default 2048 bytes,
+`cairn init --doc-threshold`) spill to `.cairn/docs/`; everything else reads
+identically. Same-content versions share one file (refcounted — deleted with
+its last row, plus `gc` sweeps strays).
 Packs carry full content, so `export`/`import` and git-sync are unchanged.
 Doc files are hash-verified on read; corruption raises loudly, never silently.
 Old vaults migrate on open (rowids preserved) after a `vault.db.pre2.bak` backup.
+
+## Storage backends
+
+The live store sits behind `cairn.storage.StorageBackend`. `sqlite` (above) is
+the default; `postgres` uses PostgreSQL full-text search and pgvector, with
+large documents shared in the database. To use PostgreSQL, set
+`[storage] backend = "postgres"` and `url` in the vault's `config.toml` or
+`~/.cairn/config.toml`. See [docs/STORAGE.md](docs/STORAGE.md).
 
 ## License
 
 MPL-2.0 — see [LICENSE](LICENSE). File-level copyleft: improve cairn's files,
 share the improvements; tools that *use* cairn stay yours.
-
