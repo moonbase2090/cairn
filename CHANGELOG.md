@@ -2,29 +2,22 @@
 
 Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
-## Unreleased
+## 0.7.0 - 2026-09-28
 
 ### Added
 
-- Storage backend interface (`cairn.storage.StorageBackend`, #24). Memories,
-  keyword search, vector search, documents, and the data behind sync packs
-  now go through one interface, opened with `cairn.storage.open_backend()`.
-  SQLite (`cairn.store.Vault`) is the default backend. PostgreSQL with
-  pgvector is available as an optional backend. An unknown backend name fails
-  with a clear error.
-- `[storage] backend` config key (#24), read from the vault's `config.toml`,
-  then `~/.cairn/config.toml`, defaulting to `sqlite`. `cairn init`, the CLI,
-  and `cairn-mcp` honour it; PostgreSQL also reads a connection `url`. An
-  unknown or malformed setting is an error.
-  `cairn doctor` reports the backend as `storage`. See docs/STORAGE.md.
-- Storage contract test suite (`tests/test_storage_contract.py`) that every
-  backend must pass. It runs against SQLite and PostgreSQL in CI.
-- PostgreSQL storage (#25), using database migrations, PostgreSQL full-text
-  search, and pgvector cosine distance. Multiple `cairn serve` instances can
-  share the same configured vault.
+- Choose a vault's storage backend with `[storage] backend` and its connection
+  `url` in `config.toml`. SQLite remains the default. PostgreSQL with pgvector
+  supports full-text and vector search, and can share a vault across multiple
+  `cairn serve` instances. `cairn doctor` reports the active backend.
+- Require TLS 1.2 or later and a bearer token when `cairn serve` listens beyond
+  localhost.
+- Include a `SHA256SUMS` file with release downloads so you can verify the
+  archives. macOS release archives are signed and notarized. Windows archives
+  can be Authenticode-signed when signing is configured.
 
 ### Changed
 
-- `CairnClient`, `cairn serve`, the galaxy view, the CLI, and the MCP server
-  use structured `MemoryQuery` scans instead of SQL fragments, and no longer
-  touch the SQLite connection directly.
+- The CLI, `cairn-mcp`, `cairn serve`, and the galaxy view use the shared
+  storage layer, so they work with SQLite or PostgreSQL.
+- Prevent socket path errors when `cairn-embedd` starts on macOS.
