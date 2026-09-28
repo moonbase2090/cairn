@@ -6,6 +6,7 @@ Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
 ### Added
 
+- `CAIRN_URL` supplies the default server URL for `cairn push` and `cairn pull`.
 - `cairn serve` reads `CAIRN_TOKEN` when `--token` is not set.
 - systemd unit and Caddy hosting guide for a shared-token sync server.
 - Storage backend interface (`cairn.storage.StorageBackend`, #24). Memories,

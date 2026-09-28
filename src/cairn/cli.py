@@ -15,7 +15,7 @@ local SQLite file with a vector index. Output is human by default, JSON with
     cairn ingest <dir> --team T        # seed from docs (chunked, idempotent)
     cairn export [--out pack.json] | import <pack.json>   # git-native team sync
     cairn serve [--port 8778]          # HTTP team sync (push/pull against it)
-    cairn push <url> | pull <url>      # sync with a `cairn serve` peer
+    cairn push [<url>] | pull [<url>]  # defaults to $CAIRN_URL
     cairn galaxy [--port 8780]          # host the starfield on a local HTTP server
     cairn whoami | doctor | log        # identity, diagnostics, audit trail
 """
@@ -303,8 +303,8 @@ def build_parser() -> argparse.ArgumentParser:
     for name, helptext in (("push", "Push local memories to a `cairn serve` peer."),
                            ("pull", "Pull memories from a `cairn serve` peer.")):
         peer = sub.add_parser(name, help=helptext)
-        peer.add_argument("url")
-        peer.add_argument("--token", default=None)
+        peer.add_argument("url", nargs="?", help="Server URL (default: $CAIRN_URL).")
+        peer.add_argument("--token", default=None, help="Bearer token (default: $CAIRN_TOKEN).")
         peer.add_argument("--tls-ca", default=None, help="CA bundle PEM for an https:// peer.")
     # pull extras (added after the loop so push stays lean)
     sub.choices["pull"].add_argument("--since", type=int, default=None)
@@ -852,8 +852,13 @@ def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     as_json = "--json" in argv
     argv = [a for a in argv if a != "--json"]
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     args.json = as_json or args.json
+    if args.cmd in {"push", "pull"}:
+        args.url = args.url or os.environ.get("CAIRN_URL")
+        if not args.url:
+            parser.error("push and pull need a server URL; pass one or set CAIRN_URL")
     # explicit --agent-id only; captured BEFORE env/config pre-fill below
     flag_agent_id = args.agent_id
     if args.agent_id is None and args.cmd != "init":
