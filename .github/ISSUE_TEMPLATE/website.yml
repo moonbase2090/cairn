@@ -1,0 +1,26 @@
+name: Website issue
+description: Something on the Cairn website is wrong or confusing
+labels: [website]
+body:
+  - type: input
+    id: url
+    attributes:
+      label: Page URL
+      description: Which page did this happen on
+      placeholder: https://cairncli.com/
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw versus what you expected
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser
+      description: Browser and OS, e.g. Safari 26 on macOS 27
+    validations:
+      required: false
