@@ -7,6 +7,7 @@ import urllib.request
 
 import pytest
 
+from cairn import cli
 from cairn.client import CairnClient
 from cairn.embed import HashEmbedder
 from cairn.serve import pull_from, push_to, start_background
@@ -87,3 +88,39 @@ def test_https_push_pull(tmp_path):
         assert len(pack["memories"]) == 1
     finally:
         srv.shutdown()
+
+
+def test_cli_serve_uses_environment_token_without_printing_it(tmp_path, monkeypatch, capsys):
+    server_client = make_client(tmp_path / "srv" / "vault.db", "server")
+    monkeypatch.setenv("CAIRN_TOKEN", "environment-secret")
+    calls = []
+    monkeypatch.setattr(cli, "serve_forever", lambda *args: calls.append(args))
+
+    args = cli.build_parser().parse_args([
+        "--vault", str(tmp_path / "srv"), "serve", "--host", "127.0.0.1", "--port", "8778",
+    ])
+
+    assert cli._cmd_serve(args, server_client) == 0
+    assert calls[0][3] == "environment-secret"
+    output = capsys.readouterr().out
+    assert "bearer token configured" in output
+    assert "environment-secret" not in output
+
+
+def test_cli_serve_token_flag_overrides_environment(tmp_path, monkeypatch, capsys):
+    server_client = make_client(tmp_path / "srv" / "vault.db", "server")
+    monkeypatch.setenv("CAIRN_TOKEN", "environment-secret")
+    calls = []
+    monkeypatch.setattr(cli, "serve_forever", lambda *args: calls.append(args))
+
+    args = cli.build_parser().parse_args([
+        "--vault", str(tmp_path / "srv"), "serve", "--host", "127.0.0.1",
+        "--port", "8778", "--token", "flag-secret",
+    ])
+
+    assert cli._cmd_serve(args, server_client) == 0
+    assert calls[0][3] == "flag-secret"
+    output = capsys.readouterr().out
+    assert "bearer token configured" in output
+    assert "flag-secret" not in output
+    assert "environment-secret" not in output

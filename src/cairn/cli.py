@@ -293,7 +293,10 @@ def build_parser() -> argparse.ArgumentParser:
     sv = sub.add_parser("serve", help="Serve this vault for team push/pull.")
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8778)
-    sv.add_argument("--token", default=None, help="Bearer token (default: random, printed once).")
+    sv.add_argument(
+        "--token", default=None,
+        help="Bearer token (default: $CAIRN_TOKEN or a random token printed once).",
+    )
     sv.add_argument("--tls-cert", default=None, help="Certificate PEM. Required when --host is not localhost.")
     sv.add_argument("--tls-key", default=None, help="Private key PEM. Pair with --tls-cert.")
 
@@ -595,12 +598,14 @@ def _cmd_import(args, client) -> int:
 
 
 def _cmd_serve(args, client) -> int:
-    token = args.token or secrets.token_hex(16)
+    configured_token = args.token or os.environ.get("CAIRN_TOKEN")
+    token = configured_token or secrets.token_hex(16)
     scheme = "https" if args.tls_cert else "http"
     vdir = vault_dir(args)
     target = (str(vdir / "vault.db") if client.vault.name == "sqlite"
               else f"{client.vault.name} storage at {vdir}")
-    print(f"serving {target} on {scheme}://{args.host}:{args.port} (token: {token})")
+    auth = "bearer token configured" if configured_token else f"token: {token}"
+    print(f"serving {target} on {scheme}://{args.host}:{args.port} ({auth})")
     serve_forever(client, args.host, args.port, token, args.tls_cert, args.tls_key)
     return 0
 

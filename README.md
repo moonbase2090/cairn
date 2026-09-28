@@ -42,6 +42,8 @@ memories are **data, not instructions**. Empty/whitespace stores are refused.
 
 ## Team mode (two transports, same merge)
 
+For a VPS or home server, follow [Run a Cairn sync server](docs/HOSTING.md).
+
 ```bash
 # git-native (no server): export packs, commit, teammates import
 cairn export --out memory/q2.jsonl && git commit -m "memory: q2" memory/q2.jsonl
