@@ -31,6 +31,8 @@ import tomllib
 from pathlib import Path
 
 from cairn import __version__
+from cairn.backup import backup_settings, backup_status, replicate as replicate_backups
+from cairn.backup import restore as restore_vault_backup
 from cairn.client import CairnClient
 from cairn.embed import format_embedder_hint, get_embedder, parse_embedder_hint
 from cairn.galaxy import bind as bind_galaxy
@@ -269,7 +271,18 @@ def build_parser() -> argparse.ArgumentParser:
                            ("archive", "Retract a memory (stops surfacing)."),
                            ("restore", "Undo a bad correction or archive.")):
         g = sub.add_parser(name, help=helptext)
-        g.add_argument("key")
+        if name == "restore":
+            g.add_argument("key", nargs="?")
+            g.add_argument("--from", dest="from_target", default=None,
+                           help="Restore the SQLite vault from a configured backup target.")
+            g.add_argument("--at", default=None, help="Point-in-time (ISO 8601 timestamp with timezone).")
+        else:
+            g.add_argument("key")
+
+    bk = sub.add_parser("backup", help="Replicate and inspect SQLite vault backups.")
+    bk_sub = bk.add_subparsers(dest="backup_action", required=True)
+    bk_sub.add_parser("status", help="Show backup replication status.")
+    bk_sub.add_parser("replicate", help="Run continuous backup replication.")
 
     pg = sub.add_parser("purge", help="Hard-delete a canonical group (needs --force).")
     pg.add_argument("canonical_id")
@@ -559,6 +572,9 @@ def _cmd_archive(args, client) -> int:
 
 
 def _cmd_restore(args, client) -> int:
+    if not args.key:
+        print("error: restore needs a memory key or --from <target>", file=sys.stderr)
+        return 2
     emit(client.restore_memory(args.key), args.json)
     return 0
 
@@ -809,6 +825,49 @@ def _cmd_log(args, _client) -> int:
     return 0
 
 
+def _run_backup_command(args) -> int:
+    vdir = vault_dir(args)
+    try:
+        settings = backup_settings(vdir)
+        if settings.targets and storage_config(vdir).backend != "sqlite":
+            raise ValueError("backup targets are supported only for SQLite vaults")
+        if args.backup_action == "replicate":
+            return replicate_backups(vdir, settings)
+        result = backup_status(vdir, settings)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        elif not result["targets"]:
+            print("No backup targets are configured.")
+        else:
+            print(f"Replication: {'running' if result['running'] else 'stopped'}")
+            for target in result["targets"]:
+                last_success = target["last_success"] or "not yet synced"
+                print(f"{target['name']} ({target['kind']}): {last_success}")
+                if target["last_error"]:
+                    print(f"  last error: {target['last_error']}")
+        return 0
+    except (ValueError, OSError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+
+def _restore_backup_command(args) -> int:
+    vdir = vault_dir(args)
+    try:
+        settings = backup_settings(vdir)
+        if storage_config(vdir).backend != "sqlite":
+            raise ValueError("backup restore is supported only for SQLite vaults")
+        result = restore_vault_backup(vdir, settings, args.from_target, args.at)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"restored {result['restored']} from {result['target']} at {result['at']}")
+        return 0
+    except (ValueError, OSError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+
 _COMMANDS = {
     "store": _cmd_store,
     "retrieve": _cmd_retrieve,
@@ -867,6 +926,16 @@ def main(argv=None) -> int:
         return _cmd_init(args, flag_agent_id)
     if args.cmd == "embedd":
         return _cmd_embedd(args)
+    if args.cmd == "backup":
+        return _run_backup_command(args)
+    if args.cmd == "restore" and args.from_target:
+        if args.key is not None:
+            parser.error("restore --from cannot be combined with a memory key")
+        return _restore_backup_command(args)
+    if args.cmd == "restore" and args.at is not None:
+        parser.error("restore --at requires --from <target>")
+    if args.cmd == "restore" and args.key is None:
+        parser.error("restore needs a memory key or --from <target>")
     client = _open_client(args)
     if client is None:
         return 2

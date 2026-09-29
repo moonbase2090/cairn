@@ -2,6 +2,14 @@
 
 Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
+## 0.10.0 - Unreleased
+
+### Added
+
+- Continuous SQLite backups to local folders and S3-compatible storage, with
+  periodic snapshots, external memory documents, backup status, and
+  point-in-time restore.
+
 ## 0.9.0 - 2026-09-29
 
 ### Added

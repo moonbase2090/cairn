@@ -13,6 +13,10 @@ A vault has two parts:
 larger than the document threshold. `postgres` stores memories, documents,
 full-text search data, and vectors in a PostgreSQL database with pgvector.
 
+SQLite vaults can also replicate WAL changes to local folders or S3-compatible
+storage. See [Back up a SQLite vault](BACKUPS.md) for destination setup and
+point-in-time restore.
+
 ## Choosing a backend
 
 Set `[storage] backend` in a `config.toml`:
