@@ -2,6 +2,19 @@
 
 Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
+## 0.9.0 - 2026-09-29
+
+### Added
+
+- `CAIRN_URL` supplies the default server URL for `cairn push` and `cairn pull`.
+- `cairn serve` reads its bearer token from `CAIRN_TOKEN` when `--token` is not
+  set, so the same variable configures both the server and client sync.
+- systemd unit and Caddy hosting guide for a shared-token sync server.
+
+### Changed
+
+- Startup output no longer prints a configured bearer token.
+
 ## 0.7.0 - 2026-09-28
 
 ### Added

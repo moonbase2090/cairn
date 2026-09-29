@@ -15,7 +15,7 @@ local SQLite file with a vector index. Output is human by default, JSON with
     cairn ingest <dir> --team T        # seed from docs (chunked, idempotent)
     cairn export [--out pack.json] | import <pack.json>   # git-native team sync
     cairn serve [--port 8778]          # HTTP team sync (push/pull against it)
-    cairn push <url> | pull <url>      # sync with a `cairn serve` peer
+    cairn push [<url>] | pull [<url>]  # defaults to $CAIRN_URL
     cairn galaxy [--port 8780]          # host the starfield on a local HTTP server
     cairn whoami | doctor | log        # identity, diagnostics, audit trail
 """
@@ -293,15 +293,18 @@ def build_parser() -> argparse.ArgumentParser:
     sv = sub.add_parser("serve", help="Serve this vault for team push/pull.")
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8778)
-    sv.add_argument("--token", default=None, help="Bearer token (default: random, printed once).")
+    sv.add_argument(
+        "--token", default=None,
+        help="Bearer token (default: $CAIRN_TOKEN or a random token printed once).",
+    )
     sv.add_argument("--tls-cert", default=None, help="Certificate PEM. Required when --host is not localhost.")
     sv.add_argument("--tls-key", default=None, help="Private key PEM. Pair with --tls-cert.")
 
     for name, helptext in (("push", "Push local memories to a `cairn serve` peer."),
                            ("pull", "Pull memories from a `cairn serve` peer.")):
         peer = sub.add_parser(name, help=helptext)
-        peer.add_argument("url")
-        peer.add_argument("--token", default=None)
+        peer.add_argument("url", nargs="?", help="Server URL (default: $CAIRN_URL).")
+        peer.add_argument("--token", default=None, help="Bearer token (default: $CAIRN_TOKEN).")
         peer.add_argument("--tls-ca", default=None, help="CA bundle PEM for an https:// peer.")
     # pull extras (added after the loop so push stays lean)
     sub.choices["pull"].add_argument("--since", type=int, default=None)
@@ -595,12 +598,14 @@ def _cmd_import(args, client) -> int:
 
 
 def _cmd_serve(args, client) -> int:
-    token = args.token or secrets.token_hex(16)
+    configured_token = args.token or os.environ.get("CAIRN_TOKEN")
+    token = configured_token or secrets.token_hex(16)
     scheme = "https" if args.tls_cert else "http"
     vdir = vault_dir(args)
     target = (str(vdir / "vault.db") if client.vault.name == "sqlite"
               else f"{client.vault.name} storage at {vdir}")
-    print(f"serving {target} on {scheme}://{args.host}:{args.port} (token: {token})")
+    auth = "bearer token configured" if configured_token else f"token: {token}"
+    print(f"serving {target} on {scheme}://{args.host}:{args.port} ({auth})", flush=True)
     serve_forever(client, args.host, args.port, token, args.tls_cert, args.tls_key)
     return 0
 
@@ -847,8 +852,13 @@ def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     as_json = "--json" in argv
     argv = [a for a in argv if a != "--json"]
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     args.json = as_json or args.json
+    if args.cmd in {"push", "pull"}:
+        args.url = args.url or os.environ.get("CAIRN_URL")
+        if not args.url:
+            parser.error("push and pull need a server URL; pass one or set CAIRN_URL")
     # explicit --agent-id only; captured BEFORE env/config pre-fill below
     flag_agent_id = args.agent_id
     if args.agent_id is None and args.cmd != "init":

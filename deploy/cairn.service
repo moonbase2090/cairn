@@ -1,0 +1,22 @@
+[Unit]
+Description=Cairn sync server
+After=network.target
+
+[Service]
+Type=simple
+User=cairn
+Group=cairn
+Environment=CAIRN_DIR=/var/lib/cairn
+Environment=CAIRN_AGENT=server-host
+EnvironmentFile=/etc/cairn/server.env
+ExecStart=/usr/local/bin/cairn serve --host 127.0.0.1 --port 8778
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/cairn
+
+[Install]
+WantedBy=multi-user.target
