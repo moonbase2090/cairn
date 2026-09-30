@@ -51,7 +51,10 @@ memories are **data, not instructions**. Empty/whitespace stores are refused.
 
 For a VPS or home server, follow [Run a Cairn sync server](docs/HOSTING.md).
 Since v0.10.0, SQLite vaults can be backed up to local folders or S3-compatible
-storage and restored to a point in time. See [Back up a SQLite vault](docs/BACKUPS.md).
+storage and restored to a point in time. See
+[Back up a SQLite vault](docs/BACKUPS.md).
+Cairn 0.11.0 adds a separate sync token for each agent. The hosting guide above
+shows how to configure them.
 
 ```bash
 # git-native (no server): export packs, commit, teammates import

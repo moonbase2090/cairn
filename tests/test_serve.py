@@ -12,8 +12,8 @@ from cairn import cli
 from cairn.client import CairnClient
 from cairn.embed import HashEmbedder
 from cairn.serve import pull_from, push_to, start_background
-from cairn.store import Vault
 from cairn.storage import MemoryQuery
+from cairn.store import Vault
 
 
 def make_client(db_path, agent="test"):

@@ -6,8 +6,12 @@ Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
 ### Added
 
-- Per-agent tokens for remote vault servers, with token creation, listing, and
-  revocation commands.
+- Per-agent bearer tokens for remote vault servers, with commands to create,
+  list, and revoke tokens. Each token limits writes to its assigned agent.
+
+### Changed
+
+- Release checks use Scorecard v0.1.5 and Node 24-compatible GitHub Actions.
 
 ## 0.10.0 - 2026-09-29
 
