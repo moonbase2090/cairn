@@ -14,6 +14,7 @@ brew tap moonbase2090/tap
 brew install cairn
 
 # Set up Cairn in a project
+export CAIRN_AGENT=claude-myproj
 cairn init --yes
 cairn bootstrap
 cairn store "Decision: benchmark providers on $/kg." --team acme --task q2 --type procedural
