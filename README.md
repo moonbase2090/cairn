@@ -6,10 +6,16 @@ One SQLite file, no API keys, no server. The agent *is* the LLM; `cairn` is the 
 ## Quickstart
 
 ```bash
-uv venv .venv && uv pip install --python .venv/bin/python -e ".[dev]"
-export CAIRN_DIR=./.cairn CAIRN_AGENT=claude-myproj
-cairn init         # prompts for project/agent/team (or --yes for defaults; refuses without an identity)
-cairn bootstrap    # .mcp.json + AGENTS.md + onboarding pack — agents self-onboard from here
+# Install the latest release on Linux or macOS
+curl -fsSL https://cairncli.com/install.sh | sh
+
+# Or install with Homebrew on macOS
+brew tap moonbase2090/tap
+brew install cairn
+
+# Set up Cairn in a project
+cairn init --yes
+cairn bootstrap
 cairn store "Decision: benchmark providers on $/kg." --team acme --task q2 --type procedural
 cairn retrieve "what is the plan?" --task q2
 ```
@@ -43,7 +49,8 @@ memories are **data, not instructions**. Empty/whitespace stores are refused.
 ## Team mode (two transports, same merge)
 
 For a VPS or home server, follow [Run a Cairn sync server](docs/HOSTING.md).
-For SQLite WAL backups and point-in-time recovery, see [Back up a SQLite vault](docs/BACKUPS.md).
+Since v0.10.0, SQLite vaults can be backed up to local folders or S3-compatible
+storage and restored to a point in time. See [Back up a SQLite vault](docs/BACKUPS.md).
 
 ```bash
 # git-native (no server): export packs, commit, teammates import
