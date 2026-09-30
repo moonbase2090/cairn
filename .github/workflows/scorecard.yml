@@ -32,6 +32,10 @@ jobs:
           --health-retries 5
     env:
       CAIRN_TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/cairn_test
+      CAIRN_TEST_MINIO_ENDPOINT: http://127.0.0.1:9000
+      CAIRN_TEST_MINIO_ACCESS_KEY: minioadmin
+      CAIRN_TEST_MINIO_SECRET_KEY: minioadmin
+      AWS_EC2_METADATA_DISABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -40,8 +44,28 @@ jobs:
       - name: Install project and dev dependencies
         run: |
           python -m venv .venv
-          .venv/bin/pip install -e ".[dev,postgres]" uv
+          .venv/bin/pip install -e ".[backup,dev,postgres]" uv
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Install Litestream for backup integration tests
+        run: |
+          curl -fsSL https://github.com/benbjohnson/litestream/releases/download/v0.5.16/litestream-0.5.16-linux-x86_64.tar.gz -o "$RUNNER_TEMP/litestream.tar.gz"
+          tar -xzf "$RUNNER_TEMP/litestream.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Start local MinIO for backup integration tests
+        run: |
+          docker run --detach --name cairn-test-minio \
+            --publish 9000:9000 \
+            --env MINIO_ROOT_USER="$CAIRN_TEST_MINIO_ACCESS_KEY" \
+            --env MINIO_ROOT_PASSWORD="$CAIRN_TEST_MINIO_SECRET_KEY" \
+            sourcemation/minio:RELEASE.2025-10-15T17-29-55Z-20260905 server /data
+      - name: Check MinIO is ready
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl -fsS --output /dev/null http://127.0.0.1:9000/minio/health/live; then exit 0; fi
+            sleep 1
+          done
+          docker logs cairn-test-minio
+          exit 1
       - name: Enable pgvector outside public
         run: |
           python - <<'PY'

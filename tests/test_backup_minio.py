@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -14,6 +15,9 @@ from urllib.parse import urlsplit
 import boto3
 import pytest
 
+from cairn import backup
+from cairn.backup import BackupTarget
+from cairn.models import content_digest
 
 ENDPOINT = os.environ.get("CAIRN_TEST_MINIO_ENDPOINT")
 LITESTREAM = shutil.which("litestream")
@@ -32,6 +36,24 @@ def _run(vault: Path, home: Path, *args: str, env: dict[str, str]) -> dict:
     if result.returncode:
         raise AssertionError(f"Cairn command failed: {result.stderr}\n{result.stdout}")
     return json.loads(result.stdout) if result.stdout.strip().startswith(("{", "[")) else {"text": result.stdout}
+
+
+def _minio_client_and_bucket(endpoint: str):
+    bucket = f"cairn-test-{uuid.uuid4().hex[:10]}"
+    client = boto3.client(
+        "s3", endpoint_url=endpoint, region_name="us-east-1",
+        aws_access_key_id=os.environ.get("CAIRN_TEST_MINIO_ACCESS_KEY", "minioadmin"),
+        aws_secret_access_key=os.environ.get("CAIRN_TEST_MINIO_SECRET_KEY", "minioadmin"),
+    )
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            client.create_bucket(Bucket=bucket)
+            return client, bucket
+        except Exception:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.25)
 
 
 def _wait_for_sync(vault: Path, home: Path, env: dict[str, str], target_names: list[str], previous: str | None = None) -> str:
@@ -55,24 +77,11 @@ def test_minio_and_local_targets_restore_a_point_in_time(tmp_path, monkeypatch):
     host = urlsplit(endpoint).hostname
     assert host in {"localhost", "127.0.0.1", "::1"}, "MinIO tests must use a local endpoint"
 
-    bucket = f"cairn-test-{uuid.uuid4().hex[:10]}"
     prefix = f"cairn/{uuid.uuid4().hex}"
     region = "us-east-1"
     access_key = os.environ.get("CAIRN_TEST_MINIO_ACCESS_KEY", "minioadmin")
     secret_key = os.environ.get("CAIRN_TEST_MINIO_SECRET_KEY", "minioadmin")
-    client = boto3.client(
-        "s3", endpoint_url=endpoint, region_name=region,
-        aws_access_key_id=access_key, aws_secret_access_key=secret_key,
-    )
-    deadline = time.monotonic() + 30
-    while True:
-        try:
-            client.create_bucket(Bucket=bucket)
-            break
-        except Exception:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(0.25)
+    client, bucket = _minio_client_and_bucket(endpoint)
 
     vault = tmp_path / "project" / ".cairn"
     home = tmp_path / "home"
@@ -171,3 +180,43 @@ def test_minio_and_local_targets_restore_a_point_in_time(tmp_path, monkeypatch):
     assert list((folder_target / "cairn-docs").rglob("*.md"))
     doc_keys = client.list_objects_v2(Bucket=bucket, Prefix=f"{prefix}/cairn-docs/")["Contents"]
     assert len(doc_keys) == 1
+
+
+def test_minio_document_helpers_sync_fetch_and_install(tmp_path, monkeypatch):
+    endpoint = ENDPOINT or ""
+    host = urlsplit(endpoint).hostname
+    assert host in {"localhost", "127.0.0.1", "::1"}, "MinIO tests must use a local endpoint"
+    client, bucket = _minio_client_and_bucket(endpoint)
+    access_key = os.environ.get("CAIRN_TEST_MINIO_ACCESS_KEY", "minioadmin")
+    secret_key = os.environ.get("CAIRN_TEST_MINIO_SECRET_KEY", "minioadmin")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", access_key)
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", secret_key)
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+
+    vault = tmp_path / "vault"
+    content = "a document handled by the backup helper " * 70
+    digest = content_digest(content)
+    ref = f"sha256:{digest}"
+    source = vault / "docs" / digest[:2] / digest[2:4] / f"{digest}.md"
+    source.parent.mkdir(parents=True)
+    source.write_text(content)
+    database = vault / "vault.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE memories (content_ref TEXT)")
+        connection.execute("INSERT INTO memories VALUES (?)", (ref,))
+
+    target = BackupTarget(
+        name="minio", kind="s3", bucket=bucket, path=f"cairn/{uuid.uuid4().hex}",
+        endpoint=endpoint, region="us-east-1", sync_interval=1,
+        snapshot_interval="1h", snapshot_seconds=3600, retention="168h", l0_retention="24h",
+    )
+    backup._sync_documents(target, database, vault)
+    backup._sync_documents(target, database, vault)
+    key = backup._s3_doc_key(target, ref)
+    assert client.get_object(Bucket=bucket, Key=key)["Body"].read() == content.encode()
+
+    restored = tmp_path / "restored"
+    restored.mkdir()
+    backup._install_documents(database, target, restored)
+    restored_doc = restored / "docs" / digest[:2] / digest[2:4] / f"{digest}.md"
+    assert restored_doc.read_text() == content

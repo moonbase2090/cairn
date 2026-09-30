@@ -31,7 +31,8 @@ import tomllib
 from pathlib import Path
 
 from cairn import __version__
-from cairn.backup import backup_settings, backup_status, replicate as replicate_backups
+from cairn.backup import backup_settings, backup_status
+from cairn.backup import replicate as replicate_backups
 from cairn.backup import restore as restore_vault_backup
 from cairn.client import CairnClient
 from cairn.embed import format_embedder_hint, get_embedder, parse_embedder_hint

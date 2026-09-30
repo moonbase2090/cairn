@@ -28,13 +28,6 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-      minio:
-        image: sourcemation/minio:RELEASE.2025-10-15T17-29-55Z-20260905
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports:
-          - 9000:9000
     env:
       CAIRN_TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/cairn_test
       CAIRN_TEST_MINIO_ENDPOINT: http://127.0.0.1:9000
@@ -57,12 +50,21 @@ jobs:
       - name: Install project and dev dependencies
         run: pip install -e ".[backup,dev,postgres]"
 
+      - name: Start local MinIO for backup integration tests
+        run: |
+          docker run --detach --name cairn-test-minio \
+            --publish 9000:9000 \
+            --env MINIO_ROOT_USER="$CAIRN_TEST_MINIO_ACCESS_KEY" \
+            --env MINIO_ROOT_PASSWORD="$CAIRN_TEST_MINIO_SECRET_KEY" \
+            sourcemation/minio:RELEASE.2025-10-15T17-29-55Z-20260905 server /data
+
       - name: Check MinIO is ready
         run: |
           for attempt in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null; then exit 0; fi
+            if curl -fsS --output /dev/null http://127.0.0.1:9000/minio/health/live; then exit 0; fi
             sleep 1
           done
+          docker logs cairn-test-minio
           exit 1
 
       - name: Enable pgvector outside public
