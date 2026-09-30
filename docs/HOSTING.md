@@ -4,9 +4,10 @@ Use this guide to keep a Cairn vault on a Linux server and sync local vaults
 over HTTPS. Cairn stores data on the server you choose. It does not host your
 vault.
 
-This setup gives each client its own bearer token. The server checks that new
-memories match the agent assigned to that token, and stores token digests in the
-vault database. Clients with a valid token can pull the shared vault.
+With Cairn 0.11.0 or later, each client can use its own bearer token. The server
+checks that new memories match the agent assigned to that token and stores token
+digests in the vault database. Clients with a valid token can pull the shared
+vault.
 
 ## Install Cairn
 
