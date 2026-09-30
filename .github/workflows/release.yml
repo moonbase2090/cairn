@@ -31,9 +31,9 @@ jobs:
           - os: windows-2022
             target: x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
 
       - name: Check tag matches pyproject version
         if: startsWith(github.ref, 'refs/tags/v')
@@ -69,7 +69,7 @@ jobs:
           security delete-keychain "$dir/cairn-signing.keychain-db" 2>/dev/null || true
           rm -rf "$dir"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: cairn-${{ matrix.target }}
           path: dist/cairn-*
@@ -81,7 +81,7 @@ jobs:
     needs: package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           path: dist
           merge-multiple: true
