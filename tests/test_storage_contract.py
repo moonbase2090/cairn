@@ -19,8 +19,8 @@ from cairn.storage import (
     ContentIntegrityError,
     MemoryQuery,
     SpaceMismatchError,
-    StorageConfig,
     StorageBackend,
+    StorageConfig,
     UnknownBackendError,
     open_backend,
 )
@@ -104,7 +104,7 @@ class TestStorageContract:
                 pytest.skip("CAIRN_TEST_POSTGRES_URL is not set")
             import psycopg
             from psycopg.conninfo import make_conninfo
-            from psycopg.sql import Identifier, SQL
+            from psycopg.sql import SQL, Identifier
 
             schema = f"cairn_test_{uuid.uuid4().hex}"
             with psycopg.connect(POSTGRES_URL, autocommit=True) as conn:
@@ -125,7 +125,7 @@ class TestStorageContract:
         for b in opened:
             b.close()  # close() must be safe to call twice
         if schema is not None:
-            from psycopg.sql import Identifier, SQL
+            from psycopg.sql import SQL, Identifier
 
             with psycopg.connect(POSTGRES_URL, autocommit=True) as conn:
                 conn.execute(SQL("DROP SCHEMA {} CASCADE").format(Identifier(schema)))

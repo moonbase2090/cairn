@@ -1,0 +1,23 @@
+[Unit]
+Description=Cairn SQLite backup replication
+After=network-online.target cairn.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cairn
+Group=cairn
+Environment=CAIRN_DIR=/var/lib/cairn
+Environment=XDG_CONFIG_HOME=/etc
+EnvironmentFile=-/etc/cairn/backup.env
+ExecStart=/usr/local/bin/cairn backup replicate
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/cairn
+
+[Install]
+WantedBy=multi-user.target
