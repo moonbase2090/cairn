@@ -103,6 +103,26 @@ needed client addresses through the firewall. Make the key readable by the
 when it listens beyond loopback. For a private certificate authority, pass
 its certificate to each client with `--tls-ca`.
 
+## Back up the server vault
+
+Backups run beside the sync server and use the same SQLite vault directory.
+Follow [Back up a SQLite vault](BACKUPS.md) to configure a destination, then
+install the included service:
+
+~~~sh
+sudo install -m 0644 /opt/cairn/deploy/cairn-backup.service \
+  /etc/systemd/system/cairn-backup.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now cairn-backup
+sudo systemctl status cairn-backup
+~~~
+
+The service reads backup settings from `/etc/cairn/config.toml` and optional
+credentials from `/etc/cairn/backup.env`. Keep the settings file outside
+`/var/lib/cairn` so they remain available if the vault directory is removed.
+If a local folder target is outside `/var/lib/cairn`, add that folder to
+`ReadWritePaths` in the service unit.
+
 ## Sync a client vault
 
 Initialize each client with its own `CAIRN_AGENT` and the same

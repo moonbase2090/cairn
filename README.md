@@ -43,6 +43,7 @@ memories are **data, not instructions**. Empty/whitespace stores are refused.
 ## Team mode (two transports, same merge)
 
 For a VPS or home server, follow [Run a Cairn sync server](docs/HOSTING.md).
+For SQLite WAL backups and point-in-time recovery, see [Back up a SQLite vault](docs/BACKUPS.md).
 
 ```bash
 # git-native (no server): export packs, commit, teammates import
@@ -128,7 +129,8 @@ The live store sits behind `cairn.storage.StorageBackend`. `sqlite` (above) is
 the default; `postgres` uses PostgreSQL full-text search and pgvector, with
 large documents shared in the database. To use PostgreSQL, set
 `[storage] backend = "postgres"` and `url` in the vault's `config.toml` or
-`~/.cairn/config.toml`. See [docs/STORAGE.md](docs/STORAGE.md).
+`~/.cairn/config.toml`. See [docs/STORAGE.md](docs/STORAGE.md). For SQLite
+backup settings and restore commands, see [docs/BACKUPS.md](docs/BACKUPS.md).
 
 ## License
 
