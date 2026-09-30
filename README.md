@@ -51,16 +51,20 @@ memories are **data, not instructions**. Empty/whitespace stores are refused.
 
 For a VPS or home server, follow [Run a Cairn sync server](docs/HOSTING.md).
 Since v0.10.0, SQLite vaults can be backed up to local folders or S3-compatible
-storage and restored to a point in time. See [Back up a SQLite vault](docs/BACKUPS.md).
+storage and restored to a point in time. See
+[Back up a SQLite vault](docs/BACKUPS.md).
+Cairn 0.11.0 adds a separate sync token for each agent. The hosting guide above
+shows how to configure them.
 
 ```bash
 # git-native (no server): export packs, commit, teammates import
 cairn export --out memory/q2.jsonl && git commit -m "memory: q2" memory/q2.jsonl
 cairn import memory/q2.jsonl   # union by key — never conflicts
 
-# server (high churn): one peer serves, others push/pull
-# plain HTTP is only allowed on localhost; any other host needs TLS 1.2+ and a token
-cairn serve --host 0.0.0.0 --port 8778 --token "$T" \
+# server (high churn): one peer serves, others push/pull with their own tokens
+# plain HTTP is only allowed on localhost; any other host needs TLS 1.2+
+cairn token create --agent client-a  # run on the server; save this client's token as $T
+cairn serve --host 0.0.0.0 --port 8778 --token-mode per-agent \
   --tls-cert cert.pem --tls-key key.pem
 cairn push https://peer:8778 --token "$T" --tls-ca cert.pem
 cairn pull https://peer:8778 --token "$T" --tls-ca cert.pem

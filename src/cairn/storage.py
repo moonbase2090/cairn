@@ -162,6 +162,28 @@ class StorageBackend:
     def doc_stats(self) -> dict:
         raise NotImplementedError
 
+    # -- server credentials ------------------------------------------------------
+    def create_server_token(self, token_id: str, token_hash: str, agent_id: str,
+                            created_at: int) -> None:
+        """Store a token digest and its permitted agent identity."""
+        raise NotImplementedError
+
+    def get_server_token(self, token_hash: str) -> Row | None:
+        """Find an active server token by its digest."""
+        raise NotImplementedError
+
+    def list_server_tokens(self) -> list[Row]:
+        """List token metadata without exposing token material."""
+        raise NotImplementedError
+
+    def delete_server_token(self, token_id: str) -> int:
+        """Revoke a token by its public identifier; return rows removed."""
+        raise NotImplementedError
+
+    def get_agent_ids(self, keys: list[str]) -> dict[str, str]:
+        """Return agent identities for existing memory keys in one lookup."""
+        raise NotImplementedError
+
 
 Opener = Callable[..., StorageBackend]
 
