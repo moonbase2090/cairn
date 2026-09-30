@@ -19,7 +19,7 @@ from .storage import (
 
 READ_COLUMNS = ("rowid", *MEMORY_FIELDS, "content_ref")
 SEARCH_FILTER_COLUMNS = ("task_id", "canonical_id", "memory_type", "team_id", "agent_id")
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DOC_THRESHOLD = 2048
 
 
@@ -216,6 +216,16 @@ class PostgresVault(StorageBackend):
             self._set_meta("schema_version", str(SCHEMA_VERSION))
 
     def _apply_migration(self, version: int) -> None:
+        if version == 2:
+            self._execute("""
+                CREATE TABLE cairn_server_tokens (
+                    token_id TEXT PRIMARY KEY,
+                    token_hash TEXT UNIQUE NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    created_at BIGINT NOT NULL
+                )
+            """)
+            return
         if version != 1:
             raise RuntimeError(f"missing PostgreSQL schema migration {version}")
         self._execute(f"""
@@ -355,6 +365,39 @@ class PostgresVault(StorageBackend):
             (content_hash, task_id, status),
         ).fetchall()
         return self._rows(rows)
+
+    def create_server_token(self, token_id: str, token_hash: str, agent_id: str,
+                            created_at: int) -> None:
+        self._execute(
+            "INSERT INTO cairn_server_tokens(token_id, token_hash, agent_id, created_at) "
+            "VALUES(%s, %s, %s, %s)",
+            (token_id, token_hash, agent_id, created_at),
+        )
+
+    def get_server_token(self, token_hash: str) -> Mapping | None:
+        return self._execute(
+            "SELECT token_id, agent_id, created_at FROM cairn_server_tokens WHERE token_hash=%s",
+            (token_hash,),
+        ).fetchone()
+
+    def list_server_tokens(self) -> list[Mapping]:
+        return self._execute(
+            "SELECT token_id, agent_id, created_at FROM cairn_server_tokens "
+            "ORDER BY created_at, token_id"
+        ).fetchall()
+
+    def delete_server_token(self, token_id: str) -> int:
+        return self._execute(
+            "DELETE FROM cairn_server_tokens WHERE token_id=%s", (token_id,)
+        ).rowcount
+
+    def get_agent_ids(self, keys: list[str]) -> dict[str, str]:
+        if not keys:
+            return {}
+        rows = self._execute(
+            "SELECT key, agent_id FROM cairn_memories WHERE key = ANY(%s)", (keys,)
+        ).fetchall()
+        return {row["key"]: row["agent_id"] for row in rows}
 
     def find(self, query: MemoryQuery, limit: int = 100,
              with_embedding: bool = False) -> list[Mapping]:

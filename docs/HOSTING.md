@@ -4,9 +4,9 @@ Use this guide to keep a Cairn vault on a Linux server and sync local vaults
 over HTTPS. Cairn stores data on the server you choose. It does not host your
 vault.
 
-This setup uses one bearer token for trusted clients. Each client keeps its
-`CAIRN_AGENT` identity in its sync pack. Use a separate server for
-clients that should not share access.
+This setup gives each client its own bearer token. The server checks that new
+memories match the agent assigned to that token, and stores token digests in the
+vault database. Clients with a valid token can pull the shared vault.
 
 ## Install Cairn
 
@@ -40,16 +40,18 @@ sudo -u cairn env CAIRN_DIR=/var/lib/cairn CAIRN_AGENT=server-host \
   /usr/local/bin/cairn init --yes --embed-spec hash
 ~~~
 
-Create a bearer token file that only root can read:
+Create a token for each client identity. Run this once for every client on the
+server, and save each token when it is shown:
 
 ~~~sh
-sudo install -d -m 0755 /etc/cairn
-sudo sh -c 'umask 077
-printf "CAIRN_TOKEN=%s\n" "$(openssl rand -hex 32)" > /etc/cairn/server.env'
+sudo -u cairn env CAIRN_DIR=/var/lib/cairn CAIRN_AGENT=server-host \
+  /usr/local/bin/cairn token create --agent client-a
+sudo -u cairn env CAIRN_DIR=/var/lib/cairn CAIRN_AGENT=server-host \
+  /usr/local/bin/cairn token create --agent client-b
 ~~~
 
-The server reads `CAIRN_TOKEN` from this file. Cairn does not print a
-configured token when it starts.
+The token is shown only when it is created. `cairn token list` shows active
+token IDs and agent identities; `cairn token revoke <token-id>` disables one.
 
 ## Run Cairn with systemd
 
@@ -63,8 +65,8 @@ sudo systemctl enable --now cairn
 sudo systemctl status cairn
 ~~~
 
-The service listens on loopback port `8778`. Put a reverse proxy in
-front of it to handle public HTTPS.
+The service listens on loopback port `8778` and uses per-agent token
+authentication. Put a reverse proxy in front of it to handle public HTTPS.
 
 ## Add HTTPS with Caddy
 
@@ -99,8 +101,9 @@ sudo systemctl restart cairn
 In `ExecStart`, change `--host` to an address clients can reach and add
 `--tls-cert` and `--tls-key` with the certificate paths. Allow only the
 needed client addresses through the firewall. Make the key readable by the
-`cairn` service account. Cairn requires TLS 1.2 or later and a bearer token
-when it listens beyond loopback. For a private certificate authority, pass
+`cairn` service account. Cairn requires TLS 1.2 or later and authentication
+when it listens beyond loopback. In per-agent mode, the server checks each
+request against the token registry. For a private certificate authority, pass
 its certificate to each client with `--tls-ca`.
 
 ## Back up the server vault
@@ -134,17 +137,17 @@ export CAIRN_AGENT="client-a"
 cairn init --yes --embed-spec hash
 ~~~
 
-Copy the server token into the client's secret manager or environment. Then
-set the server URL and token for sync commands. You can pass a URL to an
-individual command to use a different server:
+Set that client's token in its secret manager or environment. Then set the
+server URL for sync commands. You can pass a URL to an individual command to
+use a different server:
 
 ~~~sh
 export CAIRN_URL="https://sync.example.com"
-export CAIRN_TOKEN="the-server-token"
+export CAIRN_TOKEN="the-token-created-for-client-a"
 cairn push
 cairn pull
 ~~~
 
-The server imports each memory's original agent identity from its sync pack.
-Set a different `CAIRN_AGENT` on each client so stored memories keep
-the right source identity.
+Use a distinct `CAIRN_AGENT` and token on each client. A token can add memories
+for its assigned agent; rows already present in the shared vault can also
+round-trip after a client pulls them.
