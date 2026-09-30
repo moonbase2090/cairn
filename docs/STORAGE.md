@@ -74,6 +74,7 @@ malformed, is also an error rather than a silent fallback to SQLite.
 | Keyword search | `fts_search` |
 | Vector search | `knn`, `vec_status`, `rebuild_vec` |
 | Documents | `doc_threshold`, `read_content`, `sweep_orphan_docs`, `doc_stats` |
+| Server credentials | `create_server_token`, `get_server_token`, `list_server_tokens`, `delete_server_token`, `get_agent_ids` |
 
 Scans take a `MemoryQuery` (exact-match filters, a key to exclude, and
 updated/archived/expiry bounds), never SQL. Rows are read-only mappings

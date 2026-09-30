@@ -1,4 +1,5 @@
 """Sync-server tests — real HTTP on localhost, ephemeral ports."""
+import hashlib
 import json
 import shutil
 import subprocess
@@ -12,11 +13,19 @@ from cairn.client import CairnClient
 from cairn.embed import HashEmbedder
 from cairn.serve import pull_from, push_to, start_background
 from cairn.store import Vault
+from cairn.storage import MemoryQuery
 
 
 def make_client(db_path, agent="test"):
     emb = HashEmbedder()
     return CairnClient(Vault(db_path, emb.name, emb.dims, create=True), agent, emb)
+
+
+def add_server_token(client, token_id, raw_token, agent_id):
+    digest = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    with client.vault.transaction():
+        client.vault.create_server_token(token_id, digest, agent_id, 1)
+    return digest
 
 
 def test_push_pull_roundtrip(tmp_path):
@@ -50,6 +59,74 @@ def test_bad_token_rejected(tmp_path):
             pull_from(url, token="wrong")
     finally:
         srv.shutdown()
+
+
+def test_per_agent_tokens_bind_pushes_and_allow_shared_rows_to_round_trip(tmp_path):
+    source_a = make_client(tmp_path / "a" / "vault.db", "client-a")
+    source_a.store_memory("memory from client a", team_id="t", task_id="a")
+    source_b = make_client(tmp_path / "b" / "vault.db", "client-b")
+    source_b.store_memory("memory from client b", team_id="t", task_id="b")
+    server_client = make_client(tmp_path / "srv" / "vault.db", "server")
+    token_a = "cairn-token-a"
+    token_b = "cairn-token-b"
+    digest_a = add_server_token(server_client, "ct_a", token_a, "client-a")
+    add_server_token(server_client, "ct_b", token_b, "client-b")
+    srv = start_background(server_client, token_mode="per-agent")
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+
+        # A token cannot create memories owned by another agent.
+        with pytest.raises(urllib.error.HTTPError) as mismatch:
+            push_to(url, source_a.export(), token=token_b)
+        assert mismatch.value.code == 403
+        assert server_client.vault.count() == 0
+
+        forged_identity = source_b.export()
+        forged_identity["memories"][0]["agent_id"] = "client-a"
+        with pytest.raises(urllib.error.HTTPError) as forged_key:
+            push_to(url, forged_identity, token=token_a)
+        assert forged_key.value.code == 403
+        assert server_client.vault.count() == 0
+
+        # Unknown credentials cannot read or write.
+        with pytest.raises(urllib.error.HTTPError) as rejected_push:
+            push_to(url, source_a.export(), token="unknown")
+        assert rejected_push.value.code == 401
+        with pytest.raises(urllib.error.HTTPError) as rejected_pull:
+            pull_from(url, token="unknown")
+        assert rejected_pull.value.code == 401
+        with pytest.raises(urllib.error.HTTPError) as missing_auth:
+            urllib.request.urlopen(url + "/pull", timeout=5)
+        assert missing_auth.value.code == 401
+
+        assert push_to(url, source_a.export(), token=token_a) == {"added": 1, "skipped": 0}
+        assert push_to(url, source_b.export(), token=token_b) == {"added": 1, "skipped": 0}
+        rows = server_client.vault.find(MemoryQuery())
+        assert {row["agent_id"] for row in rows} == {"client-a", "client-b"}
+
+        # Pulling the shared vault adds the other agent's rows locally. Those
+        # server-owned rows can safely round-trip on the next push.
+        pulled = pull_from(url, token=token_b)
+        assert source_b.import_pack(pulled) == {"added": 1, "skipped": 1}
+        assert push_to(url, source_b.export(), token=token_b) == {"added": 0, "skipped": 2}
+
+        with server_client.vault.transaction():
+            assert server_client.vault.delete_server_token("ct_a") == 1
+        with pytest.raises(urllib.error.HTTPError) as revoked:
+            pull_from(url, token=token_a)
+        assert revoked.value.code == 401
+        with pytest.raises(urllib.error.HTTPError) as revoked_push:
+            push_to(url, source_a.export(), token=token_a)
+        assert revoked_push.value.code == 401
+        assert server_client.vault.get_server_token(digest_a) is None
+    finally:
+        srv.shutdown()
+
+
+def test_per_agent_mode_still_requires_tls_off_loopback(tmp_path):
+    server_client = make_client(tmp_path / "srv" / "vault.db", "server")
+    with pytest.raises(ValueError, match="plain HTTP"):
+        start_background(server_client, host="0.0.0.0", token_mode="per-agent")
 
 
 def test_remote_http_is_refused(tmp_path):
@@ -90,6 +167,27 @@ def test_https_push_pull(tmp_path):
         srv.shutdown()
 
 
+def test_https_per_agent_push_preserves_identity(tmp_path):
+    cert, key = _localhost_cert(tmp_path)
+    source = make_client(tmp_path / "a" / "vault.db", "client-a")
+    source.store_memory("per-agent identity over tls", team_id="t", task_id="k")
+    server_client = make_client(tmp_path / "srv" / "vault.db", "server")
+    token = "cairn-tls-client-a"
+    add_server_token(server_client, "ct_tls", token, "client-a")
+    srv = start_background(
+        server_client, host="0.0.0.0", token_mode="per-agent", tls_cert=cert, tls_key=key,
+    )
+    try:
+        url = f"https://127.0.0.1:{srv.server_address[1]}"
+        assert push_to(url, source.export(), token=token, cafile=str(cert)) == {
+            "added": 1, "skipped": 0,
+        }
+        (row,) = server_client.vault.find(MemoryQuery())
+        assert row["agent_id"] == "client-a"
+    finally:
+        srv.shutdown()
+
+
 def test_cli_serve_uses_environment_token_without_printing_it(tmp_path, monkeypatch, capsys):
     server_client = make_client(tmp_path / "srv" / "vault.db", "server")
     monkeypatch.setenv("CAIRN_TOKEN", "environment-secret")
@@ -100,7 +198,7 @@ def test_cli_serve_uses_environment_token_without_printing_it(tmp_path, monkeypa
         print_kwargs.append(kwargs)
         print(*args, **kwargs)
 
-    monkeypatch.setattr(cli, "serve_forever", lambda *args: calls.append(args))
+    monkeypatch.setattr(cli, "serve_forever", lambda *args, **kwargs: calls.append((args, kwargs)))
     monkeypatch.setattr(cli, "print", capture_startup, raising=False)
 
     args = cli.build_parser().parse_args([
@@ -108,7 +206,8 @@ def test_cli_serve_uses_environment_token_without_printing_it(tmp_path, monkeypa
     ])
 
     assert cli._cmd_serve(args, server_client) == 0
-    assert calls[0][3] == "environment-secret"
+    assert calls[0][0][3] == "environment-secret"
+    assert calls[0][1] == {"token_mode": "shared"}
     output = capsys.readouterr().out
     assert "bearer token configured" in output
     assert "environment-secret" not in output
@@ -119,7 +218,7 @@ def test_cli_serve_token_flag_overrides_environment(tmp_path, monkeypatch, capsy
     server_client = make_client(tmp_path / "srv" / "vault.db", "server")
     monkeypatch.setenv("CAIRN_TOKEN", "environment-secret")
     calls = []
-    monkeypatch.setattr(cli, "serve_forever", lambda *args: calls.append(args))
+    monkeypatch.setattr(cli, "serve_forever", lambda *args, **kwargs: calls.append((args, kwargs)))
 
     args = cli.build_parser().parse_args([
         "--vault", str(tmp_path / "srv"), "serve", "--host", "127.0.0.1",
@@ -127,8 +226,84 @@ def test_cli_serve_token_flag_overrides_environment(tmp_path, monkeypatch, capsy
     ])
 
     assert cli._cmd_serve(args, server_client) == 0
-    assert calls[0][3] == "flag-secret"
+    assert calls[0][0][3] == "flag-secret"
+    assert calls[0][1] == {"token_mode": "shared"}
     output = capsys.readouterr().out
     assert "bearer token configured" in output
     assert "flag-secret" not in output
     assert "environment-secret" not in output
+
+
+def test_cli_serve_per_agent_mode_does_not_generate_a_shared_token(tmp_path, monkeypatch, capsys):
+    server_client = make_client(tmp_path / "srv" / "vault.db", "server")
+    calls = []
+    monkeypatch.delenv("CAIRN_TOKEN", raising=False)
+    monkeypatch.setattr(cli, "serve_forever", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    args = cli.build_parser().parse_args([
+        "--vault", str(tmp_path / "srv"), "serve", "--token-mode", "per-agent",
+    ])
+
+    assert cli._cmd_serve(args, server_client) == 0
+    assert calls[0][0][3] == ""
+    assert calls[0][1] == {"token_mode": "per-agent"}
+    output = capsys.readouterr().out
+    assert "per-agent tokens enabled" in output
+    assert "token:" not in output
+
+
+def test_cli_serve_per_agent_rejects_shared_token_config(tmp_path, monkeypatch):
+    server_client = make_client(tmp_path / "srv" / "vault.db", "server")
+    monkeypatch.setenv("CAIRN_TOKEN", "legacy-token")
+    args = cli.build_parser().parse_args([
+        "--vault", str(tmp_path / "srv"), "serve", "--token-mode", "per-agent",
+    ])
+
+    with pytest.raises(ValueError, match="omit --token and CAIRN_TOKEN"):
+        cli._cmd_serve(args, server_client)
+
+
+def test_cli_token_create_list_revoke(tmp_path, monkeypatch, capsys):
+    client = make_client(tmp_path / "vault", "server")
+    monkeypatch.setattr(cli, "_open_client", lambda _args: client)
+
+    assert cli.main([
+        "--vault", str(tmp_path / "vault"), "token", "create", "--agent", "client-a", "--json",
+    ]) == 0
+    created = json.loads(capsys.readouterr().out)
+    assert created["agent_id"] == "client-a"
+    assert created["token_id"].startswith("ct_")
+    assert created["token"].startswith("cairn_")
+    digest = hashlib.sha256(created["token"].encode()).hexdigest()
+    stored_hash = client.vault.conn.execute(
+        "SELECT token_hash FROM server_tokens WHERE token_id=?", (created["token_id"],)
+    ).fetchone()["token_hash"]
+    assert stored_hash == digest
+    assert stored_hash != created["token"]
+
+    assert cli.main(["--vault", str(tmp_path / "vault"), "token", "list", "--json"]) == 0
+    listed_output = capsys.readouterr().out
+    listed = json.loads(listed_output)
+    assert listed == [{
+        "token_id": created["token_id"], "agent_id": "client-a", "created_at": listed[0]["created_at"],
+    }]
+    assert created["token"] not in listed_output
+
+    assert cli.main([
+        "--vault", str(tmp_path / "vault"), "token", "revoke", created["token_id"], "--json",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "token_id": created["token_id"], "revoked": True,
+    }
+    assert client.vault.get_server_token(digest) is None
+    assert cli.main(["--vault", str(tmp_path / "vault"), "token", "list", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+    assert cli.main([
+        "--vault", str(tmp_path / "vault"), "token", "revoke", created["token_id"], "--json",
+    ]) == 2
+    assert "no active token" in capsys.readouterr().err
+
+    assert cli.main([
+        "--vault", str(tmp_path / "vault"), "token", "create", "--agent", " ", "--json",
+    ]) == 2
+    assert "--agent must not be empty" in capsys.readouterr().err

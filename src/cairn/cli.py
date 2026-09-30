@@ -22,6 +22,7 @@ local SQLite file with a vector index. Output is human by default, JSON with
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
@@ -40,6 +41,7 @@ from cairn.galaxy import bind as bind_galaxy
 from cairn.galaxy import galaxy as render_galaxy
 from cairn.galaxy import galaxy_alive, galaxy_url
 from cairn.ingest import ingest_dir
+from cairn.models import now_epoch
 from cairn.serve import pull_from, push_to, serve_forever
 from cairn.storage import SpaceMismatchError, StorageConfig, open_backend
 
@@ -304,13 +306,23 @@ def build_parser() -> argparse.ArgumentParser:
     im = sub.add_parser("import", help="Merge a sync pack (idempotent union).")
     im.add_argument("pack")
 
+    tk = sub.add_parser("token", help="Manage server access tokens.")
+    tk_sub = tk.add_subparsers(dest="token_action", required=True)
+    tk_create = tk_sub.add_parser("create", help="Create a token for one agent.")
+    tk_create.add_argument("--agent", required=True, help="Agent identity allowed to push memories.")
+    tk_sub.add_parser("list", help="List active server tokens.")
+    tk_revoke = tk_sub.add_parser("revoke", help="Revoke a server token.")
+    tk_revoke.add_argument("token_id")
+
     sv = sub.add_parser("serve", help="Serve this vault for team push/pull.")
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8778)
     sv.add_argument(
         "--token", default=None,
-        help="Bearer token (default: $CAIRN_TOKEN or a random token printed once).",
+        help="Shared bearer token (default: $CAIRN_TOKEN or a random token printed once).",
     )
+    sv.add_argument("--token-mode", choices=["shared", "per-agent"], default="shared",
+                    help="Use shared-token auth or tokens managed with `cairn token`.")
     sv.add_argument("--tls-cert", default=None, help="Certificate PEM. Required when --host is not localhost.")
     sv.add_argument("--tls-key", default=None, help="Private key PEM. Pair with --tls-cert.")
 
@@ -614,16 +626,61 @@ def _cmd_import(args, client) -> int:
     return 0
 
 
+def _cmd_token(args, client) -> int:
+    if args.token_action == "create":
+        agent_id = args.agent.strip()
+        if not agent_id:
+            raise ValueError("--agent must not be empty")
+        token_id = "ct_" + secrets.token_hex(6)
+        token = "cairn_" + secrets.token_urlsafe(32)
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        with client.vault.transaction():
+            client.vault.create_server_token(token_id, digest, agent_id, now_epoch())
+        if args.json:
+            emit({"token_id": token_id, "agent_id": agent_id, "token": token}, True)
+        else:
+            print(f"token_id: {token_id}")
+            print(f"agent_id: {agent_id}")
+            print(f"token: {token}")
+            print("Save this token now; it will not be shown again.")
+        return 0
+
+    if args.token_action == "list":
+        tokens = [dict(row) for row in client.vault.list_server_tokens()]
+        if args.json:
+            emit(tokens, True)
+        elif tokens:
+            for item in tokens:
+                print(f"{item['token_id']}  {item['agent_id']}  created {item['created_at']}")
+        else:
+            print("(no active tokens)")
+        return 0
+
+    with client.vault.transaction():
+        revoked = client.vault.delete_server_token(args.token_id)
+    if not revoked:
+        raise ValueError(f"no active token with id {args.token_id!r}")
+    emit({"token_id": args.token_id, "revoked": True}, args.json)
+    return 0
+
+
 def _cmd_serve(args, client) -> int:
     configured_token = args.token or os.environ.get("CAIRN_TOKEN")
-    token = configured_token or secrets.token_hex(16)
+    if args.token_mode == "per-agent":
+        if configured_token:
+            raise ValueError("omit --token and CAIRN_TOKEN when using --token-mode per-agent")
+        token = ""
+        auth = "per-agent tokens enabled"
+    else:
+        token = configured_token or secrets.token_hex(16)
+        auth = "bearer token configured" if configured_token else f"token: {token}"
     scheme = "https" if args.tls_cert else "http"
     vdir = vault_dir(args)
     target = (str(vdir / "vault.db") if client.vault.name == "sqlite"
               else f"{client.vault.name} storage at {vdir}")
-    auth = "bearer token configured" if configured_token else f"token: {token}"
     print(f"serving {target} on {scheme}://{args.host}:{args.port} ({auth})", flush=True)
-    serve_forever(client, args.host, args.port, token, args.tls_cert, args.tls_key)
+    serve_forever(client, args.host, args.port, token, args.tls_cert, args.tls_key,
+                  token_mode=args.token_mode)
     return 0
 
 
@@ -895,6 +952,8 @@ def _run_command(args, client, flag_agent_id) -> int:
     try:
         if args.cmd == "bootstrap":
             return _cmd_bootstrap(args, client, flag_agent_id)
+        if args.cmd == "token":
+            return _cmd_token(args, client)
         return _COMMANDS[args.cmd](args, client)
     except KeyError as e:
         if args.cmd not in _COMMANDS:
