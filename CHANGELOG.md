@@ -2,7 +2,7 @@
 
 Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
-## 0.10.0 - Unreleased
+## 0.10.0 - 2026-09-29
 
 ### Added
 
