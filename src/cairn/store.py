@@ -61,6 +61,12 @@ CREATE INDEX IF NOT EXISTS idx_mem_task ON memories(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_mem_canon ON memories(canonical_id);
 CREATE INDEX IF NOT EXISTS idx_mem_hash ON memories(content_hash);
 CREATE INDEX IF NOT EXISTS idx_mem_status ON memories(status);
+CREATE TABLE IF NOT EXISTS server_tokens(
+  token_id TEXT PRIMARY KEY,
+  token_hash TEXT UNIQUE NOT NULL,
+  agent_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 """
 
 # BM25 keyword index (SQLite FTS5 — stdlib, offline, zero new deps). Joined back
@@ -609,6 +615,41 @@ class Vault(StorageBackend):
             f"SELECT {cols} FROM memories WHERE content_hash=? AND task_id=? AND status=?",
             (content_hash, task_id, status),
         ).fetchall()
+
+    def create_server_token(self, token_id: str, token_hash: str, agent_id: str,
+                            created_at: int) -> None:
+        self.conn.execute(
+            "INSERT INTO server_tokens(token_id, token_hash, agent_id, created_at) "
+            "VALUES(?, ?, ?, ?)",
+            (token_id, token_hash, agent_id, created_at),
+        )
+
+    def get_server_token(self, token_hash: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT token_id, agent_id, created_at FROM server_tokens WHERE token_hash=?",
+            (token_hash,),
+        ).fetchone()
+
+    def list_server_tokens(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT token_id, agent_id, created_at FROM server_tokens "
+            "ORDER BY created_at, token_id"
+        ).fetchall()
+
+    def delete_server_token(self, token_id: str) -> int:
+        cur = self.conn.execute("DELETE FROM server_tokens WHERE token_id=?", (token_id,))
+        return cur.rowcount
+
+    def get_agent_ids(self, keys: list[str]) -> dict[str, str]:
+        agents: dict[str, str] = {}
+        for start in range(0, len(keys), 500):
+            batch = keys[start:start + 500]
+            marks = ",".join("?" for _ in batch)
+            rows = self.conn.execute(
+                f"SELECT key, agent_id FROM memories WHERE key IN ({marks})", batch
+            ).fetchall()
+            agents.update({row["key"]: row["agent_id"] for row in rows})
+        return agents
 
     def scan(self, where: str = "", args: tuple = (), limit: int = 100,
              with_embedding: bool = False) -> list[sqlite3.Row]:

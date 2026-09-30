@@ -205,6 +205,33 @@ class TestStorageContract:
         assert [r["key"] for r in vault.by_hash(rec["content_hash"], "task")] == ["k1"]
         assert vault.by_hash(rec["content_hash"], "task", status="archived") == []
 
+    def test_server_token_lifecycle(self, vault):
+        with vault.transaction():
+            vault.create_server_token("ct_a", "digest-a", "agent-a", NOW)
+            vault.create_server_token("ct_b", "digest-b", "agent-b", NOW + 1)
+
+        token = vault.get_server_token("digest-a")
+        assert dict(token) == {"token_id": "ct_a", "agent_id": "agent-a", "created_at": NOW}
+        listed = [dict(row) for row in vault.list_server_tokens()]
+        assert listed == [
+            {"token_id": "ct_a", "agent_id": "agent-a", "created_at": NOW},
+            {"token_id": "ct_b", "agent_id": "agent-b", "created_at": NOW + 1},
+        ]
+        assert vault.get_server_token("unknown") is None
+        assert vault.get_agent_ids(["missing"]) == {}
+
+        vault.insert(record("memory-a", "agent one", agent_id="agent-a"), unit(0))
+        assert vault.get_agent_ids(["memory-a", "missing"]) == {"memory-a": "agent-a"}
+        assert vault.get_agent_ids(["missing"] * 501 + ["memory-a"]) == {
+            "memory-a": "agent-a",
+        }
+
+        with vault.transaction():
+            assert vault.delete_server_token("ct_a") == 1
+            assert vault.delete_server_token("missing") == 0
+        assert vault.get_server_token("digest-a") is None
+        assert [row["token_id"] for row in vault.list_server_tokens()] == ["ct_b"]
+
     @pytest.mark.parametrize(("query", "limit", "want"), FIND_CASES)
     def test_find_filters(self, vault, query, limit, want):
         vault.insert(record("a", "alpha", created_at=NOW, updated_at=NOW - 100,
