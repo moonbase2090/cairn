@@ -232,6 +232,12 @@ class TestStorageContract:
         assert vault.get_server_token("digest-a") is None
         assert [row["token_id"] for row in vault.list_server_tokens()] == ["ct_b"]
 
+        reopened = vault.reopen()
+        try:
+            assert reopened.get_server_token("digest-b")["agent_id"] == "agent-b"
+        finally:
+            reopened.close()
+
     @pytest.mark.parametrize(("query", "limit", "want"), FIND_CASES)
     def test_find_filters(self, vault, query, limit, want):
         vault.insert(record("a", "alpha", created_at=NOW, updated_at=NOW - 100,

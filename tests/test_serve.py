@@ -115,6 +115,9 @@ def test_per_agent_tokens_bind_pushes_and_allow_shared_rows_to_round_trip(tmp_pa
         with pytest.raises(urllib.error.HTTPError) as revoked:
             pull_from(url, token=token_a)
         assert revoked.value.code == 401
+        with pytest.raises(urllib.error.HTTPError) as revoked_push:
+            push_to(url, source_a.export(), token=token_a)
+        assert revoked_push.value.code == 401
         assert server_client.vault.get_server_token(digest_a) is None
     finally:
         srv.shutdown()
@@ -293,6 +296,8 @@ def test_cli_token_create_list_revoke(tmp_path, monkeypatch, capsys):
         "token_id": created["token_id"], "revoked": True,
     }
     assert client.vault.get_server_token(digest) is None
+    assert cli.main(["--vault", str(tmp_path / "vault"), "token", "list", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
     assert cli.main([
         "--vault", str(tmp_path / "vault"), "token", "revoke", created["token_id"], "--json",
     ]) == 2
