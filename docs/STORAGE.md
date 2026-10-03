@@ -75,6 +75,7 @@ malformed, is also an error rather than a silent fallback to SQLite.
 | Vector search | `knn`, `vec_status`, `rebuild_vec` |
 | Documents | `doc_threshold`, `read_content`, `sweep_orphan_docs`, `doc_stats` |
 | Server credentials | `create_server_token`, `get_server_token`, `list_server_tokens`, `delete_server_token`, `get_agent_ids` |
+| Sync | `sync_origin_id`, `export_sync_events`, `apply_sync_event`, `has_sync_event`, `has_sync_tombstone`, cursor and conflict methods |
 
 Scans take a `MemoryQuery` (exact-match filters, a key to exclude, and
 updated/archived/expiry bounds), never SQL. Rows are read-only mappings
@@ -82,9 +83,11 @@ carrying `MEMORY_FIELDS`. `row["content"]` is `None` when the text is stored
 as a document; `read_content(row)` always returns the full text and raises
 `ContentIntegrityError` if it is missing or altered.
 
-`cairn export`, `cairn import`, and `cairn serve` push and pull use sync packs.
-The client builds packs from `find(..., with_embedding=True)` and `insert`, so
-they work with any backend that passes the contract.
+`cairn export` and `cairn import` keep portable v1 snapshots. Server push and
+pull use v2 events, state revisions, and tombstones. The event log, tombstone
+fence, per-peer cursors, and conflict records share the backend database with
+memories, so they are included in vault backups. The shared contract covers
+event persistence and cursor operations for SQLite and PostgreSQL.
 
 PostgreSQL records schema migrations in `cairn_migrations`. It uses
 PostgreSQL full-text search and pgvector cosine distance. Cairn calculates

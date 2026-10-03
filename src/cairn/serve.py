@@ -1,7 +1,8 @@
 """Team sync over HTTP or HTTPS — stdlib only. One vault serves, others push/pull packs.
 
 Server holds its own vault; `push` imports a pack into it, `pull` exports from
-it. Merge semantics are identical to file packs (idempotent key-union).
+it. V1 snapshots stay insert-only; v2 event sync applies newer state, tombstones,
+and conflict resolutions while preserving resumable cursors.
 Bearer-token auth. Plain HTTP is allowed only on a loopback address.
 A host other than loopback requires TLS 1.2+ and a bearer token.
 
@@ -50,27 +51,79 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # quiet — use the audit log, not stdout
         pass
 
-    def _authorize(self, client) -> tuple[bool, str | None]:
-        """Return authorization and, in per-agent mode, the token's identity."""
+    def _authorize(self, client) -> tuple[bool, str | None, bool, str | None]:
+        """Return authorization, agent identity, curator role, and token ID."""
         token_mode = getattr(self.server, "token_mode", "shared")
         authorization = self.headers.get("Authorization", "")
         if token_mode == "per-agent":
             if not authorization.startswith("Bearer "):
-                return False, None
+                return False, None, False, None
             bearer = authorization.removeprefix("Bearer ")
             if not bearer or bearer.strip() != bearer:
-                return False, None
+                return False, None, False, None
             digest = hashlib.sha256(bearer.encode("utf-8")).hexdigest()
             token = client.vault.get_server_token(digest)
-            return (token is not None, token["agent_id"] if token is not None else None)
+            return (token is not None, token["agent_id"] if token is not None else None,
+                    bool(token["curator"]) if token is not None else False,
+                    token["token_id"] if token is not None else None)
 
         token = getattr(self.server, "token", "")
         if not token:
-            return True, None
-        return hmac.compare_digest(authorization, f"Bearer {token}"), None
+            return True, None, False, None
+        return hmac.compare_digest(authorization, f"Bearer {token}"), None, False, None
 
     @staticmethod
-    def _pack_matches_agent(pack: dict, agent_id: str, client) -> bool:
+    def _sync_pack_matches_agent(pack: dict, agent_id: str, curator: bool, client) -> bool:
+        events = pack.get("events") if isinstance(pack, dict) else None
+        if not isinstance(events, list):
+            return False
+        for event in events:
+            if not isinstance(event, dict):
+                return False
+            if client.vault.has_sync_event(str(event.get("event_id", ""))):
+                continue  # a previously accepted event may be relayed unchanged
+            kind, key = event.get("kind"), event.get("key")
+            resolution = event.get("conflict_resolution")
+            if (resolution is not None and not curator
+                    and (not isinstance(resolution, dict)
+                         or resolution.get("resolved_by") != agent_id)):
+                return False
+            existing = client.vault.get(key) if isinstance(key, str) else None
+            if kind == "snapshot":
+                snapshot = event.get("snapshot")
+                if not isinstance(snapshot, dict):
+                    return False
+                owner = snapshot.get("agent_id")
+                if not isinstance(owner, str) or not isinstance(key, str) or not key.startswith(f"mem_{owner}_"):
+                    return False
+                if existing is None:
+                    if owner != agent_id:
+                        return False
+                    parent = snapshot.get("supersedes")
+                    parent_row = client.vault.get(parent) if isinstance(parent, str) else None
+                    if parent_row and parent_row["agent_id"] != agent_id and not curator:
+                        return False
+                elif existing["agent_id"] != agent_id and not curator:
+                    # Pulled foreign rows may be echoed unchanged, but an agent
+                    # cannot advance another owner's state through a snapshot.
+                    if (existing["content_hash"] != snapshot.get("content_hash")
+                            or existing["status"] != snapshot.get("status")
+                            or existing["archived_at"] != snapshot.get("archived_at")
+                            or existing["expires_at"] != snapshot.get("expires_at")):
+                        return False
+            elif kind in {"state", "tombstone"}:
+                if existing is not None:
+                    owner = existing["agent_id"]
+                else:
+                    owner = event.get("agent_id")
+                if owner != agent_id and not curator:
+                    return False
+            else:
+                return False
+        return True
+
+    @staticmethod
+    def _pack_matches_agent(pack: dict, agent_id: str, client, curator: bool = False) -> bool:
         memories = pack.get("memories") if isinstance(pack, dict) else None
         if not isinstance(memories, list):
             return True  # import_pack reports malformed pack structure
@@ -86,6 +139,11 @@ class _Handler(BaseHTTPRequestHandler):
             if not isinstance(key, str) or not key.startswith(f"mem_{memory_agent}_"):
                 return False
             if memory_agent == agent_id:
+                if existing_agents.get(key) is None and not curator:
+                    parent = memory.get("supersedes")
+                    parent_row = client.vault.get(parent) if isinstance(parent, str) else None
+                    if parent_row and parent_row["agent_id"] != agent_id:
+                        return False
                 continue
             # Clients pull the shared vault into their local vault. Permit those
             # unchanged rows to round-trip, but never let a token create another
@@ -113,17 +171,33 @@ class _Handler(BaseHTTPRequestHandler):
         if u.path == "/pull":
             qs = parse_qs(u.query)
             since = int(qs["since"][0]) if "since" in qs else None
+            after = int(qs["after"][0]) if "after" in qs else None
             with _request_client(self.server) as client:
-                authorized, _agent_id = self._authorize(client)
+                authorized, _agent_id, _curator, token_id = self._authorize(client)
                 if not authorized:
                     self._send(401, {"error": "unauthorized"})
                     return
-                self._send(200, client.export(since))
+                if after is None:
+                    self._send(200, client.export(since))
+                    return
+                if after < 0:
+                    self._send(400, {"error": "cursor cannot be negative"})
+                    return
+                peer_identity = self.headers.get("X-Cairn-Peer") or "anonymous"
+                peer = f"{token_id}:{peer_identity}" if token_id else peer_identity
+                if after > client.vault.get_sync_cursor(peer, "pull"):
+                    self._send(409, {"error": "requested cursor is ahead of the saved peer cursor"})
+                    return
+                pack = client.export_delta(after)
+                with client.vault.transaction():
+                    client.vault.set_sync_cursor(peer, "pull", pack["cursor"],
+                                                 int(pack["exported_at"]))
+                self._send(200, pack)
             return
         self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path != "/push":
+        if self.path not in {"/push", "/conflicts/resolve"}:
             self._send(404, {"error": "not found"})
             return
         try:
@@ -135,19 +209,57 @@ class _Handler(BaseHTTPRequestHandler):
         except (ValueError, OSError):
             self._send(400, {"error": "invalid JSON pack"})
             return
+        if not isinstance(pack, dict):
+            self._send(400, {"error": "request body must be an object"})
+            return
         with _request_client(self.server) as client:
-            authorized, agent_id = self._authorize(client)
+            authorized, agent_id, curator, token_id = self._authorize(client)
             if not authorized:
                 self._send(401, {"error": "unauthorized"})
                 return
+            if self.path == "/conflicts/resolve":
+                try:
+                    result = client.resolve_competing_correction(
+                        str(pack.get("base_key", "")), str(pack.get("winner_key", "")),
+                        curator=curator,
+                        resolver_agent=agent_id or str(pack.get("agent_id") or client.agent_id),
+                    )
+                except PermissionError as e:
+                    self._send(403, {"error": str(e)})
+                    return
+                except (KeyError, ValueError) as e:
+                    self._send(400, {"error": str(e)})
+                    return
+                self._send(200, result)
+                return
             try:
                 with client.vault.transaction():
-                    if agent_id is not None and not self._pack_matches_agent(
-                        pack, agent_id, client
-                    ):
-                        self._send(403, {"error": "token is restricted to its assigned agent"})
-                        return
+                    if agent_id is not None:
+                        if pack.get("pack") == "cairn-sync-2":
+                            allowed = self._sync_pack_matches_agent(pack, agent_id, curator, client)
+                        else:
+                            allowed = self._pack_matches_agent(pack, agent_id, client, curator)
+                        if not allowed:
+                            self._send(403, {"error": "token is restricted to its assigned agent; curator permission is required for cross-agent state changes"})
+                            return
+                    if pack.get("pack") == "cairn-sync-2":
+                        after, cursor = pack.get("after"), pack.get("cursor")
+                        if (not isinstance(after, int) or isinstance(after, bool)
+                                or not isinstance(cursor, int) or isinstance(cursor, bool)
+                                or after < 0 or cursor < after):
+                            self._send(400, {"error": "invalid sync pack cursor"})
+                            return
+                        peer_identity = pack.get("origin_id", "anonymous")
+                        peer = f"{token_id}:{peer_identity}" if token_id else peer_identity
+                        if after > client.vault.get_sync_cursor(peer, "push"):
+                            self._send(409, {"error": "pushed cursor skips events"})
+                            return
                     out = client.import_pack(pack)
+                    peer_identity = pack.get("origin_id", "anonymous")
+                    peer = f"{token_id}:{peer_identity}" if token_id else peer_identity
+                    if pack.get("pack") == "cairn-sync-2":
+                        client.vault.set_sync_cursor(peer, "push", int(pack["cursor"]),
+                                                     int(pack.get("exported_at", 0)))
             except ValueError as e:  # cross-space pack
                 self._send(400, {"error": str(e)})
                 return
@@ -220,10 +332,22 @@ def _client_context(base_url: str, cafile: str | None):
 
 
 def pull_from(base_url: str, token: str = "", since: int | None = None,
-              cafile: str | None = None) -> dict:
-    url = base_url.rstrip("/") + "/pull" + (f"?since={since}" if since is not None else "")
-    req = urlrequest.Request(url, headers={"Authorization": f"Bearer {token}"})
+              cafile: str | None = None, after: int | None = None,
+              peer: str | None = None) -> dict:
+    cursor_name, cursor_value = ("after", after) if after is not None else ("since", since)
+    query = f"?{cursor_name}={cursor_value}" if cursor_value is not None else ""
+    url = base_url.rstrip("/") + "/pull" + query
+    headers = {"Authorization": f"Bearer {token}"}
+    if peer:
+        headers["X-Cairn-Peer"] = peer
+    req = urlrequest.Request(url, headers=headers)
     with urlrequest.urlopen(req, timeout=30, context=_client_context(base_url, cafile)) as resp:
+        return json.load(resp)
+
+
+def health_from(base_url: str, cafile: str | None = None) -> dict:
+    req = urlrequest.Request(base_url.rstrip("/") + "/health")
+    with urlrequest.urlopen(req, timeout=10, context=_client_context(base_url, cafile)) as resp:
         return json.load(resp)
 
 
@@ -235,4 +359,17 @@ def push_to(base_url: str, pack: dict, token: str = "", cafile: str | None = Non
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
     )
     with urlrequest.urlopen(req, timeout=60, context=_client_context(base_url, cafile)) as resp:
+        return json.load(resp)
+
+
+def resolve_conflict_to(base_url: str, base_key: str, winner_key: str,
+                        token: str = "", agent_id: str = "",
+                        cafile: str | None = None) -> dict:
+    data = json.dumps({"base_key": base_key, "winner_key": winner_key,
+                       "agent_id": agent_id}).encode()
+    req = urlrequest.Request(
+        base_url.rstrip("/") + "/conflicts/resolve", data=data,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+    )
+    with urlrequest.urlopen(req, timeout=30, context=_client_context(base_url, cafile)) as resp:
         return json.load(resp)

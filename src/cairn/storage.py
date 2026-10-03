@@ -28,6 +28,7 @@ MEMORY_FIELDS = (
     "origin", "task_id", "agent_id", "team_id", "version", "created_at", "updated_at",
     "expires_at", "archived_at", "supersedes", "parent_key", "provenance",
     "confidence", "content_hash",
+    "state_revision", "state_origin", "state_event_id",
 )
 
 # Exact-match columns a MemoryQuery or search filter may name.
@@ -112,14 +113,15 @@ class StorageBackend:
              with_embedding: bool = False) -> list[Row]:
         raise NotImplementedError
 
-    def set_status(self, key: str, status: str, now: int, archived_at: int | None = None) -> int:
+    def set_status(self, key: str, status: str, now: int, archived_at: int | None = None,
+                   event_metadata: dict | None = None) -> int:
         """Set status, updated_at, and archived_at; returns rows changed."""
         raise NotImplementedError
 
-    def delete_by_keys(self, keys: list[str]) -> int:
+    def delete_by_keys(self, keys: list[str], reason: str = "deleted") -> int:
         raise NotImplementedError
 
-    def delete_by_canonical(self, canonical_id: str) -> int:
+    def delete_by_canonical(self, canonical_id: str, reason: str = "purged") -> int:
         raise NotImplementedError
 
     def count(self) -> int:
@@ -164,7 +166,7 @@ class StorageBackend:
 
     # -- server credentials ------------------------------------------------------
     def create_server_token(self, token_id: str, token_hash: str, agent_id: str,
-                            created_at: int) -> None:
+                            created_at: int, curator: bool = False) -> None:
         """Store a token digest and its permitted agent identity."""
         raise NotImplementedError
 
@@ -182,6 +184,45 @@ class StorageBackend:
 
     def get_agent_ids(self, keys: list[str]) -> dict[str, str]:
         """Return agent identities for existing memory keys in one lookup."""
+        raise NotImplementedError
+
+    # -- sync event log and peer state --------------------------------------
+    def sync_origin_id(self) -> str:
+        raise NotImplementedError
+
+    def export_sync_events(self, after: int = 0, limit: int = 100_000) -> dict:
+        raise NotImplementedError
+
+    def has_sync_event(self, event_id: str) -> bool:
+        raise NotImplementedError
+
+    def has_sync_tombstone(self, key: str) -> bool:
+        raise NotImplementedError
+
+    def apply_sync_event(self, event: dict) -> str:
+        """Apply one immutable event and return added, updated, or skipped."""
+        raise NotImplementedError
+
+    def get_sync_cursor(self, peer: str, direction: str) -> int:
+        raise NotImplementedError
+
+    def list_sync_cursors(self) -> list[dict]:
+        raise NotImplementedError
+
+    def set_sync_cursor(self, peer: str, direction: str, cursor: int, now: int) -> None:
+        raise NotImplementedError
+
+    def list_competing_corrections(self) -> list[dict]:
+        raise NotImplementedError
+
+    def record_competing_corrections(self, now: int) -> list[dict]:
+        raise NotImplementedError
+
+    def list_sync_conflicts(self, include_resolved: bool = False) -> list[dict]:
+        raise NotImplementedError
+
+    def resolve_sync_conflict(self, base_key: str, winner_key: str,
+                              resolved_by: str, now: int) -> None:
         raise NotImplementedError
 
 

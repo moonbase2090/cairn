@@ -6,8 +6,10 @@ vault.
 
 With Cairn 0.11.0 or later, each client can use its own bearer token. The server
 checks that new memories match the agent assigned to that token and stores token
-digests in the vault database. Clients with a valid token can pull the shared
-vault.
+digests in the vault database. Sync uses version 2 event packs with resumable
+per-peer cursors, state revisions, and tombstones. The event log, tombstones,
+and cursors live in the vault database and are included in its backups. Version
+1 file packs remain insert-only for keys that already exist.
 
 ## Install Cairn
 
@@ -49,10 +51,15 @@ sudo -u cairn env CAIRN_DIR=/var/lib/cairn CAIRN_AGENT=server-host \
   /usr/local/bin/cairn token create --agent client-a
 sudo -u cairn env CAIRN_DIR=/var/lib/cairn CAIRN_AGENT=server-host \
   /usr/local/bin/cairn token create --agent client-b
+sudo -u cairn env CAIRN_DIR=/var/lib/cairn CAIRN_AGENT=server-host \
+  /usr/local/bin/cairn token create --agent maintainer --curator
 ~~~
 
 The token is shown only when it is created. `cairn token list` shows active
-token IDs and agent identities; `cairn token revoke <token-id>` disables one.
+token IDs, agent identities, and curator roles; `cairn token revoke <token-id>`
+disables one. An agent token can change rows owned by that agent. A curator
+token can also supersede, archive, restore, delete, or resolve conflicts across
+agents. Keep curator tokens restricted to maintainers.
 
 ## Run Cairn with systemd
 
@@ -147,8 +154,27 @@ export CAIRN_URL="https://sync.example.com"
 export CAIRN_TOKEN="the-token-created-for-client-a"
 cairn push
 cairn pull
+cairn sync status
+cairn conflicts list
 ~~~
 
-Use a distinct `CAIRN_AGENT` and token on each client. A token can add memories
-for its assigned agent; rows already present in the shared vault can also
-round-trip after a client pulls them.
+Use a distinct `CAIRN_AGENT` and token on each client. A token can add and
+update memories for its assigned agent; rows already present in the shared
+vault can round-trip unchanged after a client pulls them. Normal push and pull
+send only events after the saved peer cursor. The cursor advances only after an
+event page applies successfully, so a failed request can be retried. Tombstones
+keep hard deletions from returning on a later sync. Storing the same content
+again after purge creates a new versioned key rather than reusing the tombstoned
+key.
+
+When agents correct the same memory before syncing, Cairn keeps both
+corrections active and records a competing correction. Inspect and resolve it
+with the owning agent or a curator token:
+
+~~~sh
+cairn conflicts list
+cairn conflicts resolve <base-key> <winner-key> --url "$CAIRN_URL" --token "$CAIRN_TOKEN"
+~~~
+
+The selected winner stays active. Cairn marks each losing correction
+`superseded` in a state event, which then syncs to the other peers.

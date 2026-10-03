@@ -167,7 +167,7 @@ def test_v1_migrates_with_backup_and_triggers(tmp_path):
     emb = HashEmbedder()
     v = Vault(db, emb.name, emb.dims)  # open migrates
     assert (tmp_path / "legacy.db.pre2.bak").exists()
-    assert v._get_meta("schema") == "2"
+    assert v._get_meta("schema") == "3"
     row = v.get("k1")
     assert row["content"] == "legacy hello world" and row["content_ref"] is None
     trigs = {r["sql"] for r in v.conn.execute(

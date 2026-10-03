@@ -2,13 +2,16 @@
 
 Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
-## 0.12.0 - Unreleased
+## 0.12.1 - Unreleased
 
 ### Added
 
 - Add the Cairn Agent Skill and a gated `cairn skills install` command.
   Unix and Windows archive installers install it for detected agents while
   preserving different existing copies.
+- Sync row state with revisioned event packs, resumable peer cursors, and
+  retained tombstones. Add per-agent curator tokens and competing correction
+  detection and resolution across CLI, HTTP sync, and MCP.
 
 ## 0.11.0 - 2026-09-30
 

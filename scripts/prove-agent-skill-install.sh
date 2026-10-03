@@ -63,7 +63,7 @@ cat >"$tmp/bin/uv" <<'SH'
 #!/bin/sh
 case "$1 $2" in
   "python find") printf '/tmp/python\n' ;;
-  "tool list") printf 'cairn 0.12.0\n' ;;
+  "tool list") printf 'cairn 0.12.1\n' ;;
   "tool install") exit 0 ;;
   *) exit 1 ;;
 esac

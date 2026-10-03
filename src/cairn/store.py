@@ -7,7 +7,11 @@ spaces are never mixed.
 from __future__ import annotations
 
 import logging
+import base64
+import json
 import sqlite3
+import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -15,6 +19,7 @@ import numpy as np
 
 from .storage import (
     ContentIntegrityError,
+    MEMORY_FIELDS,
     MemoryQuery,
     SpaceMismatchError,
     StorageBackend,
@@ -45,6 +50,9 @@ CREATE TABLE IF NOT EXISTS memories(
   agent_id TEXT NOT NULL,
   team_id TEXT NOT NULL,
   version INTEGER NOT NULL DEFAULT 1,
+  state_revision INTEGER NOT NULL DEFAULT 1,
+  state_origin TEXT NOT NULL DEFAULT '',
+  state_event_id TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   expires_at INTEGER,
@@ -65,7 +73,32 @@ CREATE TABLE IF NOT EXISTS server_tokens(
   token_id TEXT PRIMARY KEY,
   token_hash TEXT UNIQUE NOT NULL,
   agent_id TEXT NOT NULL,
+  curator INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sync_events(
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT UNIQUE NOT NULL,
+  event_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sync_tombstones(
+  key TEXT PRIMARY KEY,
+  event_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sync_cursors(
+  peer TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  cursor INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(peer, direction)
+);
+CREATE TABLE IF NOT EXISTS sync_conflicts(
+  base_key TEXT PRIMARY KEY,
+  competitor_keys TEXT NOT NULL,
+  detected_at INTEGER NOT NULL,
+  resolved_at INTEGER,
+  winner_key TEXT,
+  resolved_by TEXT
 );
 """
 
@@ -90,6 +123,7 @@ END;
 COLUMNS = [
     "rowid", "key", "canonical_id", "content", "content_ref", "content_summary", "memory_type",
     "status", "origin", "task_id", "agent_id", "team_id", "version",
+    "state_revision", "state_origin", "state_event_id",
     "created_at", "updated_at", "expires_at", "archived_at", "supersedes",
     "parent_key",     "provenance", "confidence", "content_hash", "embedding",
 ]
@@ -105,6 +139,21 @@ QUERY_BOUNDS = (
 READ_COLUMNS = [c for c in COLUMNS if c != "embedding"]
 
 DEFAULT_DOC_THRESHOLD = 2048  # memories larger than this spill content to docs/
+
+
+def _sync_event_order(event: dict) -> tuple[int, int, str, str]:
+    return (
+        int(event.get("state_revision", 0)), int(event.get("updated_at", 0)),
+        str(event.get("state_origin") or event.get("origin_id") or ""),
+        str(event.get("state_event_id") or event.get("event_id") or ""),
+    )
+
+
+def _sync_row_order(row) -> tuple[int, int, str, str]:
+    return (
+        int(row["state_revision"] or 0), int(row["updated_at"] or 0),
+        str(row["state_origin"] or ""), str(row["state_event_id"] or ""),
+    )
 
 
 class Vault(StorageBackend):
@@ -138,12 +187,14 @@ class Vault(StorageBackend):
             except sqlite3.Error:
                 self._vec = False
         self.conn.executescript(SCHEMA)
+        self.docs_root = self.db_path.parent / "docs"
         self._fts = True
         try:
             self.conn.executescript(FTS_SCHEMA)
         except sqlite3.Error:
             self._fts = False  # prehistoric sqlite: vault works, keyword search won't
         self._migrate_to_v2()
+        self._migrate_to_v3()
         # idx_mem_ref lives here (not SCHEMA): SCHEMA must apply cleanly to
         # pre-migration v1 tables that have no content_ref column yet.
         try:
@@ -153,7 +204,6 @@ class Vault(StorageBackend):
             log.warning("content_ref index was not created", exc_info=True)
         if self._fts:
             self._backfill_fts()
-        self.docs_root = self.db_path.parent / "docs"
         if create:
             if self._vec:
                 try:
@@ -164,7 +214,7 @@ class Vault(StorageBackend):
                     self._vec = False
             self._set_meta("embed_model", embed_name)
             self._set_meta("dims", str(dims))
-            self._set_meta("schema", "2")
+            self._set_meta("schema", "3")
             self._set_meta("doc_threshold",
                            str(DEFAULT_DOC_THRESHOLD if doc_threshold is None else doc_threshold))
             self.conn.commit()
@@ -407,6 +457,81 @@ class Vault(StorageBackend):
             self._set_meta("doc_threshold", str(DEFAULT_DOC_THRESHOLD))
         self.conn.commit()
 
+    def _migrate_to_v3(self) -> None:
+        """Add durable sync state, event, cursor, and conflict tables."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(memories)")}
+        for name, declaration in (
+            ("state_revision", "INTEGER NOT NULL DEFAULT 1"),
+            ("state_origin", "TEXT NOT NULL DEFAULT ''"),
+            ("state_event_id", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in cols:
+                self.conn.execute(f"ALTER TABLE memories ADD COLUMN {name} {declaration}")
+        token_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(server_tokens)")}
+        if "curator" not in token_cols:
+            self.conn.execute("ALTER TABLE server_tokens ADD COLUMN curator INTEGER NOT NULL DEFAULT 0")
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS sync_events(
+              seq INTEGER PRIMARY KEY AUTOINCREMENT,
+              event_id TEXT UNIQUE NOT NULL,
+              event_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sync_tombstones(
+              key TEXT PRIMARY KEY, event_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sync_cursors(
+              peer TEXT NOT NULL, direction TEXT NOT NULL, cursor INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL, PRIMARY KEY(peer, direction)
+            );
+            CREATE TABLE IF NOT EXISTS sync_conflicts(
+              base_key TEXT PRIMARY KEY, competitor_keys TEXT NOT NULL,
+              detected_at INTEGER NOT NULL, resolved_at INTEGER, winner_key TEXT,
+              resolved_by TEXT
+            );
+        """)
+        if not self._get_meta("sync_origin_id"):
+            self._set_meta("sync_origin_id", uuid.uuid4().hex)
+        if self._get_meta("sync_origin_seq") is None:
+            self._set_meta("sync_origin_seq", "0")
+        origin = self._get_meta("sync_origin_id")
+        pending = self.conn.execute(
+            "SELECT * FROM memories WHERE state_origin='' OR state_event_id='' ORDER BY rowid"
+        ).fetchall()
+        for row in pending:
+            event = self._new_sync_event("snapshot", row["key"], int(row["state_revision"]),
+                                         int(row["updated_at"]), origin)
+            snapshot = {field: row[field] for field in MEMORY_FIELDS}
+            snapshot["content"] = self.read_content(row)
+            snapshot["embedding"] = base64.b64encode(bytes(row["embedding"])).decode("ascii")
+            snapshot["state_origin"] = origin
+            snapshot["state_event_id"] = event["event_id"]
+            event["snapshot"] = snapshot
+            self.conn.execute(
+                "UPDATE memories SET state_origin=?, state_event_id=? WHERE key=?",
+                (origin, event["event_id"], row["key"]),
+            )
+            self._append_sync_event(event)
+        self._set_meta("schema", "3")
+        self.conn.commit()
+
+    def _new_sync_event(self, kind: str, key: str, revision: int, updated_at: int,
+                        origin: str | None = None) -> dict:
+        origin = origin or self._get_meta("sync_origin_id")
+        seq = int(self._get_meta("sync_origin_seq") or "0") + 1
+        self._set_meta("sync_origin_seq", str(seq))
+        return {
+            "event_id": f"{origin}:{seq}", "origin_id": origin, "origin_seq": seq,
+            "kind": kind, "key": key, "state_revision": revision,
+            "updated_at": updated_at, "state_origin": origin,
+            "state_event_id": f"{origin}:{seq}",
+        }
+
+    def _append_sync_event(self, event: dict) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO sync_events(event_id, event_json) VALUES(?, ?)",
+            (event["event_id"], json.dumps(event, separators=(",", ":"), default=str)),
+        )
+
     def _set_meta(self, k: str, v: str) -> None:
         self.conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES(?, ?)", (k, v))
 
@@ -495,6 +620,16 @@ class Vault(StorageBackend):
     def insert(self, rec: dict, vector: np.ndarray) -> int:
         # rec["content"] is ALWAYS full text at this boundary (client, import);
         # spill to docs/ here so every write path shares one policy.
+        rec = dict(rec)
+        local_event = None
+        if not rec.get("state_event_id"):
+            origin = self._get_meta("sync_origin_id")
+            revision = int(rec.get("state_revision", 1))
+            local_event = self._new_sync_event(
+                "snapshot", rec["key"], revision, int(rec["updated_at"]), origin,
+            )
+            rec.update({"state_revision": revision, "state_origin": origin,
+                        "state_event_id": local_event["event_id"]})
         text = rec["content"]
         digest = rec.get("content_hash")
         if digest is None:
@@ -544,6 +679,12 @@ class Vault(StorageBackend):
                     "INSERT INTO mem_vec(rowid, embedding) VALUES(?, ?)",
                     (rowid, _sv.serialize_float32(np.asarray(vector, dtype=np.float32).tolist())),
                 )
+            if local_event is not None:
+                snapshot = {field: rec.get(field) for field in MEMORY_FIELDS}
+                snapshot["content"] = text
+                snapshot["embedding"] = base64.b64encode(blob).decode("ascii")
+                local_event["snapshot"] = snapshot
+                self._append_sync_event(local_event)
             if not self._txn:
                 self.conn.commit()
             return rowid
@@ -552,25 +693,47 @@ class Vault(StorageBackend):
                 self.conn.rollback()
             raise
 
-    def set_status(self, key: str, status: str, now: int, archived_at: int | None = None) -> int:
+    def set_status(self, key: str, status: str, now: int, archived_at: int | None = None,
+                   event_metadata: dict | None = None) -> int:
+        row = self.conn.execute("SELECT * FROM memories WHERE key=?", (key,)).fetchone()
+        if row is None:
+            return 0
+        revision = int(row["state_revision"]) + 1
+        event = self._new_sync_event("state", key, revision, now)
+        event.update({"status": status, "archived_at": archived_at})
+        event.update(event_metadata or {})
+        if event.get("conflict_resolution") is not None:
+            self._validate_resolution_event(event, event["conflict_resolution"])
         cur = self.conn.execute(
-            "UPDATE memories SET status=?, updated_at=?, archived_at=? WHERE key=?",
-            (status, now, archived_at, key),
+            "UPDATE memories SET status=?, updated_at=?, archived_at=?, state_revision=?, "
+            "state_origin=?, state_event_id=? WHERE key=?",
+            (status, now, archived_at, revision, event["state_origin"], event["event_id"], key),
         )
+        self._append_sync_event(event)
+        self._record_resolution_event(event)
         if not self._txn:
             self.conn.commit()
         return cur.rowcount
 
-    def delete_by_keys(self, keys: list[str]) -> int:
+    def delete_by_keys(self, keys: list[str], reason: str = "deleted") -> int:
         if not keys:
             return 0
         try:
             rows = self.conn.execute(
-                f"SELECT rowid, content_hash FROM memories WHERE key IN ({','.join('?' for _ in keys)})",
+                f"SELECT * FROM memories WHERE key IN ({','.join('?' for _ in keys)})",
                 keys,
             ).fetchall()
             rowids = [r["rowid"] for r in rows]
             hashes = [r["content_hash"] for r in rows]
+            for row in rows:
+                event = self._new_sync_event(
+                    "tombstone", row["key"], int(row["state_revision"]) + 1,
+                    int(time.time()),
+                )
+                event.update({"canonical_id": row["canonical_id"],
+                              "agent_id": row["agent_id"], "reason": reason})
+                self._append_sync_event(event)
+                self._remember_tombstone(event)
             self.conn.execute(
                 f"DELETE FROM memories WHERE key IN ({','.join('?' for _ in keys)})", keys
             )
@@ -593,14 +756,14 @@ class Vault(StorageBackend):
                     pass
         return len(rowids)
 
-    def delete_by_canonical(self, canonical_id: str) -> int:
+    def delete_by_canonical(self, canonical_id: str, reason: str = "purged") -> int:
         keys = [
             r["key"]
             for r in self.conn.execute(
                 "SELECT key FROM memories WHERE canonical_id=?", (canonical_id,)
             ).fetchall()
         ]
-        return self.delete_by_keys(keys)
+        return self.delete_by_keys(keys, reason)
 
     # -- reads --------------------------------------------------------------
     def get(self, key: str) -> sqlite3.Row | None:
@@ -617,24 +780,26 @@ class Vault(StorageBackend):
         ).fetchall()
 
     def create_server_token(self, token_id: str, token_hash: str, agent_id: str,
-                            created_at: int) -> None:
+                            created_at: int, curator: bool = False) -> None:
         self.conn.execute(
-            "INSERT INTO server_tokens(token_id, token_hash, agent_id, created_at) "
-            "VALUES(?, ?, ?, ?)",
-            (token_id, token_hash, agent_id, created_at),
+            "INSERT INTO server_tokens(token_id, token_hash, agent_id, curator, created_at) "
+            "VALUES(?, ?, ?, ?, ?)",
+            (token_id, token_hash, agent_id, int(curator), created_at),
         )
 
-    def get_server_token(self, token_hash: str) -> sqlite3.Row | None:
-        return self.conn.execute(
-            "SELECT token_id, agent_id, created_at FROM server_tokens WHERE token_hash=?",
+    def get_server_token(self, token_hash: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT token_id, agent_id, curator, created_at FROM server_tokens WHERE token_hash=?",
             (token_hash,),
         ).fetchone()
+        return ({**dict(row), "curator": bool(row["curator"])} if row else None)
 
-    def list_server_tokens(self) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT token_id, agent_id, created_at FROM server_tokens "
+    def list_server_tokens(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT token_id, agent_id, curator, created_at FROM server_tokens "
             "ORDER BY created_at, token_id"
         ).fetchall()
+        return [{**dict(row), "curator": bool(row["curator"])} for row in rows]
 
     def delete_server_token(self, token_id: str) -> int:
         cur = self.conn.execute("DELETE FROM server_tokens WHERE token_id=?", (token_id,))
@@ -650,6 +815,256 @@ class Vault(StorageBackend):
             ).fetchall()
             agents.update({row["key"]: row["agent_id"] for row in rows})
         return agents
+
+    # -- durable sync -----------------------------------------------------
+    def sync_origin_id(self) -> str:
+        return self._get_meta("sync_origin_id") or ""
+
+    def export_sync_events(self, after: int = 0, limit: int = 100_000) -> dict:
+        rows = self.conn.execute(
+            "SELECT seq, event_json FROM sync_events WHERE seq>? ORDER BY seq LIMIT ?",
+            (after, limit + 1),
+        ).fetchall()
+        rows = rows[:limit]
+        events = [{**json.loads(row["event_json"]), "feed_seq": row["seq"]} for row in rows]
+        cursor = rows[-1]["seq"] if rows else after
+        return {"pack": "cairn-sync-2", "after": after, "cursor": cursor,
+                "events": events}
+
+    def has_sync_event(self, event_id: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM sync_events WHERE event_id=?", (event_id,),
+        ).fetchone() is not None
+
+    def has_sync_tombstone(self, key: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM sync_tombstones WHERE key=?", (key,),
+        ).fetchone() is not None
+
+    def _remember_tombstone(self, event: dict) -> None:
+        self.conn.execute(
+            "INSERT INTO sync_tombstones(key, event_json) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET event_json=excluded.event_json",
+            (event["key"], json.dumps(event, separators=(",", ":"), default=str)),
+        )
+
+    def apply_sync_event(self, event: dict) -> str:
+        if not self._txn:
+            with self.transaction():
+                return self.apply_sync_event(event)
+        if not isinstance(event, dict) or not isinstance(event.get("event_id"), str):
+            raise ValueError("invalid sync event: missing event_id")
+        if self.conn.execute("SELECT 1 FROM sync_events WHERE event_id=?", (event["event_id"],)).fetchone():
+            return "skipped"
+        kind = event.get("kind")
+        key = event.get("key")
+        if kind not in {"snapshot", "state", "tombstone"} or not isinstance(key, str):
+            raise ValueError("invalid sync event kind or key")
+        existing = self.conn.execute("SELECT * FROM memories WHERE key=?", (key,)).fetchone()
+        incoming_order = _sync_event_order(event)
+        current_order = _sync_row_order(existing) if existing else None
+        resolution = event.get("conflict_resolution")
+        if resolution is not None and not (kind == "state" and existing is None
+                                            and self.has_sync_tombstone(key)):
+            self._validate_resolution_event(event, resolution)
+        changed = False
+        if kind == "snapshot":
+            snapshot = event.get("snapshot")
+            if not isinstance(snapshot, dict) or snapshot.get("key") != key:
+                raise ValueError("invalid snapshot sync event")
+            if existing and existing["content_hash"] != snapshot.get("content_hash"):
+                raise ValueError(f"sync integrity conflict for {key}: content hash changed")
+            if not existing:
+                if self.has_sync_tombstone(key):
+                    self._append_sync_event(event)
+                    return "skipped"
+                raw = snapshot.get("embedding")
+                if not isinstance(raw, str):
+                    raise ValueError(f"sync snapshot for {key} has no embedding")
+                vector = np.frombuffer(base64.b64decode(raw), dtype=np.float32).copy()
+                rec = {field: snapshot.get(field) for field in MEMORY_FIELDS}
+                rec["content"] = snapshot.get("content")
+                self.insert(rec, vector)
+                changed = True
+            elif incoming_order > current_order:
+                self.conn.execute(
+                    "UPDATE memories SET status=?, updated_at=?, archived_at=?, expires_at=?, "
+                    "state_revision=?, state_origin=?, state_event_id=? WHERE key=?",
+                    (snapshot.get("status"), event.get("updated_at"), snapshot.get("archived_at"),
+                     snapshot.get("expires_at"), event.get("state_revision"),
+                     event.get("state_origin", event.get("origin_id")),
+                     event.get("state_event_id", event["event_id"]), key),
+                )
+                changed = True
+        elif kind == "state":
+            if existing is None:
+                if self.has_sync_tombstone(key):
+                    self._append_sync_event(event)
+                    return "skipped"
+                raise ValueError(f"state event for missing key {key}; send a snapshot first")
+            if incoming_order > current_order:
+                self.conn.execute(
+                    "UPDATE memories SET status=?, updated_at=?, archived_at=?, state_revision=?, "
+                    "state_origin=?, state_event_id=? WHERE key=?",
+                    (event.get("status"), event.get("updated_at"), event.get("archived_at"),
+                     event.get("state_revision"), event.get("state_origin", event.get("origin_id")),
+                     event.get("state_event_id", event["event_id"]), key),
+                )
+                changed = True
+        else:
+            self._remember_tombstone(event)
+            if existing is not None:
+                rowid, content_hash = existing["rowid"], existing["content_hash"]
+                self.conn.execute("DELETE FROM memories WHERE key=?", (key,))
+                if self._vec_ok:
+                    self.conn.execute("DELETE FROM mem_vec WHERE rowid=?", (rowid,))
+                self.delete_doc_if_orphan(content_hash)
+                changed = True
+        self._append_sync_event(event)
+        if changed:
+            self._record_resolution_event(event)
+        return "added" if kind == "snapshot" and changed and existing is None else (
+            "updated" if changed else "skipped")
+
+    def _record_resolution_event(self, event: dict) -> None:
+        resolution = event.get("conflict_resolution")
+        if not isinstance(resolution, dict):
+            return
+        base_key = resolution.get("base_key")
+        competitors = resolution.get("competitor_keys")
+        winner_key = resolution.get("winner_key")
+        resolved_by = resolution.get("resolved_by") or "sync"
+        if not isinstance(base_key, str) or not isinstance(competitors, list):
+            return
+        self.conn.execute(
+            "INSERT INTO sync_conflicts(base_key, competitor_keys, detected_at, resolved_at, "
+            "winner_key, resolved_by) VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(base_key) DO UPDATE SET "
+            "competitor_keys=excluded.competitor_keys, resolved_at=excluded.resolved_at, "
+            "winner_key=excluded.winner_key, resolved_by=excluded.resolved_by",
+            (base_key, json.dumps(competitors), event.get("updated_at", 0),
+             event.get("updated_at", 0), winner_key, resolved_by),
+        )
+
+    def _validate_resolution_event(self, event: dict, resolution: dict) -> None:
+        if (event.get("kind") != "state" or event.get("status") != "superseded"
+                or not isinstance(resolution, dict)):
+            raise ValueError("conflict resolution must be a supersede state event")
+        base_key = resolution.get("base_key")
+        winner_key = resolution.get("winner_key")
+        competitors = resolution.get("competitor_keys")
+        if (not isinstance(base_key, str) or not isinstance(winner_key, str)
+                or not isinstance(competitors, list) or len(competitors) < 2
+                or any(not isinstance(key, str) for key in competitors)
+                or len(set(competitors)) != len(competitors)
+                or not isinstance(resolution.get("resolved_by"), str)
+                or not resolution["resolved_by"]
+                or event.get("key") not in competitors
+                or winner_key not in competitors or event.get("key") == winner_key):
+            raise ValueError("invalid competing correction resolution")
+        stored = next((item for item in self.list_sync_conflicts(include_resolved=True)
+                       if item["base_key"] == base_key
+                       and set(item["competitor_keys"]) == set(competitors)), None)
+        dynamic = next((item for item in self.list_competing_corrections()
+                        if item["base_key"] == base_key
+                        and set(item["competitor_keys"]) == set(competitors)), None)
+        winner = self.get(winner_key)
+        parents_match = all(
+            (row := self.get(key)) is not None and row["supersedes"] == base_key
+            for key in competitors
+        )
+        if ((stored is None and dynamic is None) or winner is None
+                or winner["status"] != "active" or not parents_match):
+            raise ValueError("conflict resolution does not match an active competing correction")
+
+    def get_sync_cursor(self, peer: str, direction: str) -> int:
+        row = self.conn.execute(
+            "SELECT cursor FROM sync_cursors WHERE peer=? AND direction=?", (peer, direction),
+        ).fetchone()
+        return int(row["cursor"]) if row else 0
+
+    def list_sync_cursors(self) -> list[dict]:
+        return [dict(row) for row in self.conn.execute(
+            "SELECT peer, direction, cursor, updated_at FROM sync_cursors "
+            "ORDER BY peer, direction"
+        ).fetchall()]
+
+    def set_sync_cursor(self, peer: str, direction: str, cursor: int, now: int) -> None:
+        if direction not in {"push", "pull"} or cursor < 0:
+            raise ValueError("invalid sync cursor")
+        self.conn.execute(
+            "INSERT INTO sync_cursors(peer, direction, cursor, updated_at) VALUES(?, ?, ?, ?) "
+            "ON CONFLICT(peer, direction) DO UPDATE SET cursor=MAX(sync_cursors.cursor, excluded.cursor), "
+            "updated_at=excluded.updated_at",
+            (peer, direction, cursor, now),
+        )
+        if not self._txn:
+            self.conn.commit()
+
+    def list_competing_corrections(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT supersedes AS base_key, GROUP_CONCAT(key) AS keys "
+            "FROM memories WHERE status='active' AND supersedes IS NOT NULL "
+            "GROUP BY supersedes HAVING COUNT(*) > 1 ORDER BY supersedes"
+        ).fetchall()
+        return [{"base_key": row["base_key"], "competitor_keys": sorted(row["keys"].split(","))}
+                for row in rows]
+
+    def record_competing_corrections(self, now: int) -> list[dict]:
+        conflicts = self.list_competing_corrections()
+        for item in conflicts:
+            self.conn.execute(
+                "INSERT INTO sync_conflicts(base_key, competitor_keys, detected_at) VALUES(?, ?, ?) "
+                "ON CONFLICT(base_key) DO UPDATE SET competitor_keys=excluded.competitor_keys, "
+                "detected_at=CASE WHEN sync_conflicts.resolved_at IS NULL THEN "
+                "sync_conflicts.detected_at ELSE excluded.detected_at END, resolved_at=NULL, "
+                "winner_key=NULL, resolved_by=NULL",
+                (item["base_key"], json.dumps(item["competitor_keys"]), now),
+            )
+        unresolved = self.conn.execute(
+            "SELECT base_key, competitor_keys FROM sync_conflicts WHERE resolved_at IS NULL"
+        ).fetchall()
+        for row in unresolved:
+            keys = json.loads(row["competitor_keys"])
+            if not keys:
+                continue
+            active = self.conn.execute(
+                f"SELECT key FROM memories WHERE status='active' AND key IN "
+                f"({','.join('?' for _ in keys)})", keys,
+            ).fetchall()
+            if len(active) == 1:
+                self.conn.execute(
+                    "UPDATE sync_conflicts SET resolved_at=?, winner_key=?, resolved_by='sync' "
+                    "WHERE base_key=? AND resolved_at IS NULL",
+                    (now, active[0]["key"], row["base_key"]),
+                )
+        if not self._txn:
+            self.conn.commit()
+        return conflicts
+
+    def list_sync_conflicts(self, include_resolved: bool = False) -> list[dict]:
+        clause = "" if include_resolved else " WHERE resolved_at IS NULL"
+        rows = self.conn.execute(
+            "SELECT * FROM sync_conflicts" + clause + " ORDER BY detected_at, base_key"
+        ).fetchall()
+        return [{**dict(row), "competitor_keys": json.loads(row["competitor_keys"]),
+                 "resolved": row["resolved_at"] is not None} for row in rows]
+
+    def resolve_sync_conflict(self, base_key: str, winner_key: str,
+                              resolved_by: str, now: int) -> None:
+        row = self.conn.execute(
+            "SELECT competitor_keys FROM sync_conflicts WHERE base_key=?", (base_key,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"no recorded competing correction for {base_key}")
+        competitors = json.loads(row["competitor_keys"])
+        if winner_key not in competitors:
+            raise ValueError(f"winner must be one of the competing corrections: {competitors}")
+        self.conn.execute(
+            "UPDATE sync_conflicts SET resolved_at=?, winner_key=?, resolved_by=? WHERE base_key=?",
+            (now, winner_key, resolved_by, base_key),
+        )
+        if not self._txn:
+            self.conn.commit()
 
     def scan(self, where: str = "", args: tuple = (), limit: int = 100,
              with_embedding: bool = False) -> list[sqlite3.Row]:
