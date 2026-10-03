@@ -258,7 +258,8 @@ to save the remote pack without importing it.
 
 Push and pull use resumable v2 event pages. Cairn stores each peer cursor in
 the vault database and advances it only after applying the page. Tombstones
-keep hard-deleted memories from returning. When two active corrections
+keep hard-deleted memories from returning; storing the same content again uses
+a new versioned key. When two active corrections
 supersede the same key, Cairn keeps both active and reports a conflict. Use
 `cairn_conflicts` or `cairn conflicts` to select the winner; cross-agent
 resolution needs a curator token.

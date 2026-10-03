@@ -36,6 +36,8 @@ archived or superseded row.
 `cairn export` still writes a portable `cairn-export-1` snapshot. Importing v1
 adds only keys that are missing; it never updates an existing row. A remembered
 tombstone also blocks an old v1 snapshot from recreating a deleted key.
+If a user stores the same content again after purge, Cairn allocates the next
+unused versioned key so the new memory is not blocked by the old tombstone.
 
 Server push and pull use `cairn-sync-2` event pages. Each page has an `after`
 cursor and a cursor at its final event. Pages contain at most 100,000 events;

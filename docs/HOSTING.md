@@ -163,7 +163,9 @@ update memories for its assigned agent; rows already present in the shared
 vault can round-trip unchanged after a client pulls them. Normal push and pull
 send only events after the saved peer cursor. The cursor advances only after an
 event page applies successfully, so a failed request can be retried. Tombstones
-keep hard deletions from returning on a later sync.
+keep hard deletions from returning on a later sync. Storing the same content
+again after purge creates a new versioned key rather than reusing the tombstoned
+key.
 
 When agents correct the same memory before syncing, Cairn keeps both
 corrections active and records a competing correction. Inspect and resolve it

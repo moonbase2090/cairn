@@ -156,6 +156,25 @@ def test_tombstones_propagate_and_are_retained_in_the_event_log(tmp_path):
     assert late_peer.get_memory(stored.key) is None
 
 
+def test_recreating_purged_content_uses_a_new_key_version(tmp_path):
+    source = make_client(tmp_path / "source" / "vault.db", "source-agent")
+    peer = make_client(tmp_path / "peer" / "vault.db", "peer-agent")
+    original = source.store_memory("A fact that will be recreated.", team_id="cairn", task_id="sync")
+    first = source.export_delta()
+    peer.import_sync_pack(first)
+    source.purge_memory(original.canonical_id)
+    peer.import_sync_pack(source.export_delta(first["cursor"]))
+
+    recreated = source.store_memory(
+        "A fact that will be recreated.", team_id="cairn", task_id="sync", mode="new",
+    )
+    assert recreated.key != original.key
+    assert recreated.version > original.version
+    peer.import_sync_pack(source.export_delta(first["cursor"]))
+    assert peer.get_memory(original.key) is None
+    assert peer.get_memory(recreated.key).status == "active"
+
+
 def test_competing_corrections_are_recorded_resolved_and_synced(tmp_path):
     agent_a = make_client(tmp_path / "a" / "vault.db", "agent-a")
     agent_b = make_client(tmp_path / "b" / "vault.db", "agent-b")

@@ -72,6 +72,14 @@ class CairnClient:
     def _embed_one(self, text: str) -> np.ndarray:
         return np.asarray(self.embedder.embed([text])[0], dtype=np.float32)
 
+    def _available_key(self, task_id: str, digest: str, first_version: int) -> tuple[str, int]:
+        version = first_version
+        while True:
+            key = build_key(self.agent_id, task_id, digest, version)
+            if self.vault.get(key) is None and not self.vault.has_sync_tombstone(key):
+                return key, version
+            version += 1
+
     def _record(self, row, similarity: float | None = None) -> MemoryRecord:
         """Materialize a row, resolving docs/ content. Loud on corruption."""
         return _row_to_record(row, self.vault.read_content(row), similarity)
@@ -114,9 +122,10 @@ class CairnClient:
             target = self.vault.get(supersedes_key)
             if target is None:
                 raise KeyError(f"supersedes target not found: {supersedes_key}")
-            version = int(target["version"]) + 1
+            key, version = self._available_key(
+                task_id, digest, int(target["version"]) + 1,
+            )
             canonical_id = target["canonical_id"]
-            key = build_key(self.agent_id, task_id, digest, version)
             summary = (content[:200] or "").strip()
             vec = np.asarray(vector, dtype=np.float32) if vector is not None else self._embed_one(content)
             with self.vault.transaction():
@@ -151,9 +160,8 @@ class CairnClient:
                                    action=StoreAction.DUPLICATE_DETECTED,
                                    near_duplicates=near)
 
-        version = 1
+        key, version = self._available_key(task_id, digest, 1)
         canonical_id = f"{task_id}-{digest[:12]}"
-        key = build_key(self.agent_id, task_id, digest, version)
         self.vault.insert(
             {"key": key, "canonical_id": canonical_id, "content": content,
              "content_summary": (content[:200] or "").strip(), "memory_type": memory_type,
