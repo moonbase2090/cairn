@@ -86,6 +86,26 @@ reconnect). Repo-local servers don't start before that gate. The MCP server is
 `cairn_export`, `cairn_import`, `cairn_ingest`), stdlib-only JSON-RPC.
 Only `cairn serve` stays CLI-only.
 
+### Agent Skill
+
+The Cairn Agent Skill explains how to use the CLI without reading its source.
+The shell and release archive installers install it for detected agents.
+They preserve a different user-edited SKILL.md. Set CAIRN_NO_AGENT_SKILLS=1
+to skip the installer hook.
+The Windows archive installer also accepts -NoAgentSkills.
+
+To install it later, enable the experimental command:
+
+~~~sh
+CAIRN_EXPERIMENTAL_SKILLS=1 cairn skills install --agent detected
+CAIRN_EXPERIMENTAL_SKILLS=1 cairn skills install --agent detected --check
+~~~
+
+Use --agent all|codex|claude|cursor|kiro|muse|shared|detected to choose
+destinations. Add --force only when you intend to replace an existing skill.
+Run muse skills validate skills/cairn to validate the source skill.
+See skills/cairn/SKILL.md for the full guide.
+
 ## Embedders (pluggable, always keyless by default)
 
 | Embedder | Setup | Dims | Related-pair sim | Notes |

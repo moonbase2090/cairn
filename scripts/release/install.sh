@@ -50,6 +50,11 @@ cp -a VERSION TARGET MPL-2.0.txt INSTALL.txt "$dest/"
 for name in cairn cairn-mcp cairn-embedd; do
   ln -sfn "$dest/bin/$name" "$prefix/bin/$name"
 done
+if [ "${CAIRN_NO_AGENT_SKILLS:-0}" = "1" ]; then
+  printf 'Skipped automatic Agent Skill installation. Run CAIRN_EXPERIMENTAL_SKILLS=1 %s/bin/cairn skills install --agent detected to install it later.\n' "$prefix"
+elif ! CAIRN_EXPERIMENTAL_SKILLS=1 "$prefix/bin/cairn" skills install --agent detected; then
+  printf 'Warning: Cairn installed, but automatic Agent Skill installation failed. Retry with CAIRN_EXPERIMENTAL_SKILLS=1 %s/bin/cairn skills install --agent detected, or skip it with CAIRN_NO_AGENT_SKILLS=1.\n' "$prefix" >&2
+fi
 printf 'Installed cairn %s. Programs are in %s.\n' "$version" "$prefix/bin"
 case ":$PATH:" in
   *":$prefix/bin:"*) ;;

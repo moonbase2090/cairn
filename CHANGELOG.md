@@ -2,6 +2,14 @@
 
 Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
+## 0.12.0 - Unreleased
+
+### Added
+
+- Add the Cairn Agent Skill and a gated `cairn skills install` command.
+  Unix and Windows archive installers install it for detected agents while
+  preserving different existing copies.
+
 ## 0.11.0 - 2026-09-30
 
 ### Added
