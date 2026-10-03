@@ -5,6 +5,10 @@ per-project wiring always stays manual: `cairn init --yes && cairn bootstrap`.
 
 ## Release archives
 
+Unix and Windows archive installers install the Agent Skill for detected
+agents. Set CAIRN_NO_AGENT_SKILLS=1 to skip that step. The Windows installer
+also accepts -NoAgentSkills.
+
 GitHub Actions builds three archives when a `vX.Y.Z` tag is pushed:
 `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, and
 `x86_64-pc-windows-msvc`. Each archive contains its own Python, `cairn`,
@@ -18,6 +22,10 @@ Windows Authenticode signing runs when `WINDOWS_CERT_BASE64` and
 and checksummed, and `SIGNING.txt` says `unsigned`.
 
 ## Shell script (Linux + macOS)
+
+The installer also installs the Cairn Agent Skill for detected coding agents.
+Set CAIRN_NO_AGENT_SKILLS=1 to skip that step. To install the skill later, run
+CAIRN_EXPERIMENTAL_SKILLS=1 cairn skills install --agent detected.
 
 ```sh
 curl -fsSL https://cairncli.com/install.sh | sh

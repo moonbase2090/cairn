@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cairn"
-version = "0.11.0"
+version = "0.12.0"
 description = "Local-first shared memory for CLI agents — six verbs, keyless, git-syncable"
 readme = "README.md"
 license = { text = "MPL-2.0" }
@@ -40,7 +40,7 @@ cairn-embedd = "cairn.embedd:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-cairn = ["templates/*.html"]
+cairn = ["agent_skill.md", "templates/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

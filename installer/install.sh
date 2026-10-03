@@ -17,6 +17,12 @@ SPEC="git+https://github.com/moonbase2090/cairn.git@${CAIRN_REF}"
 
 die() { printf 'cairn-install: %s\n' "$*" >&2; exit 1; }
 
+if [ "${CAIRN_NO_AGENT_SKILLS:-0}" = "1" ]; then
+  SKIP_AGENT_SKILLS=1
+else
+  SKIP_AGENT_SKILLS=0
+fi
+
 # 1. uv ---------------------------------------------------------------
 if ! command -v uv >/dev/null 2>&1; then
   printf 'cairn-install: installing uv...\n'
@@ -49,6 +55,12 @@ CAIRN_BIN="$(command -v cairn || true)"
 "$CAIRN_BIN" init --help >/dev/null 2>&1 || die "$CAIRN_BIN does not look like moonbase2090/cairn (no 'init' command). Refusing to continue."
 printf 'cairn-install: %s\n' "$("$CAIRN_BIN" --version 2>/dev/null || echo 'cairn installed')"
 command -v cairn-mcp >/dev/null 2>&1 || printf 'cairn-install: WARNING cairn-mcp not on PATH (expected at %s).\n' "$BIN_DIR/cairn-mcp"
+
+if [ "$SKIP_AGENT_SKILLS" = "1" ]; then
+  printf 'cairn-install: skipped automatic Agent Skill installation; run CAIRN_EXPERIMENTAL_SKILLS=1 %s skills install --agent detected to install it later.\n' "$CAIRN_BIN"
+elif ! CAIRN_EXPERIMENTAL_SKILLS=1 "$CAIRN_BIN" skills install --agent detected; then
+  printf 'cairn-install: WARNING Cairn installed, but automatic Agent Skill installation failed. Retry with CAIRN_EXPERIMENTAL_SKILLS=1 %s skills install --agent detected, or skip it with CAIRN_NO_AGENT_SKILLS=1.\n' "$CAIRN_BIN" >&2
+fi
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;

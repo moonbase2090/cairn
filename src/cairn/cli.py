@@ -29,6 +29,7 @@ import secrets
 import sqlite3
 import sys
 import tomllib
+from dataclasses import asdict
 from pathlib import Path
 
 from cairn import __version__
@@ -44,6 +45,7 @@ from cairn.ingest import ingest_dir
 from cairn.models import now_epoch
 from cairn.serve import pull_from, push_to, serve_forever
 from cairn.storage import SpaceMismatchError, StorageConfig, open_backend
+from cairn.skill_install import SkillInstallError, install_skill
 
 DEFAULT_EMBED = "hash"
 
@@ -360,6 +362,37 @@ def build_parser() -> argparse.ArgumentParser:
     ed.add_argument("--sock", default=None)
     ed.add_argument("--idle", type=int, default=900)
     ed.add_argument("--dims", type=int, default=None)
+
+    skills = sub.add_parser(
+        "skills",
+        help="Install the Cairn Agent Skill for coding agents.",
+        description="Manage the bundled Cairn Agent Skill.",
+        epilog="Enable install with CAIRN_EXPERIMENTAL_SKILLS=1.",
+    )
+    skills_sub = skills.add_subparsers(dest="skills_action", required=True)
+    skill_install = skills_sub.add_parser(
+        "install",
+        help="Install the skill in user-level agent skill directories.",
+        description=(
+            "Install the Cairn Agent Skill. Different existing files are preserved "
+            "unless --force is set."
+        ),
+        epilog="Enable this experimental command with CAIRN_EXPERIMENTAL_SKILLS=1.",
+    )
+    skill_install.add_argument(
+        "--agent",
+        choices=[
+            "all", "codex", "claude", "cursor", "kiro", "muse", "shared", "detected",
+        ],
+        default="all",
+        help="Target agent (default: all).",
+    )
+    skill_install.add_argument(
+        "--check", action="store_true", help="Report destination state without writing files."
+    )
+    skill_install.add_argument(
+        "--force", action="store_true", help="Replace an existing skill file."
+    )
     return p
 
 
@@ -909,6 +942,40 @@ def _run_backup_command(args) -> int:
         return 2
 
 
+def _cmd_skills(args) -> int:
+    if os.environ.get("CAIRN_EXPERIMENTAL_SKILLS", "").strip().lower() not in {
+        "1", "true", "on", "yes",
+    }:
+        print(
+            "error: cairn skills install is off by default; "
+            "set CAIRN_EXPERIMENTAL_SKILLS=1 to enable it",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        results = install_skill(
+            Path.home(),
+            args.agent,
+            check=args.check,
+            force=args.force,
+        )
+    except (SkillInstallError, OSError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    if args.json:
+        emit([asdict(result) for result in results], True)
+    else:
+        for result in results:
+            if result.status == "no supported agents detected":
+                print(
+                    "no supported agents detected; install an agent or create its config "
+                    "directory, then run cairn skills install --agent detected"
+                )
+            else:
+                print(f"{result.agent}: {result.status} ({result.path})")
+    return 0
+
+
 def _restore_backup_command(args) -> int:
     vdir = vault_dir(args)
     try:
@@ -980,10 +1047,12 @@ def main(argv=None) -> int:
             parser.error("push and pull need a server URL; pass one or set CAIRN_URL")
     # explicit --agent-id only; captured BEFORE env/config pre-fill below
     flag_agent_id = args.agent_id
-    if args.agent_id is None and args.cmd != "init":
+    if args.agent_id is None and args.cmd not in {"init", "skills"}:
         args.agent_id = default_agent_id(vault_dir(args))
     if args.cmd == "init":
         return _cmd_init(args, flag_agent_id)
+    if args.cmd == "skills":
+        return _cmd_skills(args)
     if args.cmd == "embedd":
         return _cmd_embedd(args)
     if args.cmd == "backup":
