@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.error import URLError
 
 from cairn import __version__ as CAIRN_VERSION
 from cairn.client import CairnClient
@@ -273,11 +274,28 @@ def _tool_serve(client: CairnClient, args: dict) -> str:
                 env=child_env, start_new_session=True,
             )
         _SERVERS[str(state_path)] = proc
-        time.sleep(0.15)
-        if proc.poll() is not None:
-            raise RuntimeError(f"sync server exited during startup; inspect {logfile}")
         scheme = "https" if tls_cert else "http"
         url = f"{scheme}://{host}:{port}"
+        deadline = time.monotonic() + 5
+        while True:
+            if proc.poll() is not None:
+                _SERVERS.pop(str(state_path), None)
+                raise RuntimeError(f"sync server exited during startup; inspect {logfile}")
+            try:
+                if health_from(url, cafile=args.get("tls_ca")).get("ok") is True:
+                    break
+            except (URLError, OSError, TimeoutError):
+                pass
+            if time.monotonic() >= deadline:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                _SERVERS.pop(str(state_path), None)
+                raise RuntimeError(f"sync server did not become healthy; inspect {logfile}")
+            time.sleep(0.05)
         state_path.write_text(json.dumps({"pid": proc.pid, "url": url, "mode": mode}))
         return _dump({"running": True, "pid": proc.pid, "url": url, "token_mode": mode})
     if action == "status":
