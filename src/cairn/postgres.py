@@ -566,11 +566,6 @@ class PostgresVault(StorageBackend):
             (event["key"], json.dumps(event, separators=(",", ":"), default=str)),
         )
 
-    def has_sync_event(self, event_id: str) -> bool:
-        return self._execute(
-            "SELECT 1 FROM cairn_sync_events WHERE event_id=%s", (event_id,),
-        ).fetchone() is not None
-
     def apply_sync_event(self, event: dict) -> str:
         if not isinstance(event, dict) or not isinstance(event.get("event_id"), str):
             raise ValueError("invalid sync event: missing event_id")
