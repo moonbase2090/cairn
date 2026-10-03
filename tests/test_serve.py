@@ -21,10 +21,10 @@ def make_client(db_path, agent="test"):
     return CairnClient(Vault(db_path, emb.name, emb.dims, create=True), agent, emb)
 
 
-def add_server_token(client, token_id, raw_token, agent_id):
+def add_server_token(client, token_id, raw_token, agent_id, curator=False):
     digest = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
     with client.vault.transaction():
-        client.vault.create_server_token(token_id, digest, agent_id, 1)
+        client.vault.create_server_token(token_id, digest, agent_id, 1, curator=curator)
     return digest
 
 
@@ -44,6 +44,23 @@ def test_push_pull_roundtrip(tmp_path):
         c2 = make_client(tmp_path / "b" / "vault.db", "grok-t")
         assert c2.import_pack(pack) == {"added": 1, "skipped": 0}
         assert c2.retrieve_memory("sync fact", filters={"task_id": "k"})
+    finally:
+        srv.shutdown()
+
+
+def test_server_rejects_push_that_skips_the_saved_peer_cursor(tmp_path):
+    source = make_client(tmp_path / "a" / "vault.db", "source-agent")
+    source.store_memory("A cursor gap must be rejected.", team_id="t", task_id="sync")
+    pack = source.export_delta()
+    pack["after"] = pack["cursor"]
+    server = make_client(tmp_path / "server" / "vault.db", "server")
+    srv = start_background(server)
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        with pytest.raises(urllib.error.HTTPError) as rejected:
+            push_to(url, pack)
+        assert rejected.value.code == 409
+        assert server.vault.count() == 0
     finally:
         srv.shutdown()
 
@@ -119,6 +136,44 @@ def test_per_agent_tokens_bind_pushes_and_allow_shared_rows_to_round_trip(tmp_pa
             push_to(url, source_a.export(), token=token_a)
         assert revoked_push.value.code == 401
         assert server_client.vault.get_server_token(digest_a) is None
+    finally:
+        srv.shutdown()
+
+
+def test_curator_token_can_apply_cross_agent_state_events(tmp_path):
+    owner = make_client(tmp_path / "owner" / "vault.db", "owner-agent")
+    row = owner.store_memory("A fact owned by agent A.", team_id="t", task_id="curator")
+    peer = make_client(tmp_path / "peer" / "vault.db", "peer-agent")
+    server = make_client(tmp_path / "server" / "vault.db", "server-agent")
+    add_server_token(server, "ct_owner", "owner-token", "owner-agent")
+    add_server_token(server, "ct_peer", "peer-token", "peer-agent")
+    add_server_token(server, "ct_curator", "curator-token", "peer-agent", curator=True)
+    srv = start_background(server, token_mode="per-agent")
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        push_to(url, owner.export_delta(), token="owner-token")
+        pack = pull_from(url, token="peer-token", after=0, peer=peer.vault.sync_origin_id())
+        peer.import_sync_pack(pack)
+        correction = peer.store_memory(
+            "A correction owned by agent B.", team_id="t", task_id="curator",
+            supersedes_key=row.key, mode="new",
+        )
+        attempted = peer.export_delta()
+
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            push_to(url, attempted, token="peer-token")
+        assert denied.value.code == 403
+        assert server.get_memory(row.key).status == "active"
+        with pytest.raises(urllib.error.HTTPError) as denied_v1:
+            push_to(url, peer.export(), token="peer-token")
+        assert denied_v1.value.code == 403
+
+        # The curator may add a correction against another agent's row.
+        assert push_to(url, peer.export(), token="curator-token")["added"] == 1
+        accepted = push_to(url, attempted, token="curator-token")
+        assert accepted["updated"] == 2
+        assert server.get_memory(row.key).status == "superseded"
+        assert server.get_memory(correction.key).status == "active"
     finally:
         srv.shutdown()
 
@@ -285,7 +340,8 @@ def test_cli_token_create_list_revoke(tmp_path, monkeypatch, capsys):
     listed_output = capsys.readouterr().out
     listed = json.loads(listed_output)
     assert listed == [{
-        "token_id": created["token_id"], "agent_id": "client-a", "created_at": listed[0]["created_at"],
+        "token_id": created["token_id"], "agent_id": "client-a", "curator": False,
+        "created_at": listed[0]["created_at"],
     }]
     assert created["token"] not in listed_output
 

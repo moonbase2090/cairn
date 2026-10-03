@@ -1,4 +1,4 @@
-"""CairnClient — the six memory verbs + lifecycle + git-syncable packs.
+"""CairnClient — memory operations, portable snapshots, and resumable event sync.
 
 Cairn semantics: append-only versioning, exact-hash idempotency,
 explicit supersession, read-collapse, origin trust tags, cite-the-key.
@@ -23,7 +23,7 @@ from .models import (
     content_digest,
     now_epoch,
 )
-from .storage import MemoryQuery, StorageBackend
+from .storage import MEMORY_FIELDS, MemoryQuery, StorageBackend
 
 NEAR_DUP_SIM = 0.95
 OVERSAMPLE = 20
@@ -337,6 +337,8 @@ class CairnClient:
                 "dims": self.embedder.dims, "exported_at": now_epoch(), "memories": mems}
 
     def import_pack(self, pack: dict) -> dict:
+        if isinstance(pack, dict) and pack.get("pack") == "cairn-sync-2":
+            return self.import_sync_pack(pack)
         if (not isinstance(pack, dict) or not isinstance(pack.get("memories"), list)
                 or "embed_model" not in pack or "dims" not in pack):
             raise ValueError(
@@ -352,8 +354,144 @@ class CairnClient:
                 if self.vault.get(m["key"]) is not None:
                     skipped += 1
                     continue
-                vec = _decode_embedding(m.pop("embedding"))
-                self.vault.insert(m, vec)
+                if self.vault.has_sync_tombstone(m["key"]):
+                    skipped += 1
+                    continue
+                rec = dict(m)
+                vec = _decode_embedding(rec.pop("embedding"))
+                rec["state_revision"] = 0
+                rec.pop("state_origin", None)
+                rec.pop("state_event_id", None)
+                self.vault.insert(rec, vec)
                 added += 1
+            self.vault.record_competing_corrections(now_epoch())
         self._audit("import", {"added": added, "skipped": skipped})
         return {"added": added, "skipped": skipped}
+
+    def export_delta(self, after: int = 0) -> dict:
+        pack = self.vault.export_sync_events(after)
+        pack.update({"embed_model": self.embedder.name, "dims": self.embedder.dims,
+                     "exported_at": now_epoch(), "origin_id": self.vault.sync_origin_id()})
+        return pack
+
+    def import_sync_pack(self, pack: dict, peer: str | None = None,
+                         direction: str = "pull") -> dict:
+        if (not isinstance(pack, dict) or pack.get("pack") != "cairn-sync-2"
+                or not isinstance(pack.get("events"), list)
+                or "embed_model" not in pack or "dims" not in pack):
+            raise ValueError("invalid sync pack: need cairn-sync-2 events and embedding space")
+        if pack.get("embed_model") != self.embedder.name or pack.get("dims") != self.embedder.dims:
+            raise ValueError(
+                f"pack is {pack.get('embed_model')}/{pack.get('dims')}d, vault is "
+                f"{self.embedder.name}/{self.embedder.dims}d — refusing cross-space import"
+            )
+        after, cursor = pack.get("after"), pack.get("cursor")
+        if (not isinstance(after, int) or isinstance(after, bool)
+                or not isinstance(cursor, int) or isinstance(cursor, bool)
+                or after < 0 or cursor < after):
+            raise ValueError("invalid sync pack cursor")
+        saved_cursor = self.vault.get_sync_cursor(peer, direction) if peer is not None else 0
+        if peer is not None and after > saved_cursor:
+            raise ValueError("sync pack starts after the saved peer cursor")
+        previous = after
+        for event in pack["events"]:
+            seq = event.get("feed_seq") if isinstance(event, dict) else None
+            if not isinstance(seq, int) or isinstance(seq, bool) or seq <= previous:
+                raise ValueError("sync events must have strictly increasing feed_seq values")
+            origin = event.get("origin_id")
+            origin_seq = event.get("origin_seq")
+            if (not isinstance(origin, str) or not origin
+                    or not isinstance(origin_seq, int) or isinstance(origin_seq, bool)
+                    or origin_seq < 1
+                    or event.get("event_id") != f"{origin}:{origin_seq}"):
+                raise ValueError("sync event has an invalid origin identity")
+            if (not isinstance(event.get("state_revision"), int)
+                    or isinstance(event.get("state_revision"), bool)
+                    or event["state_revision"] < 0
+                    or not isinstance(event.get("updated_at"), int)
+                    or isinstance(event.get("updated_at"), bool)):
+                raise ValueError("sync event has invalid state revision metadata")
+            if event.get("kind") not in {"snapshot", "state", "tombstone"}:
+                raise ValueError("sync event has an invalid kind")
+            if event["kind"] in {"snapshot", "state"}:
+                snapshot = event.get("snapshot")
+                incoming_status = (event.get("status") if event["kind"] == "state"
+                                   else snapshot.get("status") if isinstance(snapshot, dict) else None)
+                if incoming_status not in {status.value for status in Status}:
+                    raise ValueError("sync event has an invalid memory status")
+            if event["kind"] == "snapshot":
+                snapshot = event.get("snapshot")
+                if (not isinstance(event.get("key"), str) or not event["key"]
+                        or not isinstance(snapshot, dict)
+                        or not set(MEMORY_FIELDS).issubset(snapshot)
+                        or snapshot.get("key") != event.get("key")
+                        or not isinstance(snapshot.get("content_hash"), str)
+                        or not isinstance(snapshot.get("embedding"), str)
+                        or not isinstance(snapshot.get("content"), str)):
+                    raise ValueError("sync snapshot is missing required memory data")
+            elif not isinstance(event.get("key"), str) or not event["key"]:
+                raise ValueError("sync event has an invalid key")
+            if event.get("conflict_resolution") is not None:
+                resolution = event["conflict_resolution"]
+                if (not isinstance(resolution, dict)
+                        or not isinstance(resolution.get("resolved_by"), str)
+                        or not resolution["resolved_by"]):
+                    raise ValueError("sync event has invalid conflict resolution metadata")
+            previous = seq
+        if previous != cursor:
+            raise ValueError("sync pack cursor does not match its final event")
+        if pack["events"] and pack["events"][0]["feed_seq"] <= after:
+            raise ValueError("sync pack contains an event before its requested cursor")
+        counts = {"added": 0, "updated": 0, "skipped": 0}
+        with self.vault.transaction():
+            for event in pack["events"]:
+                result = self.vault.apply_sync_event(event)
+                counts[result] += 1
+            self.vault.record_competing_corrections(now_epoch())
+            if peer is not None:
+                self.vault.set_sync_cursor(peer, direction, max(saved_cursor, cursor), now_epoch())
+        counts["cursor"] = max(saved_cursor, cursor)
+        counts["conflicts"] = len(self.vault.list_sync_conflicts())
+        self._audit("sync_import", counts)
+        return counts
+
+    def sync_status(self, peer: str | None = None) -> dict:
+        self.vault.record_competing_corrections(now_epoch())
+        cursors = self.vault.list_sync_cursors()
+        if peer is not None:
+            cursors = [item for item in cursors if item["peer"] == peer]
+        return {"origin_id": self.vault.sync_origin_id(), "cursors": cursors,
+                "conflicts": self.vault.list_sync_conflicts()}
+
+    def resolve_competing_correction(self, base_key: str, winner_key: str,
+                                     curator: bool = False,
+                                     resolver_agent: str | None = None) -> dict:
+        self.vault.record_competing_corrections(now_epoch())
+        conflict = next((item for item in self.vault.list_sync_conflicts()
+                         if item["base_key"] == base_key), None)
+        if conflict is None:
+            raise KeyError(f"no unresolved competing correction for {base_key}")
+        if winner_key not in conflict["competitor_keys"]:
+            raise ValueError("winner must be one of the competing corrections")
+        winner = self.vault.get(winner_key)
+        if winner is None or winner["status"] != Status.ACTIVE.value:
+            raise ValueError("winner must be an active correction")
+        resolver = resolver_agent or self.agent_id
+        losers = [self.vault.get(key) for key in conflict["competitor_keys"] if key != winner_key]
+        losers = [row for row in losers if row is not None and row["status"] == Status.ACTIVE.value]
+        if not curator and winner["agent_id"] != resolver:
+            raise PermissionError("only the owning agent or a curator can resolve this conflict")
+        if not curator and any(row["agent_id"] != resolver for row in losers):
+            raise PermissionError("cross-agent conflict resolution requires a curator")
+        now = now_epoch()
+        resolution_event = {"conflict_resolution": {
+            "base_key": base_key, "winner_key": winner_key,
+            "competitor_keys": conflict["competitor_keys"], "resolved_by": resolver,
+        }}
+        with self.vault.transaction():
+            for row in losers:
+                self.vault.set_status(row["key"], Status.SUPERSEDED.value, now,
+                                      event_metadata=resolution_event)
+            self.vault.resolve_sync_conflict(base_key, winner_key, resolver, now)
+        return {"base_key": base_key, "winner_key": winner_key,
+                "superseded": [row["key"] for row in losers], "resolved": True}

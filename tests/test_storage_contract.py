@@ -162,6 +162,21 @@ class TestStorageContract:
         again = open_vault()
         assert again.get("k1")["content"] == "persisted fact"
 
+    def test_sync_events_and_peer_cursors_are_persistent(self, vault, open_vault):
+        vault.insert(record("sync-k1", "durable sync event"), unit(0))
+        pack = vault.export_sync_events()
+        assert len(pack["events"]) == 1
+        assert pack["events"][0]["kind"] == "snapshot"
+        assert pack["events"][0]["snapshot"]["key"] == "sync-k1"
+        vault.set_sync_cursor("peer-a", "pull", pack["cursor"], NOW)
+        vault.close()
+        again = open_vault()
+        assert again.get_sync_cursor("peer-a", "pull") == pack["cursor"]
+        assert again.list_sync_cursors() == [{
+            "peer": "peer-a", "direction": "pull", "cursor": pack["cursor"],
+            "updated_at": NOW,
+        }]
+
     def test_initialization_is_idempotent(self, vault, open_vault):
         vault.insert(record("k1", "persisted fact"), unit(0))
         again = open_vault(create=True)
@@ -192,7 +207,12 @@ class TestStorageContract:
         vault.insert(rec, unit(0))
         row = vault.get("k1")
         for f in MEMORY_FIELDS:
+            if f in {"state_revision", "state_origin", "state_event_id"}:
+                continue
             assert row[f] == rec[f], f
+        assert row["state_revision"] == 1
+        assert row["state_origin"]
+        assert row["state_event_id"]
         assert dict(row)["key"] == "k1"
 
     def test_get_missing_is_none(self, vault):
@@ -208,14 +228,17 @@ class TestStorageContract:
     def test_server_token_lifecycle(self, vault):
         with vault.transaction():
             vault.create_server_token("ct_a", "digest-a", "agent-a", NOW)
-            vault.create_server_token("ct_b", "digest-b", "agent-b", NOW + 1)
+            vault.create_server_token("ct_b", "digest-b", "agent-b", NOW + 1, curator=True)
 
         token = vault.get_server_token("digest-a")
-        assert dict(token) == {"token_id": "ct_a", "agent_id": "agent-a", "created_at": NOW}
+        assert dict(token) == {"token_id": "ct_a", "agent_id": "agent-a",
+                               "curator": False, "created_at": NOW}
         listed = [dict(row) for row in vault.list_server_tokens()]
         assert listed == [
-            {"token_id": "ct_a", "agent_id": "agent-a", "created_at": NOW},
-            {"token_id": "ct_b", "agent_id": "agent-b", "created_at": NOW + 1},
+            {"token_id": "ct_a", "agent_id": "agent-a", "curator": False,
+             "created_at": NOW},
+            {"token_id": "ct_b", "agent_id": "agent-b", "curator": True,
+             "created_at": NOW + 1},
         ]
         assert vault.get_server_token("unknown") is None
         assert vault.get_agent_ids(["missing"]) == {}

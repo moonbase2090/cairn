@@ -43,7 +43,7 @@ from cairn.galaxy import galaxy as render_galaxy
 from cairn.galaxy import galaxy_alive, galaxy_url
 from cairn.ingest import ingest_dir
 from cairn.models import now_epoch
-from cairn.serve import pull_from, push_to, serve_forever
+from cairn.serve import pull_from, push_to, resolve_conflict_to, serve_forever
 from cairn.storage import SpaceMismatchError, StorageConfig, open_backend
 from cairn.skill_install import SkillInstallError, install_skill
 
@@ -312,6 +312,8 @@ def build_parser() -> argparse.ArgumentParser:
     tk_sub = tk.add_subparsers(dest="token_action", required=True)
     tk_create = tk_sub.add_parser("create", help="Create a token for one agent.")
     tk_create.add_argument("--agent", required=True, help="Agent identity allowed to push memories.")
+    tk_create.add_argument("--curator", action="store_true",
+                           help="Allow cross-agent state changes and conflict resolution.")
     tk_sub.add_parser("list", help="List active server tokens.")
     tk_revoke = tk_sub.add_parser("revoke", help="Revoke a server token.")
     tk_revoke.add_argument("token_id")
@@ -337,6 +339,21 @@ def build_parser() -> argparse.ArgumentParser:
     # pull extras (added after the loop so push stays lean)
     sub.choices["pull"].add_argument("--since", type=int, default=None)
     sub.choices["pull"].add_argument("--out", default=None, help="Save pack instead of importing.")
+
+    sy = sub.add_parser("sync", help="Inspect resumable sync state.")
+    sy_sub = sy.add_subparsers(dest="sync_action", required=True)
+    sy_status = sy_sub.add_parser("status", help="Show peer cursors and competing corrections.")
+    sy_status.add_argument("url", nargs="?", help="Limit status to this peer URL.")
+
+    cf = sub.add_parser("conflicts", help="List or resolve competing corrections.")
+    cf_sub = cf.add_subparsers(dest="conflicts_action", required=True)
+    cf_sub.add_parser("list", help="List unresolved competing corrections.")
+    cf_resolve = cf_sub.add_parser("resolve", help="Choose the winning correction.")
+    cf_resolve.add_argument("base_key")
+    cf_resolve.add_argument("winner_key")
+    cf_resolve.add_argument("--url", default=None)
+    cf_resolve.add_argument("--token", default=None)
+    cf_resolve.add_argument("--tls-ca", default=None)
 
     gx = sub.add_parser("galaxy", help="Host the vault starfield on a local HTTP server.")
     gx.add_argument("--out", default=None, help="Also write the HTML to this path.")
@@ -668,12 +685,14 @@ def _cmd_token(args, client) -> int:
         token = "cairn_" + secrets.token_urlsafe(32)
         digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
         with client.vault.transaction():
-            client.vault.create_server_token(token_id, digest, agent_id, now_epoch())
+            client.vault.create_server_token(token_id, digest, agent_id, now_epoch(), args.curator)
         if args.json:
-            emit({"token_id": token_id, "agent_id": agent_id, "token": token}, True)
+            emit({"token_id": token_id, "agent_id": agent_id, "curator": args.curator,
+                  "token": token}, True)
         else:
             print(f"token_id: {token_id}")
             print(f"agent_id: {agent_id}")
+            print(f"curator: {str(args.curator).lower()}")
             print(f"token: {token}")
             print("Save this token now; it will not be shown again.")
         return 0
@@ -684,7 +703,8 @@ def _cmd_token(args, client) -> int:
             emit(tokens, True)
         elif tokens:
             for item in tokens:
-                print(f"{item['token_id']}  {item['agent_id']}  created {item['created_at']}")
+                role = "curator" if item["curator"] else "agent"
+                print(f"{item['token_id']}  {item['agent_id']}  {role}  created {item['created_at']}")
         else:
             print("(no active tokens)")
         return 0
@@ -718,17 +738,51 @@ def _cmd_serve(args, client) -> int:
 
 
 def _cmd_push(args, client) -> int:
-    emit(push_to(args.url, client.export(), token_for(args), cafile=args.tls_ca), args.json)
+    after = client.vault.get_sync_cursor(args.url, "push")
+    pack = client.export_delta(after)
+    result = push_to(args.url, pack, token_for(args), cafile=args.tls_ca)
+    cursor = int(result.get("cursor", after))
+    if cursor < after or cursor > pack["cursor"]:
+        raise ValueError("server returned an invalid push cursor")
+    with client.vault.transaction():
+        client.vault.set_sync_cursor(args.url, "push", cursor, now_epoch())
+    emit(result, args.json)
     return 0
 
 
 def _cmd_pull(args, client) -> int:
-    pack = pull_from(args.url, token_for(args), args.since, cafile=args.tls_ca)
+    if args.since is not None:
+        pack = pull_from(args.url, token_for(args), args.since, cafile=args.tls_ca)
+    else:
+        after = client.vault.get_sync_cursor(args.url, "pull")
+        pack = pull_from(args.url, token_for(args), cafile=args.tls_ca, after=after,
+                         peer=client.vault.sync_origin_id())
     if args.out:
         Path(args.out).write_text(json.dumps(pack, default=str))
-        emit({"pulled": len(pack["memories"]), "out": args.out}, args.json)
+        count = len(pack.get("events", pack.get("memories", [])))
+        emit({"pulled": count, "out": args.out}, args.json)
+    elif pack.get("pack") == "cairn-sync-2":
+        emit(client.import_sync_pack(pack, peer=args.url, direction="pull"), args.json)
     else:
         emit(client.import_pack(pack), args.json)
+    return 0
+
+
+def _cmd_sync(args, client) -> int:
+    emit(client.sync_status(args.url), args.json)
+    return 0
+
+
+def _cmd_conflicts(args, client) -> int:
+    if args.conflicts_action == "list":
+        emit(client.sync_status()["conflicts"], args.json)
+    else:
+        if args.url:
+            emit(resolve_conflict_to(args.url, args.base_key, args.winner_key,
+                                     token_for(args), agent_id=client.agent_id,
+                                     cafile=args.tls_ca), args.json)
+        else:
+            emit(client.resolve_competing_correction(args.base_key, args.winner_key), args.json)
     return 0
 
 
@@ -816,6 +870,7 @@ def _cmd_doctor(args, client) -> int:
     vec_status = client.vault.vec_status()
     vec = client.vault.name == "sqlite" and vec_status.get("vec_extension", False)
     st = client.stats()
+    conflicts = client.sync_status()["conflicts"]
     info = {
         "vault": str(vdir / "vault.db") if client.vault.name == "sqlite" else str(vdir),
         "storage": client.vault.name,
@@ -823,6 +878,7 @@ def _cmd_doctor(args, client) -> int:
         "embedder": f"{st['embedder']}/{st['dims']}d",
         "sqlite_vec": vec,
         "docs": st["docs"],
+        "competing_corrections": conflicts,
         "doc_threshold": client.vault.doc_threshold,
         **vec_status,
     }
@@ -1008,6 +1064,7 @@ _COMMANDS = {
     "serve": _cmd_serve,
     "push": _cmd_push,
     "pull": _cmd_pull,
+    "sync": _cmd_sync,
     "galaxy": _cmd_galaxy,
     "whoami": _cmd_whoami,
     "doctor": _cmd_doctor,
@@ -1021,6 +1078,8 @@ def _run_command(args, client, flag_agent_id) -> int:
             return _cmd_bootstrap(args, client, flag_agent_id)
         if args.cmd == "token":
             return _cmd_token(args, client)
+        if args.cmd == "conflicts":
+            return _cmd_conflicts(args, client)
         return _COMMANDS[args.cmd](args, client)
     except KeyError as e:
         if args.cmd not in _COMMANDS:
@@ -1045,6 +1104,8 @@ def main(argv=None) -> int:
         args.url = args.url or os.environ.get("CAIRN_URL")
         if not args.url:
             parser.error("push and pull need a server URL; pass one or set CAIRN_URL")
+    if args.cmd == "sync" and args.sync_action == "status":
+        args.url = args.url or os.environ.get("CAIRN_URL")
     # explicit --agent-id only; captured BEFORE env/config pre-fill below
     flag_agent_id = args.agent_id
     if args.agent_id is None and args.cmd not in {"init", "skills"}:
