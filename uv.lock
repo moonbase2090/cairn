@@ -60,6 +60,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+aws = [
+    { name = "boto3" },
+]
 backup = [
     { name = "boto3" },
 ]
@@ -78,8 +81,9 @@ postgres = [
 
 [package.metadata]
 requires-dist = [
+    { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.40" },
     { name = "boto3", marker = "extra == 'backup'", specifier = ">=1.34" },
-    { name = "boto3", marker = "extra == 'dev'", specifier = ">=1.34" },
+    { name = "boto3", marker = "extra == 'dev'", specifier = ">=1.40" },
     { name = "fastembed", marker = "extra == 'embed'", specifier = ">=0.3" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pgvector", marker = "extra == 'postgres'", specifier = ">=0.3" },
@@ -88,7 +92,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "sqlite-vec", specifier = ">=0.1.0" },
 ]
-provides-extras = ["embed", "backup", "dev", "postgres"]
+provides-extras = ["embed", "backup", "aws", "dev", "postgres"]
 
 [[package]]
 name = "certifi"

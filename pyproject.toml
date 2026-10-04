@@ -28,7 +28,8 @@ dependencies = [
 [project.optional-dependencies]
 embed = ["fastembed>=0.3"]
 backup = ["boto3>=1.34"]
-dev = ["pytest>=8.0", "pytest-cov>=6.0", "boto3>=1.34"]
+aws = ["boto3>=1.40"]
+dev = ["pytest>=8.0", "pytest-cov>=6.0", "boto3>=1.40"]
 postgres = ["pgvector>=0.3", "psycopg[binary]>=3.2"]
 
 [project.scripts]

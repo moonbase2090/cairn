@@ -18,6 +18,8 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
+from urllib.parse import urlsplit
 
 import numpy as np
 
@@ -246,6 +248,17 @@ class StorageConfig:
 
     backend: str = DEFAULT_BACKEND
     url: str | None = None
+    region: str | None = None
+    profile: str | None = None
+    vault_id: str | None = None
+    vault_name: str | None = None
+    table: str | None = None
+    cache_table: str | None = None
+    content_bucket: str | None = None
+    vector_bucket: str | None = None
+    vector_index: str | None = None
+    vector_index_arn: str | None = None
+    sync_endpoint: str | None = None
 
     def __post_init__(self):
         if not isinstance(self.backend, str) or not self.backend:
@@ -256,6 +269,46 @@ class StorageConfig:
             raise ValueError("[storage] url is required when backend = 'postgres'")
         if self.backend != "postgres" and self.url is not None:
             raise ValueError("[storage] url is only supported when backend = 'postgres'")
+        aws_fields = (
+            self.region, self.profile, self.vault_id, self.vault_name, self.table, self.cache_table,
+            self.content_bucket, self.vector_bucket, self.vector_index,
+            self.vector_index_arn, self.sync_endpoint,
+        )
+        if self.backend == "aws":
+            missing = [
+                name for name, value in (
+                    ("region", self.region), ("vault_id", self.vault_id),
+                    ("vault_name", self.vault_name),
+                    ("table", self.table), ("cache_table", self.cache_table),
+                    ("content_bucket", self.content_bucket),
+                    ("vector_bucket", self.vector_bucket),
+                    ("vector_index", self.vector_index),
+                    ("vector_index_arn", self.vector_index_arn),
+                ) if not isinstance(value, str) or not value.strip()
+            ]
+            if missing:
+                raise ValueError("[storage] AWS backend requires " + ", ".join(missing))
+            if not re.fullmatch(r"[a-z]{2}(?:-[a-z]+)+-\d", self.region or ""):
+                raise ValueError("[storage] region must be an AWS region name")
+            if not re.fullmatch(r"[0-9a-f]{32}", self.vault_id or ""):
+                raise ValueError("[storage] vault_id must be a 32-character logical vault ID")
+            from .vault_identity import safe_vault_name
+
+            if safe_vault_name(self.vault_name) != self.vault_name:
+                raise ValueError("[storage] vault_name must be a safe display name")
+            if self.profile is not None and not re.fullmatch(
+                r"[A-Za-z0-9_+=,.@-]{1,64}", self.profile,
+            ):
+                raise ValueError("[storage] profile contains unsupported characters")
+            if self.sync_endpoint is not None:
+                endpoint = urlsplit(self.sync_endpoint)
+                if (endpoint.scheme != "https" or not endpoint.netloc
+                        or endpoint.username or endpoint.password
+                        or endpoint.query or endpoint.fragment
+                        or endpoint.path not in {"", "/"}):
+                    raise ValueError("[storage] sync_endpoint must be an HTTPS API base URL")
+        elif any(value is not None for value in aws_fields):
+            raise ValueError("AWS resource settings require backend = 'aws'")
 
 
 def _open_sqlite(vault_dir: Path, embed_name: str, dims: int, config: StorageConfig,
@@ -274,7 +327,17 @@ def _open_postgres(vault_dir: Path, embed_name: str, dims: int, config: StorageC
                          create=create, doc_threshold=doc_threshold)
 
 
-BACKENDS: dict[str, Opener] = {"sqlite": _open_sqlite, "postgres": _open_postgres}
+def _open_aws(vault_dir: Path, embed_name: str, dims: int, config: StorageConfig,
+              create: bool = False, doc_threshold: int | None = None) -> StorageBackend:
+    from .aws_storage import AwsVault
+
+    return AwsVault(Path(vault_dir), embed_name, dims, config,
+                    create=create, doc_threshold=doc_threshold)
+
+
+BACKENDS: dict[str, Opener] = {
+    "sqlite": _open_sqlite, "postgres": _open_postgres, "aws": _open_aws,
+}
 
 
 def backend_names() -> Iterator[str]:

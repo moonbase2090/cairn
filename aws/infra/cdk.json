@@ -1,0 +1,7 @@
+{
+  "app": "npx tsx bin/cairn.ts",
+  "context": {
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/core:target-partitions": ["aws"]
+  }
+}

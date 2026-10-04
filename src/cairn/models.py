@@ -76,9 +76,13 @@ class MemoryRecord:
     content_hash: str | None = None
     distance: float | None = None  # cosine distance (similarity = 1 - distance)
     similarity: float | None = None
+    storage_stale: bool = False
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        values = asdict(self)
+        if not self.storage_stale:
+            values.pop("storage_stale")
+        return values
 
 
 @dataclass
