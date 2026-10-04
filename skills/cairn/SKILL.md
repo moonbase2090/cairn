@@ -56,9 +56,14 @@ cairn bootstrap
 ~~~
 
 init creates the vault under .cairn/ in the current directory by default.
-bootstrap registers the cairn MCP server in .mcp.json, writes Cairn
-instructions into AGENTS.md, and seeds the onboarding memories. Trust the
-project folder and reload its MCP servers in the host agent before using them.
+bootstrap adds or updates the `cairn` MCP entry in .mcp.json, writes Cairn
+instructions into AGENTS.md, and seeds the onboarding memories. To register an
+additional vault, pass its explicit entry name, such as
+`cairn --vault <vault-dir> bootstrap --name cairn-personal`. Bootstrap preserves
+other entries and refuses to reuse a name that points at a different vault.
+Each MCP connection stays pinned to one vault; choose the server whose audience
+matches the data, then call `cairn_whoami`. Trust the project folder and reload
+its MCP servers in the host agent before using them.
 
 ## Install this Agent Skill
 
@@ -137,7 +142,7 @@ command.
 | Command | Purpose and command-specific arguments |
 |---|---|
 | cairn init | Create a vault. Flags: --embed-spec, --doc-threshold, --project, --team, --yes. |
-| cairn bootstrap | Configure the project for agents. Flags: --no-seed, --server, --agent-id. |
+| cairn bootstrap | Configure the project for agents. Flags: --name, --no-seed, --server, --agent-id. |
 | cairn store CONTENT | Store a memory. Required: --team, --task. Optional: --type episodic\|semantic\|procedural\|document\|chunk, --origin agent\|external, --supersedes KEY, --mode auto\|new. |
 | cairn retrieve QUERY | Semantic search. Flags: --task, --team, --type, --top-k (default 5), --min-sim. |
 | cairn list | Exact or BM25 keyword search. Flags: --task, --type, --status, --canonical, --search, --limit (default 100). Pass at least one filter. |
@@ -410,6 +415,12 @@ and uv run python scripts/embed_agent_skill.py --check.
   again; v1 has no override.
 - Use `cairn_secret_scan` to preflight an existing vault. It is read-only and
   returns category counts without content, memory keys, or hashes.
+- A vault is the locked room: everyone with access can read everything inside
+  it. Task and team labels are like folders any agent can choose to look in;
+  they help focus and rank results, but they do not grant or restrict access.
+- Keep personal, customer, client, or unreleased-security details only in a
+  vault available to the agents who need them. Never store secrets, credentials,
+  access tokens, or private keys in any vault.
 - Do not use purge unless you mean to erase every version in a canonical
   group. It requires --force and cannot be undone.
 - Do not bind serve to a public address without authentication and TLS.

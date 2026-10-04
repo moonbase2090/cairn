@@ -25,6 +25,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -383,6 +384,10 @@ def build_parser() -> argparse.ArgumentParser:
     bg = sub.add_parser("bootstrap", help="Wire this project for agents: .mcp.json + AGENTS.md + onboarding pack.")
     bg.add_argument("--no-seed", action="store_true", help="Skip seeding the onboarding pack.")
     bg.add_argument("--server", default="cairn-mcp", help="MCP server command for .mcp.json.")
+    bg.add_argument(
+        "--name", default="cairn",
+        help="MCP entry to add or update (default: cairn; use cairn-personal for another vault).",
+    )
     bg.add_argument("--agent-id", default=None, help="Seat identity (<harness>-<slug>); updates project.json and .mcp.json.")
     lg = sub.add_parser("log", help="Show the audit trail.")
     lg.add_argument("--limit", type=int, default=20)
@@ -465,8 +470,10 @@ no API keys). Your seat: `{agent}` (one session, one project, one id).
 
 ### MCP setup
 
-`cairn bootstrap` registers the `cairn` MCP server in `.mcp.json` (stdio, no keys —
-it reads `$CAIRN_DIR`). Each seat overrides its identity:
+`cairn bootstrap` adds or updates only the named MCP server in `.mcp.json`
+(stdio, no keys — it reads `$CAIRN_DIR`). The project vault stays the default;
+use a descriptive name for another vault and add only approved entries to each
+agent host. Each seat overrides its identity:
 
 ```json
 {{"mcpServers": {{"cairn": {{"command": "cairn-mcp", "env": {{
@@ -970,10 +977,55 @@ def _write_agents_section(path: Path, section: str) -> None:
     path.write_text(text)
 
 
+def _load_mcp_config(path: Path) -> dict:
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return {"mcpServers": {}}
+    try:
+        config = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{path.name} is not valid JSON; refusing to overwrite it") from error
+    if not isinstance(config, dict):
+        raise ValueError(f"{path.name} must contain a JSON object")
+    servers = config.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise ValueError(f"{path.name} mcpServers must be a JSON object")
+    return config
+
+
+def _validate_bootstrap_name(name: str) -> None:
+    if not re.fullmatch(r"cairn(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?", name):
+        raise ValueError("MCP entry name must be `cairn` or `cairn-<lowercase-name>`")
+
+
+def _check_bootstrap_name_available(servers: dict, name: str, vdir: Path) -> None:
+    if name not in servers:
+        return
+    existing = servers[name]
+    env = existing.get("env") if isinstance(existing, dict) else None
+    configured_dir = env.get("CAIRN_DIR") if isinstance(env, dict) else None
+    if not isinstance(configured_dir, str) or not configured_dir.strip():
+        raise ValueError(
+            f"MCP entry {name!r} already exists without a verifiable CAIRN_DIR; "
+            "choose another --name"
+        )
+    if Path(configured_dir).expanduser().resolve() != vdir.expanduser().resolve():
+        raise ValueError(
+            f"MCP entry {name!r} already points at a different vault; choose another --name"
+        )
+
+
 def _cmd_bootstrap(args, client, flag_agent_id) -> int:
     from cairn.tutorial import ONBOARDING_TASK, seed_onboarding
 
     vdir = vault_dir(args)
+    _validate_bootstrap_name(args.name)
+    mcp_path = Path.cwd() / ".mcp.json"
+    mcp = _load_mcp_config(mcp_path)
+    servers = mcp["mcpServers"]
+    _check_bootstrap_name_available(servers, args.name, vdir)
+
     proj, team, agent = _bootstrap_project(vdir, flag_agent_id, client)
     project = proj.get("project") or Path.cwd().name
     warnings = []
@@ -984,12 +1036,7 @@ def _cmd_bootstrap(args, client, flag_agent_id) -> int:
         )
     ensure_vault_gitignore(vdir)
     seeded = {} if args.no_seed else seed_onboarding(client, team)
-    mcp_path = Path.cwd() / ".mcp.json"
-    try:
-        mcp = json.loads(mcp_path.read_text())
-    except (OSError, ValueError):
-        mcp = {}
-    mcp.setdefault("mcpServers", {})["cairn"] = {
+    servers[args.name] = {
         "command": args.server,
         "env": {"CAIRN_DIR": str(vdir.resolve()), "CAIRN_AGENT": agent},
     }
@@ -998,6 +1045,7 @@ def _cmd_bootstrap(args, client, flag_agent_id) -> int:
     _write_agents_section(agents_path, agents_section(project, team, agent))
     emit({
         "project": project, "team": team, "agent_id": agent,
+        "mcp_server_name": args.name,
         "mcp_json": str(mcp_path), "agents_md": str(agents_path),
         "onboarding_task": ONBOARDING_TASK, "seeded": seeded, "warnings": warnings,
     }, args.json)
