@@ -192,7 +192,8 @@ def test_sync_snapshot_import_scans_before_events_cursors_or_audit(tmp_path):
 
 def test_existing_vault_preflight_is_read_only_and_content_free(tmp_path):
     client = make_client(tmp_path)
-    content = "AKIA1234567890ABCDEF is a pre-existing test value."
+    access_key_id = "AKIA" + "1234567890ABCDEF"
+    content = f"{access_key_id} is a pre-existing test value."
     digest = content_digest(content)
     record = {
         "key": "preflight-test-key", "canonical_id": "preflight-test",
