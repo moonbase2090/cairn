@@ -21,6 +21,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .vault_identity import VaultIdentity
+
 DEFAULT_BACKEND = "sqlite"
 
 MEMORY_FIELDS = (
@@ -80,6 +82,10 @@ class StorageBackend:
     """
 
     name: str
+
+    @property
+    def vault_identity(self) -> VaultIdentity:
+        raise NotImplementedError
 
     # -- lifecycle -----------------------------------------------------------
     @property
@@ -203,13 +209,14 @@ class StorageBackend:
         """Apply one immutable event and return added, updated, or skipped."""
         raise NotImplementedError
 
-    def get_sync_cursor(self, peer: str, direction: str) -> int:
+    def get_sync_cursor(self, peer: str, direction: str, token_id: str = "") -> int:
         raise NotImplementedError
 
     def list_sync_cursors(self) -> list[dict]:
         raise NotImplementedError
 
-    def set_sync_cursor(self, peer: str, direction: str, cursor: int, now: int) -> None:
+    def set_sync_cursor(self, peer: str, direction: str, cursor: int, now: int,
+                        token_id: str = "") -> None:
         raise NotImplementedError
 
     def list_competing_corrections(self) -> list[dict]:

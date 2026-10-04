@@ -11,14 +11,20 @@ import pytest
 from cairn import cli
 from cairn.client import CairnClient
 from cairn.embed import HashEmbedder
-from cairn.serve import pull_from, push_to, start_background
+from cairn.serve import pull_from, push_to, start_background, sync_handshake
 from cairn.storage import MemoryQuery
 from cairn.store import Vault
+from cairn.vault_identity import VaultIdentity
 
 
 def make_client(db_path, agent="test"):
     emb = HashEmbedder()
-    return CairnClient(Vault(db_path, emb.name, emb.dims, create=True), agent, emb)
+    vault = Vault(db_path, emb.name, emb.dims, create=True)
+    vault._set_meta("vault_id", "shared-serve-test-vault")
+    vault._set_meta("vault_name", "serve-test")
+    vault.conn.commit()
+    vault._vault_identity = VaultIdentity("shared-serve-test-vault", "serve-test")
+    return CairnClient(vault, agent, emb)
 
 
 def add_server_token(client, token_id, raw_token, agent_id, curator=False):
@@ -61,6 +67,29 @@ def test_server_rejects_push_that_skips_the_saved_peer_cursor(tmp_path):
             push_to(url, pack)
         assert rejected.value.code == 409
         assert server.vault.count() == 0
+    finally:
+        srv.shutdown()
+
+
+def test_sync_handshake_and_push_reject_a_different_vault(tmp_path):
+    source = make_client(tmp_path / "source" / "vault.db", "source-agent")
+    source.vault._set_meta("vault_id", "different-serve-vault")
+    source.vault._set_meta("vault_name", "different")
+    source.vault.conn.commit()
+    source.vault._vault_identity = VaultIdentity("different-serve-vault", "different")
+    source.store_memory("This pack must not cross vaults.", team_id="t", task_id="sync")
+
+    server = make_client(tmp_path / "server" / "vault.db", "server-agent")
+    srv = start_background(server)
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        with pytest.raises(ValueError, match="different vault"):
+            sync_handshake(url, source.vault.vault_identity.vault_id)
+        with pytest.raises(urllib.error.HTTPError) as rejected:
+            push_to(url, source.export_delta())
+        assert rejected.value.code == 400
+        assert server.vault.count() == 0
+        assert server.vault.list_sync_cursors() == []
     finally:
         srv.shutdown()
 

@@ -43,7 +43,13 @@ from cairn.galaxy import galaxy as render_galaxy
 from cairn.galaxy import galaxy_alive, galaxy_url
 from cairn.ingest import ingest_dir
 from cairn.models import now_epoch
-from cairn.serve import pull_from, push_to, resolve_conflict_to, serve_forever
+from cairn.serve import (
+    pull_from,
+    push_to,
+    resolve_conflict_to,
+    serve_forever,
+    sync_handshake,
+)
 from cairn.storage import SpaceMismatchError, StorageConfig, open_backend
 from cairn.skill_install import SkillInstallError, install_skill
 
@@ -540,6 +546,9 @@ def _cmd_init(args, flag_agent_id) -> int:
             emit({"initialized": str(vdir / "vault.db"), "note": "already exists"}, args.json)
             return 0
         embedder, effective, notice = resolve_init_embedder(spec)
+        vdir.mkdir(parents=True, exist_ok=True)
+        (vdir / "project.json").write_text(json.dumps(
+            {"project": project, "slug": slug, "team": team, "agent_id": agent}, indent=2))
         open_backend(
             vdir, embedder.name, embedder.dims, config=config,
             create=True, doc_threshold=args.doc_threshold,
@@ -549,8 +558,6 @@ def _cmd_init(args, flag_agent_id) -> int:
         return 2
     write_embedder_hint(vdir, effective, embedder.dims)
     ensure_vault_gitignore(vdir)
-    (vdir / "project.json").write_text(json.dumps(
-        {"project": project, "slug": slug, "team": team, "agent_id": agent}, indent=2))
     out = {
         "initialized": (str(vdir / "vault.db") if config.backend == "sqlite" else config.backend),
         "storage": config.backend, "embedder": embedder.name,
@@ -738,31 +745,45 @@ def _cmd_serve(args, client) -> int:
 
 
 def _cmd_push(args, client) -> int:
-    after = client.vault.get_sync_cursor(args.url, "push")
+    token = token_for(args)
+    handshake = sync_handshake(
+        args.url, client.vault.vault_identity.vault_id, token=token, cafile=args.tls_ca,
+    )
+    token_id = handshake["token_id"]
+    after = client.vault.get_sync_cursor(args.url, "push", token_id)
     pack = client.export_delta(after)
-    result = push_to(args.url, pack, token_for(args), cafile=args.tls_ca)
+    result = push_to(args.url, pack, token, cafile=args.tls_ca)
     cursor = int(result.get("cursor", after))
     if cursor < after or cursor > pack["cursor"]:
         raise ValueError("server returned an invalid push cursor")
     with client.vault.transaction():
-        client.vault.set_sync_cursor(args.url, "push", cursor, now_epoch())
+        client.vault.set_sync_cursor(args.url, "push", cursor, now_epoch(), token_id)
     emit(result, args.json)
     return 0
 
 
 def _cmd_pull(args, client) -> int:
+    token_id = ""
     if args.since is not None:
         pack = pull_from(args.url, token_for(args), args.since, cafile=args.tls_ca)
     else:
-        after = client.vault.get_sync_cursor(args.url, "pull")
-        pack = pull_from(args.url, token_for(args), cafile=args.tls_ca, after=after,
+        token = token_for(args)
+        handshake = sync_handshake(
+            args.url, client.vault.vault_identity.vault_id, token=token,
+            cafile=args.tls_ca,
+        )
+        token_id = handshake["token_id"]
+        after = client.vault.get_sync_cursor(args.url, "pull", token_id)
+        pack = pull_from(args.url, token, cafile=args.tls_ca, after=after,
                          peer=client.vault.sync_origin_id())
     if args.out:
         Path(args.out).write_text(json.dumps(pack, default=str))
         count = len(pack.get("events", pack.get("memories", [])))
         emit({"pulled": count, "out": args.out}, args.json)
     elif pack.get("pack") == "cairn-sync-2":
-        emit(client.import_sync_pack(pack, peer=args.url, direction="pull"), args.json)
+        emit(client.import_sync_pack(
+            pack, peer=args.url, direction="pull", token_id=token_id,
+        ), args.json)
     else:
         emit(client.import_pack(pack), args.json)
     return 0
@@ -847,10 +868,16 @@ def _cmd_galaxy(args, client) -> int:
 
 
 def _cmd_whoami(args, client) -> int:
-    vdir = vault_dir(args)
+    identity = client.vault.vault_identity
+    role = "curator" if any(
+        token["agent_id"] == client.agent_id and bool(token["curator"])
+        for token in client.vault.list_server_tokens()
+    ) else "member"
     emit({
         "agent": client.agent_id,
-        "vault": str(vdir / "vault.db") if client.vault.name == "sqlite" else str(vdir),
+        "vault_name": identity.name,
+        "vault_id": identity.vault_id,
+        "role": role,
         "storage": client.vault.name,
         "embedder": client.embedder.name,
         "dims": client.embedder.dims,

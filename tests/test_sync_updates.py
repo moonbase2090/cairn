@@ -6,11 +6,17 @@ import pytest
 from cairn.client import CairnClient
 from cairn.embed import HashEmbedder
 from cairn.store import Vault
+from cairn.vault_identity import VaultIdentity
 
 
-def make_client(db_path, agent_id: str) -> CairnClient:
+def make_client(db_path, agent_id: str, vault_id: str = "shared-test-vault") -> CairnClient:
     embedder = HashEmbedder()
     vault = Vault(db_path, embedder.name, embedder.dims, create=True)
+    if vault.vault_identity.vault_id != vault_id:
+        vault._set_meta("vault_id", vault_id)
+        vault._set_meta("vault_name", "shared-test-vault")
+        vault.conn.commit()
+        vault._vault_identity = VaultIdentity(vault_id, "shared-test-vault")
     return CairnClient(vault, agent_id, embedder)
 
 
@@ -93,11 +99,37 @@ def test_sync_import_rejects_a_cursor_gap_without_moving_the_saved_cursor(tmp_pa
     first = source.export_delta()
     peer.import_sync_pack(first, peer="server-a", direction="pull")
     assert peer.vault.get_sync_cursor("server-a", "pull") == first["cursor"]
-
     gap = source.export_delta(first["cursor"] + 1)
     with pytest.raises(ValueError, match="starts after the saved peer cursor"):
         peer.import_sync_pack(gap, peer="server-a", direction="pull")
     assert peer.vault.get_sync_cursor("server-a", "pull") == first["cursor"]
+
+
+def test_sync_import_rejects_a_different_vault_before_events_or_cursor_change(tmp_path):
+    source = make_client(tmp_path / "source" / "vault.db", "source-agent")
+    target = make_client(
+        tmp_path / "target" / "vault.db", "target-agent", vault_id="different-vault-id",
+    )
+    source.store_memory("This pack belongs to another vault.", team_id="cairn", task_id="sync")
+    pack = source.export_delta()
+    target.vault.set_sync_cursor("source", "pull", 3, 1, token_id="ct_member")
+
+    with pytest.raises(ValueError, match="different vault"):
+        target.import_sync_pack(pack, peer="source", token_id="ct_member")
+
+    assert target.vault.count() == 0
+    assert target.vault.export_sync_events()["events"] == []
+    assert target.vault.get_sync_cursor("source", "pull", "ct_member") == 3
+
+
+def test_sync_import_fails_closed_when_vault_identity_is_missing(tmp_path):
+    source = make_client(tmp_path / "source" / "vault.db", "source-agent")
+    target = make_client(tmp_path / "target" / "vault.db", "target-agent")
+    pack = source.export_delta()
+    del pack["vault_id"]
+
+    with pytest.raises(ValueError, match="missing its vault identity"):
+        target.import_sync_pack(pack)
 
 
 def test_higher_state_revision_beats_a_later_timestamp(tmp_path):

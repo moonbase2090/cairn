@@ -143,9 +143,23 @@ def test_mcp_ops_tools(tmp_path, monkeypatch):
          "params": {"name": "cairn_whoami", "arguments": {}}},
         {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
          "params": {"name": "cairn_export", "arguments": {}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+         "params": {"name": "retrieve_memory",
+                    "arguments": {"query": "ops tool memory", "task_id": "k"}}},
+        {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+         "params": {"name": "list_memories", "arguments": {"task_id": "k"}}},
     ])
     me = json.loads(res[2]["result"]["content"][0]["text"])
     assert me["agent"] == "mcp-ops" and me["memories"] == 1
+    assert me["vault_id"] and me["vault_name"] == tmp_path.name
+    assert me["storage"] == "sqlite" and me["role"] in {"member", "curator"}
+    stored = json.loads(res[1]["result"]["content"][0]["text"])
+    assert stored["vault_id"] == me["vault_id"]
+    assert stored["vault_name"] == me["vault_name"]
+    retrieved = json.loads(res[4]["result"]["content"][0]["text"])
+    listed = json.loads(res[5]["result"]["content"][0]["text"])
+    assert retrieved[0]["vault_id"] == me["vault_id"]
+    assert listed[0]["vault_id"] == me["vault_id"]
     pack = json.loads(res[3]["result"]["content"][0]["text"])
     assert len(pack["memories"]) == 1
 

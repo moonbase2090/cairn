@@ -24,6 +24,12 @@ from .storage import (
     SpaceMismatchError,
     StorageBackend,
 )
+from .vault_identity import (
+    VaultIdentity,
+    ensure_vault_identity,
+    load_vault_identity,
+    split_legacy_cursor_peer,
+)
 
 log = logging.getLogger(__name__)
 
@@ -195,6 +201,7 @@ class Vault(StorageBackend):
             self._fts = False  # prehistoric sqlite: vault works, keyword search won't
         self._migrate_to_v2()
         self._migrate_to_v3()
+        self._migrate_to_v4()
         # idx_mem_ref lives here (not SCHEMA): SCHEMA must apply cleanly to
         # pre-migration v1 tables that have no content_ref column yet.
         try:
@@ -214,7 +221,7 @@ class Vault(StorageBackend):
                     self._vec = False
             self._set_meta("embed_model", embed_name)
             self._set_meta("dims", str(dims))
-            self._set_meta("schema", "3")
+            self._set_meta("schema", "4")
             self._set_meta("doc_threshold",
                            str(DEFAULT_DOC_THRESHOLD if doc_threshold is None else doc_threshold))
             self.conn.commit()
@@ -237,6 +244,10 @@ class Vault(StorageBackend):
     @property
     def vault_dir(self) -> Path:
         return self.db_path.parent
+
+    @property
+    def vault_identity(self) -> VaultIdentity:
+        return self._vault_identity
 
     def reopen(self) -> Vault:
         return Vault(self.db_path, self._embed_name, self._dims)
@@ -511,8 +522,57 @@ class Vault(StorageBackend):
                 (origin, event["event_id"], row["key"]),
             )
             self._append_sync_event(event)
-        self._set_meta("schema", "3")
+        schema = self._get_meta("schema")
+        if schema is None or int(schema) < 3:
+            self._set_meta("schema", "3")
         self.conn.commit()
+
+    def _migrate_to_v4(self) -> None:
+        """Add stable vault identity and scope sync cursors by vault and token."""
+        schema = int(self._get_meta("schema") or 0)
+        if schema > 4:
+            raise RuntimeError(f"SQLite vault schema {schema} is newer than this Cairn version")
+        if schema == 4:
+            self._vault_identity = load_vault_identity(self._get_meta)
+            columns = {r["name"] for r in self.conn.execute("PRAGMA table_info(sync_cursors)")}
+            if not {"vault_id", "token_id"} <= columns:
+                raise RuntimeError("vault cursor schema is incomplete; refusing to use this vault")
+            return
+
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._vault_identity = ensure_vault_identity(
+                self._get_meta, self._set_meta, self.vault_dir,
+            )
+            columns = {r["name"] for r in self.conn.execute("PRAGMA table_info(sync_cursors)")}
+            if not {"vault_id", "token_id"} <= columns:
+                rows = self.conn.execute(
+                    "SELECT peer, direction, cursor, updated_at FROM sync_cursors"
+                ).fetchall()
+                self.conn.execute("DROP TABLE sync_cursors")
+                self.conn.execute("""
+                    CREATE TABLE sync_cursors(
+                      vault_id TEXT NOT NULL, peer TEXT NOT NULL, token_id TEXT NOT NULL,
+                      direction TEXT NOT NULL, cursor INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                      PRIMARY KEY(vault_id, peer, token_id, direction)
+                    )
+                """)
+                for row in rows:
+                    peer, token_id = split_legacy_cursor_peer(row["peer"])
+                    self.conn.execute("""
+                        INSERT INTO sync_cursors(
+                          vault_id, peer, token_id, direction, cursor, updated_at
+                        ) VALUES(?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(vault_id, peer, token_id, direction) DO UPDATE SET
+                          cursor=MAX(sync_cursors.cursor, excluded.cursor),
+                          updated_at=MAX(sync_cursors.updated_at, excluded.updated_at)
+                    """, (self._vault_identity.vault_id, peer, token_id,
+                          row["direction"], row["cursor"], row["updated_at"]))
+            self._set_meta("schema", "4")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def _new_sync_event(self, kind: str, key: str, revision: int, updated_at: int,
                         origin: str | None = None) -> dict:
@@ -976,26 +1036,30 @@ class Vault(StorageBackend):
                 or winner["status"] != "active" or not parents_match):
             raise ValueError("conflict resolution does not match an active competing correction")
 
-    def get_sync_cursor(self, peer: str, direction: str) -> int:
+    def get_sync_cursor(self, peer: str, direction: str, token_id: str = "") -> int:
         row = self.conn.execute(
-            "SELECT cursor FROM sync_cursors WHERE peer=? AND direction=?", (peer, direction),
+            "SELECT cursor FROM sync_cursors WHERE vault_id=? AND peer=? AND token_id=? AND direction=?",
+            (self.vault_identity.vault_id, peer, token_id, direction),
         ).fetchone()
         return int(row["cursor"]) if row else 0
 
     def list_sync_cursors(self) -> list[dict]:
         return [dict(row) for row in self.conn.execute(
-            "SELECT peer, direction, cursor, updated_at FROM sync_cursors "
-            "ORDER BY peer, direction"
+            "SELECT vault_id, peer, token_id, direction, cursor, updated_at FROM sync_cursors "
+            "ORDER BY vault_id, peer, token_id, direction"
         ).fetchall()]
 
-    def set_sync_cursor(self, peer: str, direction: str, cursor: int, now: int) -> None:
+    def set_sync_cursor(self, peer: str, direction: str, cursor: int, now: int,
+                        token_id: str = "") -> None:
         if direction not in {"push", "pull"} or cursor < 0:
             raise ValueError("invalid sync cursor")
         self.conn.execute(
-            "INSERT INTO sync_cursors(peer, direction, cursor, updated_at) VALUES(?, ?, ?, ?) "
-            "ON CONFLICT(peer, direction) DO UPDATE SET cursor=MAX(sync_cursors.cursor, excluded.cursor), "
+            "INSERT INTO sync_cursors(vault_id, peer, token_id, direction, cursor, updated_at) "
+            "VALUES(?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(vault_id, peer, token_id, direction) DO UPDATE SET "
+            "cursor=MAX(sync_cursors.cursor, excluded.cursor), "
             "updated_at=excluded.updated_at",
-            (peer, direction, cursor, now),
+            (self.vault_identity.vault_id, peer, token_id, direction, cursor, now),
         )
         if not self._txn:
             self.conn.commit()
