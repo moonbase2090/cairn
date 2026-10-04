@@ -1151,6 +1151,22 @@ class Vault(StorageBackend):
                 args.append(value)
         return self.scan(" AND ".join(clauses), tuple(args), limit, with_embedding)
 
+    def iter_memories(self, batch_size: int = 100):
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        last_rowid = 0
+        columns = ", ".join(READ_COLUMNS)
+        while True:
+            rows = self.conn.execute(
+                f"SELECT {columns} FROM memories WHERE rowid>? ORDER BY rowid LIMIT ?",
+                (last_rowid, batch_size),
+            ).fetchall()
+            if not rows:
+                return
+            for row in rows:
+                last_rowid = row["rowid"]
+                yield row
+
     def count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) c FROM memories").fetchone()["c"]
 

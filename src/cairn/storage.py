@@ -119,6 +119,10 @@ class StorageBackend:
              with_embedding: bool = False) -> list[Row]:
         raise NotImplementedError
 
+    def iter_memories(self, batch_size: int = 100) -> Iterator[Row]:
+        """Yield every memory in bounded pages for maintenance scans."""
+        raise NotImplementedError
+
     def set_status(self, key: str, status: str, now: int, archived_at: int | None = None,
                    event_metadata: dict | None = None) -> int:
         """Set status, updated_at, and archived_at; returns rows changed."""

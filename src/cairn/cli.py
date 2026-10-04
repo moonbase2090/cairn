@@ -373,6 +373,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Write --out only; do not start the HTTP server.")
 
     sub.add_parser("whoami", help="Show effective identity + vault + embedder.")
+    sub.add_parser(
+        "secret-scan",
+        help="Read-only preflight scan of existing vault content; reports categories only.",
+    )
     doc = sub.add_parser("doctor", help="Diagnose the vault and environment.")
     doc.add_argument("--repair-vec", action="store_true",
                      help="Rebuild mem_vec from stored embeddings when the index is incomplete.")
@@ -897,6 +901,11 @@ def _cmd_whoami(args, client) -> int:
     return 0
 
 
+def _cmd_secret_scan(args, client) -> int:
+    emit(client.preflight_secret_scan(), args.json)
+    return 0
+
+
 def _cmd_doctor(args, client) -> int:
     vdir = vault_dir(args)
     repaired = None
@@ -1106,6 +1115,7 @@ _COMMANDS = {
     "sync": _cmd_sync,
     "galaxy": _cmd_galaxy,
     "whoami": _cmd_whoami,
+    "secret-scan": _cmd_secret_scan,
     "doctor": _cmd_doctor,
     "log": _cmd_log,
 }

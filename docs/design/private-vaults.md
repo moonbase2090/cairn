@@ -201,14 +201,15 @@ before calling `store_memory()`, so scan those chunks before batch embedding as
 well. Portable imports and `cairn-sync-2` snapshots write directly to storage,
 so validate every incoming content before applying any row or advancing a
 cursor. Scanning only `store_memory()` would still allow a secret-bearing pack
-to enter a vault. Relevant paths are [`CairnClient.store_memory`](../../src/cairn/client.py#L98),
-whose two direct insert sites are [`client.py:132`](../../src/cairn/client.py#L132)
-and [`client.py:165`](../../src/cairn/client.py#L165); [`import_pack`](../../src/cairn/client.py#L347)
-inserts snapshots at [`client.py:373`](../../src/cairn/client.py#L373);
+to enter a vault. Relevant paths are [`CairnClient.store_memory`](../../src/cairn/client.py#L99),
+whose two direct insert sites are [`client.py:136`](../../src/cairn/client.py#L136)
+and [`client.py:169`](../../src/cairn/client.py#L169); [`import_pack`](../../src/cairn/client.py#L351)
+inserts snapshots at [`client.py:381`](../../src/cairn/client.py#L381);
 `import_sync_pack` applies events at [`store.py:911`](../../src/cairn/store.py#L911)
 and [`postgres.py:607`](../../src/cairn/postgres.py#L607). Document ingestion
-chunks then batch-embeds before its call to `store_memory()` at
-[`ingest.py:97`](../../src/cairn/ingest.py#L97). Apply the same contract to
+scans each chunk before batch embedding at [`ingest.py:91-92`](../../src/cairn/ingest.py#L91),
+then calls `store_memory()` at [`ingest.py:104`](../../src/cairn/ingest.py#L104).
+Apply the same contract to
 future cloud writes.
 
 Start with three detector families:
