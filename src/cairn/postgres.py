@@ -847,6 +847,23 @@ class PostgresVault(StorageBackend):
         ).fetchall()
         return self._rows(rows)
 
+    def iter_memories(self, batch_size: int = 100):
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        last_rowid = 0
+        columns = ", ".join(READ_COLUMNS)
+        while True:
+            rows = self._execute(
+                f"SELECT {columns} FROM cairn_memories WHERE rowid>%s "
+                "ORDER BY rowid LIMIT %s",
+                (last_rowid, batch_size),
+            ).fetchall()
+            if not rows:
+                return
+            for row in rows:
+                last_rowid = row["rowid"]
+                yield self._row(row)
+
     def set_status(self, key: str, status: str, now: int,
                    archived_at: int | None = None,
                    event_metadata: dict | None = None) -> int:

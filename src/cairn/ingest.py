@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 from cairn.models import content_digest
+from cairn.secret_scan import scan_content
 
 HEADING = re.compile(r"^(#{1,3})\s+(.+?)\s*$")
 SUFFIXES = (".md", ".markdown", ".txt")
@@ -83,9 +84,15 @@ def ingest_dir(client, team: str, path: str | Path, memory_type: str = "document
             continue
         rel = str(fp.relative_to(root))
         task_id = sanitize_task_id(fp.stem)
-        pending: list[tuple[str, str | None]] = []
+        chunks: list[tuple[str, str | None]] = []
         for heading, body in chunk_markdown(text):
             content = f"# {heading}\n\n{body}" if heading else body
+            chunks.append((content, heading))
+        for content, _heading in chunks:
+            scan_content(content)
+
+        pending: list[tuple[str, str | None]] = []
+        for content, heading in chunks:
             if client.vault.by_hash(f"sha256:{content_digest(content)}", task_id):
                 unchanged += 1
                 continue

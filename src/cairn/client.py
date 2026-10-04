@@ -24,6 +24,7 @@ from .models import (
     now_epoch,
 )
 from .storage import MEMORY_FIELDS, MemoryQuery, StorageBackend
+from .secret_scan import scan_content, summarize_existing_content
 
 NEAR_DUP_SIM = 0.95
 OVERSAMPLE = 20
@@ -109,11 +110,14 @@ class CairnClient:
         expires_at: int | None = None,
         vector: np.ndarray | None = None,
     ) -> StoreResult:
+        if not isinstance(content, str):
+            raise ValueError("content must be text")
+        scan_content(content)
         if memory_type not in {t.value for t in MemoryType}:
             raise ValueError(f"bad memory_type: {memory_type}")
         if origin not in {o.value for o in Origin}:
             raise ValueError(f"bad origin: {origin}")
-        if content is None or not str(content).strip():
+        if not content.strip():
             raise ValueError("content must be non-empty (whitespace-only stores pollute retrieve)")
         now = now_epoch()
         digest = content_digest(content)
@@ -351,6 +355,10 @@ class CairnClient:
                 or "embed_model" not in pack or "dims" not in pack):
             raise ValueError(
                 "invalid pack: need {embed_model, dims, memories[]} from `cairn export`")
+        for memory in pack["memories"]:
+            if not isinstance(memory, dict) or not isinstance(memory.get("content"), str):
+                raise ValueError("invalid portable pack: each memory must contain text content")
+            scan_content(memory["content"])
         if pack.get("embed_model") != self.embedder.name or pack.get("dims") != self.embedder.dims:
             raise ValueError(
                 f"pack is {pack.get('embed_model')}/{pack.get('dims')}d, vault is "
@@ -394,6 +402,15 @@ class CairnClient:
                 or not isinstance(pack.get("events"), list)
                 or "embed_model" not in pack or "dims" not in pack):
             raise ValueError("invalid sync pack: need cairn-sync-2 events and embedding space")
+        for event in pack["events"]:
+            if not isinstance(event, dict):
+                continue
+            event_content = event.get("content")
+            if isinstance(event_content, str):
+                scan_content(event_content)
+            snapshot = event.get("snapshot")
+            if isinstance(snapshot, dict) and isinstance(snapshot.get("content"), str):
+                scan_content(snapshot["content"])
         if pack.get("embed_model") != self.embedder.name or pack.get("dims") != self.embedder.dims:
             raise ValueError(
                 f"pack is {pack.get('embed_model')}/{pack.get('dims')}d, vault is "
@@ -470,6 +487,12 @@ class CairnClient:
         counts["conflicts"] = len(self.vault.list_sync_conflicts())
         self._audit("sync_import", counts)
         return counts
+
+    def preflight_secret_scan(self) -> dict:
+        """Read existing content in bounded pages and return category counts only."""
+        return summarize_existing_content(
+            self.vault.read_content(row) for row in self.vault.iter_memories()
+        )
 
     def sync_status(self, peer: str | None = None) -> dict:
         self.vault.record_competing_corrections(now_epoch())

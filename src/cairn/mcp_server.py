@@ -63,6 +63,9 @@ TOOL_DEFS = [
      "inputSchema": {"type": "object", "properties": {"topic": {"type": "string"}}}},
     {"name": "cairn_whoami", "description": "This seat's identity, embedder, and vault size.",
      "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "cairn_secret_scan",
+     "description": "Read-only preflight scan of existing vault content; returns category counts without content or memory identifiers.",
+     "inputSchema": {"type": "object", "properties": {}}},
     {"name": "cairn_gc", "description": "Lifecycle sweep. Dry-run unless apply=true (promote stale superseded, delete archived/expired, circuit-breaker capped).",
      "inputSchema": {"type": "object", "properties": {"apply": {"type": "boolean", "default": False}}}},
     {"name": "cairn_export", "description": "Export a sync pack (merge it elsewhere with cairn_import).",
@@ -197,6 +200,10 @@ def _tool_whoami(client: CairnClient, _args: dict) -> str:
         "embedder": client.embedder.name, "dims": client.embedder.dims,
         "memories": client.vault.count(),
     }, default=str)
+
+
+def _tool_secret_scan(client: CairnClient, _args: dict) -> str:
+    return _dump(client.preflight_secret_scan())
 
 
 def _tool_gc(client: CairnClient, args: dict) -> str:
@@ -447,6 +454,7 @@ _TOOLS = {
     "restore_memory": _tool_restore,
     "cairn_howto": _tool_howto,
     "cairn_whoami": _tool_whoami,
+    "cairn_secret_scan": _tool_secret_scan,
     "cairn_gc": _tool_gc,
     "cairn_export": _tool_export,
     "cairn_import": _tool_import,

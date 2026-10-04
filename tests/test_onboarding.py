@@ -109,7 +109,7 @@ def test_mcp_stdio_session(tmp_path, monkeypatch):
     assert {t["name"] for t in res[2]["result"]["tools"]} >= {
         "retrieve_memory", "store_memory", "list_memories", "get_memory",
         "archive_memory", "restore_memory", "cairn_howto", "cairn_whoami",
-        "cairn_gc", "cairn_export", "cairn_import", "cairn_ingest"}
+        "cairn_secret_scan", "cairn_gc", "cairn_export", "cairn_import", "cairn_ingest"}
     assert "shared memory" in res[3]["result"]["content"][0]["text"].lower()
     assert json.loads(res[4]["result"]["content"][0]["text"])["action"] == "created"
     hits = json.loads(res[5]["result"]["content"][0]["text"])
@@ -148,6 +148,8 @@ def test_mcp_ops_tools(tmp_path, monkeypatch):
                     "arguments": {"query": "ops tool memory", "task_id": "k"}}},
         {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
          "params": {"name": "list_memories", "arguments": {"task_id": "k"}}},
+        {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+         "params": {"name": "cairn_secret_scan", "arguments": {}}},
     ])
     me = json.loads(res[2]["result"]["content"][0]["text"])
     assert me["agent"] == "mcp-ops" and me["memories"] == 1
@@ -162,6 +164,9 @@ def test_mcp_ops_tools(tmp_path, monkeypatch):
     assert listed[0]["vault_id"] == me["vault_id"]
     pack = json.loads(res[3]["result"]["content"][0]["text"])
     assert len(pack["memories"]) == 1
+    scan_text = res[6]["result"]["content"][0]["text"]
+    assert json.loads(scan_text) == {"scanned": 1, "findings": {}, "safe": True}
+    assert "ops tool memory one" not in scan_text
 
     res = rpc([
         {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
