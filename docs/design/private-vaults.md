@@ -258,8 +258,8 @@ Do not rewrite existing memories during a schema migration. Existing vaults
 may already contain content that the scanner recognizes, and SQLite/PostgreSQL
 sync migrations can backfill old rows as snapshot events ([SQLite](../../src/cairn/store.py#L496),
 [PostgreSQL](../../src/cairn/postgres.py#L385)). Add a read-only preflight scan
-that reports finding categories and memory keys without showing matched
-content; run it before enabling a new scanner rollout or syncing an existing
+that reports finding categories without showing matched content or memory
+keys; run it before enabling a new scanner rollout or syncing an existing
 vault. Remediation and secret rotation stay explicit operator actions. This
 preflight does not change the no-override rule for new writes.
 
