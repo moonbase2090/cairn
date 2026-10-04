@@ -225,7 +225,14 @@ def _tool_sync(client: CairnClient, args: dict) -> str:
     action = args.get("action")
     url = args.get("url") or os.environ.get("CAIRN_URL")
     if action == "status":
-        return _dump(client.sync_status(url))
+        if not url:
+            return _dump(client.sync_status())
+        token = args.get("token") or os.environ.get("CAIRN_TOKEN", "")
+        handshake = sync_handshake(
+            url, client.vault.vault_identity.vault_id, token=token,
+            cafile=args.get("tls_ca"),
+        )
+        return _dump(client.sync_status(handshake["origin_id"]))
     if action == "health":
         if not url:
             raise ValueError("cairn_sync health needs url or CAIRN_URL")
@@ -240,21 +247,22 @@ def _tool_sync(client: CairnClient, args: dict) -> str:
         cafile=args.get("tls_ca"),
     )
     token_id = handshake["token_id"]
+    peer = handshake["origin_id"]
     if action == "push":
-        after = client.vault.get_sync_cursor(url, "push", token_id)
+        after = client.vault.get_sync_cursor(peer, "push", token_id)
         pack = client.export_delta(after)
         result = push_to(url, pack, token=token, cafile=args.get("tls_ca"))
         cursor = int(result.get("cursor", after))
         if cursor < after or cursor > pack["cursor"]:
             raise ValueError("server returned an invalid push cursor")
         with client.vault.transaction():
-            client.vault.set_sync_cursor(url, "push", cursor, now_epoch(), token_id)
+            client.vault.set_sync_cursor(peer, "push", cursor, now_epoch(), token_id)
         return _dump(result)
-    after = client.vault.get_sync_cursor(url, "pull", token_id)
+    after = client.vault.get_sync_cursor(peer, "pull", token_id)
     pack = pull_from(url, token=token, cafile=args.get("tls_ca"), after=after,
                      peer=client.vault.sync_origin_id())
     return _dump(client.import_sync_pack(
-        pack, peer=url, direction="pull", token_id=token_id,
+        pack, peer=peer, direction="pull", token_id=token_id,
     ))
 
 

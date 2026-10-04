@@ -39,8 +39,9 @@ class SyncClient:
 def test_push_uses_environment_url_and_token(monkeypatch, capsys):
     monkeypatch.setenv("CAIRN_URL", "https://sync.example.com")
     monkeypatch.setenv("CAIRN_TOKEN", "environment-token")
-    monkeypatch.setattr(cli, "_open_client", lambda _args: SyncClient())
-    monkeypatch.setattr(cli, "sync_handshake", lambda *args, **kwargs: {"token_id": "ct-peer"})
+    client = SyncClient()
+    monkeypatch.setattr(cli, "_open_client", lambda _args: client)
+    monkeypatch.setattr(cli, "sync_handshake", lambda *args, **kwargs: {"token_id": "ct-peer", "origin_id": "remote-origin"})
     calls = []
 
     def fake_push(url, pack, token, cafile=None):
@@ -51,6 +52,7 @@ def test_push_uses_environment_url_and_token(monkeypatch, capsys):
 
     assert cli.main(["push"]) == 0
     capsys.readouterr()
+    assert client.vault.cursors[("remote-origin", "push", "ct-peer")] == 0
     assert calls == [(
         "https://sync.example.com",
         {"pack": "cairn-sync-2", "after": 0, "cursor": 0,
@@ -64,7 +66,7 @@ def test_pull_explicit_url_and_token_override_environment(monkeypatch, capsys):
     monkeypatch.setenv("CAIRN_TOKEN", "environment-token")
     client = SyncClient()
     monkeypatch.setattr(cli, "_open_client", lambda _args: client)
-    monkeypatch.setattr(cli, "sync_handshake", lambda *args, **kwargs: {"token_id": "ct-peer"})
+    monkeypatch.setattr(cli, "sync_handshake", lambda *args, **kwargs: {"token_id": "ct-peer", "origin_id": "remote-origin"})
     calls = []
 
     def fake_pull(url, token, since=None, cafile=None, after=None, peer=None):
@@ -77,6 +79,7 @@ def test_pull_explicit_url_and_token_override_environment(monkeypatch, capsys):
 
     assert cli.main(["pull", "https://other.example.com", "--token", "command-token"]) == 0
     capsys.readouterr()
+    assert client.vault.cursors[("remote-origin", "pull", "ct-peer")] == 0
     assert calls == [(
         "https://other.example.com", "command-token", None, None, 0, "local-origin",
     )]

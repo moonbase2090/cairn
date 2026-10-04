@@ -350,6 +350,8 @@ def build_parser() -> argparse.ArgumentParser:
     sy_sub = sy.add_subparsers(dest="sync_action", required=True)
     sy_status = sy_sub.add_parser("status", help="Show peer cursors and competing corrections.")
     sy_status.add_argument("url", nargs="?", help="Limit status to this peer URL.")
+    sy_status.add_argument("--token", default=None, help="Bearer token (default: $CAIRN_TOKEN).")
+    sy_status.add_argument("--tls-ca", default=None, help="CA bundle PEM for an https:// peer.")
 
     cf = sub.add_parser("conflicts", help="List or resolve competing corrections.")
     cf_sub = cf.add_subparsers(dest="conflicts_action", required=True)
@@ -750,20 +752,22 @@ def _cmd_push(args, client) -> int:
         args.url, client.vault.vault_identity.vault_id, token=token, cafile=args.tls_ca,
     )
     token_id = handshake["token_id"]
-    after = client.vault.get_sync_cursor(args.url, "push", token_id)
+    peer = handshake["origin_id"]
+    after = client.vault.get_sync_cursor(peer, "push", token_id)
     pack = client.export_delta(after)
     result = push_to(args.url, pack, token, cafile=args.tls_ca)
     cursor = int(result.get("cursor", after))
     if cursor < after or cursor > pack["cursor"]:
         raise ValueError("server returned an invalid push cursor")
     with client.vault.transaction():
-        client.vault.set_sync_cursor(args.url, "push", cursor, now_epoch(), token_id)
+        client.vault.set_sync_cursor(peer, "push", cursor, now_epoch(), token_id)
     emit(result, args.json)
     return 0
 
 
 def _cmd_pull(args, client) -> int:
     token_id = ""
+    peer = args.url
     if args.since is not None:
         pack = pull_from(args.url, token_for(args), args.since, cafile=args.tls_ca)
     else:
@@ -773,7 +777,8 @@ def _cmd_pull(args, client) -> int:
             cafile=args.tls_ca,
         )
         token_id = handshake["token_id"]
-        after = client.vault.get_sync_cursor(args.url, "pull", token_id)
+        peer = handshake["origin_id"]
+        after = client.vault.get_sync_cursor(peer, "pull", token_id)
         pack = pull_from(args.url, token, cafile=args.tls_ca, after=after,
                          peer=client.vault.sync_origin_id())
     if args.out:
@@ -782,7 +787,7 @@ def _cmd_pull(args, client) -> int:
         emit({"pulled": count, "out": args.out}, args.json)
     elif pack.get("pack") == "cairn-sync-2":
         emit(client.import_sync_pack(
-            pack, peer=args.url, direction="pull", token_id=token_id,
+            pack, peer=peer, direction="pull", token_id=token_id,
         ), args.json)
     else:
         emit(client.import_pack(pack), args.json)
@@ -790,7 +795,14 @@ def _cmd_pull(args, client) -> int:
 
 
 def _cmd_sync(args, client) -> int:
-    emit(client.sync_status(args.url), args.json)
+    peer = None
+    if args.url:
+        handshake = sync_handshake(
+            args.url, client.vault.vault_identity.vault_id,
+            token=token_for(args), cafile=args.tls_ca,
+        )
+        peer = handshake["origin_id"]
+    emit(client.sync_status(peer), args.json)
     return 0
 
 
