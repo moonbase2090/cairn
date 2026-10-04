@@ -173,6 +173,12 @@ def test_sync_snapshot_import_scans_before_events_cursors_or_audit(tmp_path):
     secret = f"aws_session_token={OPAQUE_VALUE}{OPAQUE_VALUE}"
     pack["events"][1]["snapshot"]["content"] = secret
     target = make_client(tmp_path / "target")
+    source_identity = getattr(source.vault, "vault_identity", None)
+    target_identity = getattr(target.vault, "vault_identity", None)
+    if source_identity is not None and target_identity.vault_id != source_identity.vault_id:
+        target.vault._set_meta("vault_id", source_identity.vault_id)
+        target.vault._set_meta("vault_name", source_identity.name)
+        target.vault._vault_identity = source_identity
 
     with pytest.raises(SecretAdmissionError) as caught:
         target.import_sync_pack(pack, peer="peer")
