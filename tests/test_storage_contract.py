@@ -169,13 +169,24 @@ class TestStorageContract:
         assert pack["events"][0]["kind"] == "snapshot"
         assert pack["events"][0]["snapshot"]["key"] == "sync-k1"
         vault.set_sync_cursor("peer-a", "pull", pack["cursor"], NOW)
+        vault.set_sync_cursor("peer-a", "pull", pack["cursor"] + 1, NOW + 1,
+                              token_id="ct-other")
         vault.close()
         again = open_vault()
         assert again.get_sync_cursor("peer-a", "pull") == pack["cursor"]
-        assert again.list_sync_cursors() == [{
-            "peer": "peer-a", "direction": "pull", "cursor": pack["cursor"],
-            "updated_at": NOW,
-        }]
+        assert again.get_sync_cursor("peer-a", "pull", "ct-other") == pack["cursor"] + 1
+        assert again.list_sync_cursors() == [
+            {
+                "vault_id": again.vault_identity.vault_id,
+                "peer": "peer-a", "token_id": "", "direction": "pull",
+                "cursor": pack["cursor"], "updated_at": NOW,
+            },
+            {
+                "vault_id": again.vault_identity.vault_id,
+                "peer": "peer-a", "token_id": "ct-other", "direction": "pull",
+                "cursor": pack["cursor"] + 1, "updated_at": NOW + 1,
+            },
+        ]
 
     def test_initialization_is_idempotent(self, vault, open_vault):
         vault.insert(record("k1", "persisted fact"), unit(0))

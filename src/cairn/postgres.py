@@ -20,10 +20,16 @@ from .storage import (
     SpaceMismatchError,
     StorageBackend,
 )
+from .vault_identity import (
+    VaultIdentity,
+    ensure_vault_identity,
+    load_vault_identity,
+    split_legacy_cursor_peer,
+)
 
 READ_COLUMNS = ("rowid", *MEMORY_FIELDS, "content_ref")
 SEARCH_FILTER_COLUMNS = ("task_id", "canonical_id", "memory_type", "team_id", "agent_id")
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DOC_THRESHOLD = 2048
 
 
@@ -91,6 +97,10 @@ class PostgresVault(StorageBackend):
     @property
     def vault_dir(self) -> Path:
         return self._vault_dir
+
+    @property
+    def vault_identity(self) -> VaultIdentity:
+        return self._vault_identity
 
     @property
     def doc_threshold(self) -> int:
@@ -187,6 +197,7 @@ class PostgresVault(StorageBackend):
                 )
             if current == SCHEMA_VERSION:
                 self._check_space()
+                self._vault_identity = load_vault_identity(self._get_meta)
                 return
             if current == 0 and not create:
                 raise FileNotFoundError(
@@ -277,6 +288,33 @@ class PostgresVault(StorageBackend):
                     resolved_by TEXT
                 )
             """)
+            return
+        if version == 4:
+            self._vault_identity = ensure_vault_identity(
+                self._get_meta, self._set_meta, self.vault_dir,
+            )
+            rows = self._execute(
+                "SELECT peer, direction, cursor, updated_at FROM cairn_sync_cursors"
+            ).fetchall()
+            self._execute("DROP TABLE cairn_sync_cursors")
+            self._execute("""
+                CREATE TABLE cairn_sync_cursors(
+                    vault_id TEXT NOT NULL, peer TEXT NOT NULL, token_id TEXT NOT NULL,
+                    direction TEXT NOT NULL, cursor BIGINT NOT NULL, updated_at BIGINT NOT NULL,
+                    PRIMARY KEY(vault_id, peer, token_id, direction)
+                )
+            """)
+            for row in rows:
+                peer, token_id = split_legacy_cursor_peer(row["peer"])
+                self._execute("""
+                    INSERT INTO cairn_sync_cursors(
+                        vault_id, peer, token_id, direction, cursor, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(vault_id, peer, token_id, direction) DO UPDATE SET
+                        cursor=GREATEST(cairn_sync_cursors.cursor, EXCLUDED.cursor),
+                        updated_at=GREATEST(cairn_sync_cursors.updated_at, EXCLUDED.updated_at)
+                """, (self._vault_identity.vault_id, peer, token_id, row["direction"],
+                      row["cursor"], row["updated_at"]))
             return
         if version != 1:
             raise RuntimeError(f"missing PostgreSQL schema migration {version}")
@@ -696,28 +734,31 @@ class PostgresVault(StorageBackend):
                 or winner["status"] != "active" or not parents_match):
             raise ValueError("conflict resolution does not match an active competing correction")
 
-    def get_sync_cursor(self, peer: str, direction: str) -> int:
+    def get_sync_cursor(self, peer: str, direction: str, token_id: str = "") -> int:
         row = self._execute(
-            "SELECT cursor FROM cairn_sync_cursors WHERE peer=%s AND direction=%s",
-            (peer, direction),
+            "SELECT cursor FROM cairn_sync_cursors WHERE vault_id=%s AND peer=%s "
+            "AND token_id=%s AND direction=%s",
+            (self.vault_identity.vault_id, peer, token_id, direction),
         ).fetchone()
         return int(row["cursor"]) if row else 0
 
     def list_sync_cursors(self) -> list[dict]:
         return [dict(row) for row in self._execute(
-            "SELECT peer, direction, cursor, updated_at FROM cairn_sync_cursors "
-            "ORDER BY peer, direction"
+            "SELECT vault_id, peer, token_id, direction, cursor, updated_at "
+            "FROM cairn_sync_cursors ORDER BY vault_id, peer, token_id, direction"
         ).fetchall()]
 
-    def set_sync_cursor(self, peer: str, direction: str, cursor: int, now: int) -> None:
+    def set_sync_cursor(self, peer: str, direction: str, cursor: int, now: int,
+                        token_id: str = "") -> None:
         if direction not in {"push", "pull"} or cursor < 0:
             raise ValueError("invalid sync cursor")
         self._execute(
-            "INSERT INTO cairn_sync_cursors(peer, direction, cursor, updated_at) "
-            "VALUES(%s, %s, %s, %s) ON CONFLICT(peer, direction) DO UPDATE "
+            "INSERT INTO cairn_sync_cursors(vault_id, peer, token_id, direction, cursor, updated_at) "
+            "VALUES(%s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT(vault_id, peer, token_id, direction) DO UPDATE "
             "SET cursor=GREATEST(cairn_sync_cursors.cursor, EXCLUDED.cursor), "
             "updated_at=EXCLUDED.updated_at",
-            (peer, direction, cursor, now),
+            (self.vault_identity.vault_id, peer, token_id, direction, cursor, now),
         )
 
     def list_competing_corrections(self) -> list[dict]:

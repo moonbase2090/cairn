@@ -27,7 +27,7 @@ from cairn.embed import format_embedder_hint, get_embedder, parse_embedder_hint
 from cairn.storage import open_backend
 from cairn.tutorial import howto_text
 from cairn.models import now_epoch
-from cairn.serve import health_from, pull_from, push_to, resolve_conflict_to
+from cairn.serve import health_from, pull_from, push_to, resolve_conflict_to, sync_handshake
 
 SERVER_NAME = "cairn"
 SERVER_VERSION = CAIRN_VERSION
@@ -130,12 +130,22 @@ def _dump(obj) -> str:
     return json.dumps(obj, indent=2, default=str)
 
 
+def _with_vault_identity(client: CairnClient, value):
+    identity = client.vault.vault_identity
+    fields = {"vault_name": identity.name, "vault_id": identity.vault_id}
+    if isinstance(value, dict):
+        return {**value, **fields}
+    if isinstance(value, list):
+        return [{**item, **fields} for item in value]
+    return value
+
+
 def _tool_retrieve(client: CairnClient, args: dict) -> str:
     filters = {k: args[k] for k in ("task_id", "team_id", "memory_type") if args.get(k)}
     recs = client.retrieve_memory(
         args["query"], filters or None, int(args.get("top_k", 5)), args.get("min_sim"),
     )
-    return _dump([m.to_dict() for m in recs])
+    return _dump(_with_vault_identity(client, [m.to_dict() for m in recs]))
 
 
 def _tool_store(client: CairnClient, args: dict) -> str:
@@ -144,7 +154,7 @@ def _tool_store(client: CairnClient, args: dict) -> str:
         args.get("memory_type", "semantic"), args.get("origin", "agent"),
         args.get("supersedes_key"), args.get("mode", "auto"),
     )
-    return _dump(res.to_dict())
+    return _dump(_with_vault_identity(client, res.to_dict()))
 
 
 def _tool_list(client: CairnClient, args: dict) -> str:
@@ -155,7 +165,7 @@ def _tool_list(client: CairnClient, args: dict) -> str:
     if not filters:
         raise ValueError("list_memories needs task_id, canonical_id, or search")
     recs = client.list_memories(filters, int(args.get("limit", 100)))
-    return _dump([m.to_dict() for m in recs])
+    return _dump(_with_vault_identity(client, [m.to_dict() for m in recs]))
 
 
 def _tool_get(client: CairnClient, args: dict) -> str:
@@ -176,9 +186,16 @@ def _tool_howto(_client: CairnClient, args: dict) -> str:
 
 
 def _tool_whoami(client: CairnClient, _args: dict) -> str:
+    identity = client.vault.vault_identity
+    role = "curator" if any(
+        token["agent_id"] == client.agent_id and bool(token["curator"])
+        for token in client.vault.list_server_tokens()
+    ) else "member"
     return json.dumps({
-        "agent": client.agent_id, "embedder": client.embedder.name,
-        "dims": client.embedder.dims, "memories": client.vault.count(),
+        "vault_name": identity.name, "vault_id": identity.vault_id,
+        "agent": client.agent_id, "storage": client.vault.name, "role": role,
+        "embedder": client.embedder.name, "dims": client.embedder.dims,
+        "memories": client.vault.count(),
     }, default=str)
 
 
@@ -208,7 +225,14 @@ def _tool_sync(client: CairnClient, args: dict) -> str:
     action = args.get("action")
     url = args.get("url") or os.environ.get("CAIRN_URL")
     if action == "status":
-        return _dump(client.sync_status(url))
+        if not url:
+            return _dump(client.sync_status())
+        token = args.get("token") or os.environ.get("CAIRN_TOKEN", "")
+        handshake = sync_handshake(
+            url, client.vault.vault_identity.vault_id, token=token,
+            cafile=args.get("tls_ca"),
+        )
+        return _dump(client.sync_status(handshake["origin_id"]))
     if action == "health":
         if not url:
             raise ValueError("cairn_sync health needs url or CAIRN_URL")
@@ -218,20 +242,28 @@ def _tool_sync(client: CairnClient, args: dict) -> str:
     if not url:
         raise ValueError("cairn_sync push/pull needs url or CAIRN_URL")
     token = args.get("token") or os.environ.get("CAIRN_TOKEN", "")
+    handshake = sync_handshake(
+        url, client.vault.vault_identity.vault_id, token=token,
+        cafile=args.get("tls_ca"),
+    )
+    token_id = handshake["token_id"]
+    peer = handshake["origin_id"]
     if action == "push":
-        after = client.vault.get_sync_cursor(url, "push")
+        after = client.vault.get_sync_cursor(peer, "push", token_id)
         pack = client.export_delta(after)
         result = push_to(url, pack, token=token, cafile=args.get("tls_ca"))
         cursor = int(result.get("cursor", after))
         if cursor < after or cursor > pack["cursor"]:
             raise ValueError("server returned an invalid push cursor")
         with client.vault.transaction():
-            client.vault.set_sync_cursor(url, "push", cursor, now_epoch())
+            client.vault.set_sync_cursor(peer, "push", cursor, now_epoch(), token_id)
         return _dump(result)
-    after = client.vault.get_sync_cursor(url, "pull")
+    after = client.vault.get_sync_cursor(peer, "pull", token_id)
     pack = pull_from(url, token=token, cafile=args.get("tls_ca"), after=after,
                      peer=client.vault.sync_origin_id())
-    return _dump(client.import_sync_pack(pack, peer=url, direction="pull"))
+    return _dump(client.import_sync_pack(
+        pack, peer=peer, direction="pull", token_id=token_id,
+    ))
 
 
 def _serve_state_path(client: CairnClient) -> Path:

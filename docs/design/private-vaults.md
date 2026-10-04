@@ -23,15 +23,15 @@ planner-only or researcher-only vaults inside the same project.
 
 | Question | Finding | Evidence |
 |---|---|---|
-| How does CLI choose a vault? | Each CLI invocation creates one client. `--vault` wins, then `CAIRN_DIR`, then `./.cairn`. | [`vault_dir`](../../src/cairn/cli.py#L53), [`build_client`](../../src/cairn/cli.py#L217), parser option [`--vault`](../../src/cairn/cli.py#L231) |
-| How does bootstrap choose a vault? | Bootstrap writes one absolute `CAIRN_DIR` and one `CAIRN_AGENT` into the project MCP config. It currently uses the fixed server key `cairn`, so running bootstrap again for another vault replaces that entry. | [`_cmd_bootstrap`](../../src/cairn/cli.py#L925), MCP config write at [`cli.py:944`](../../src/cairn/cli.py#L944) |
-| Can one MCP process use several vaults? | No. `make_client()` reads one `CAIRN_DIR` (or the current directory), opens one backend, and passes one `CairnClient` to every tool call. A tool call has no vault selector. | [`make_client`](../../src/cairn/mcp_server.py#L108), [`handle`](../../src/cairn/mcp_server.py#L487) |
-| Can an agent use several vaults? | Yes, by connecting to separately configured MCP server processes, each pinned to its own vault. CLI commands can likewise specify `--vault`. Search and exact lookups run on that client’s backend only. | [`_tool_retrieve`](../../src/cairn/mcp_server.py#L133), [`_tool_get`](../../src/cairn/mcp_server.py#L161) |
-| Does MCP make the active vault obvious? | Not reliably today. CLI `whoami` reports the effective vault path, but the MCP `cairn_whoami` response reports agent, embedder, dimensions, and count without a vault name or ID. | [`_cmd_whoami`](../../src/cairn/cli.py#L849), [`_tool_whoami`](../../src/cairn/mcp_server.py#L178) |
-| What protects a local MCP vault? | Stdio MCP uses the configured filesystem path. `CAIRN_DIR` selects storage; it is not an authorization token. Local isolation depends on who can access the directory and which MCP entries the host exposes. | [`make_client`](../../src/cairn/mcp_server.py#L108), bootstrap environment at [`cli.py:944`](../../src/cairn/cli.py#L944) |
-| Can one `cairn serve` host multiple vaults? | No. The HTTP server’s client factory closes over one client and reopens that client’s backend for each request. Per-agent tokens are looked up in that backend’s token table. | [`_factory_for`](../../src/cairn/serve.py#L29), [`_authorize`](../../src/cairn/serve.py#L54), [`_bind`](../../src/cairn/serve.py#L285) |
-| What does a token currently authorize? | A per-agent token authenticates against one server’s token registry. It gives that agent shared-vault reads and writes to its own rows; the curator flag permits cross-agent state changes and correction resolution. It is not a private row or task role. | [`_authorize`](../../src/cairn/serve.py#L54), [`_sync_pack_matches_agent`](../../src/cairn/serve.py#L76), [sync ownership policy](sync-updates.md#ownership-and-curator-tokens) |
-| Where do sync cursors and conflicts live? | SQLite and PostgreSQL store tokens, event feeds, tombstones, cursors, and conflict records alongside a vault’s memories. Server cursor rows include peer and direction; HTTP sync additionally incorporates token ID and peer identity. | [SQLite schema](../../src/cairn/store.py#L70), [token backend contract](../../src/cairn/storage.py#L168), [cursor and conflict contract](../../src/cairn/storage.py#L206), [`/pull` cursor scope](../../src/cairn/serve.py#L186), [`/push` cursor scope](../../src/cairn/serve.py#L252) |
+| How does CLI choose a vault? | Each CLI invocation creates one client. `--vault` wins, then `CAIRN_DIR`, then `./.cairn`. | [`vault_dir`](../../src/cairn/cli.py#L59), [`build_client`](../../src/cairn/cli.py#L223), parser option [`--vault`](../../src/cairn/cli.py#L237) |
+| How does bootstrap choose a vault? | Bootstrap writes one absolute `CAIRN_DIR` and one `CAIRN_AGENT` into the project MCP config. It currently uses the fixed server key `cairn`, so running bootstrap again for another vault replaces that entry. | [`_cmd_bootstrap`](../../src/cairn/cli.py#L964), MCP config write at [`cli.py:987`](../../src/cairn/cli.py#L987) |
+| Can one MCP process use several vaults? | No. `make_client()` reads one `CAIRN_DIR` (or the current directory), opens one backend, and passes one `CairnClient` to every tool call. A tool call has no vault selector. | [`make_client`](../../src/cairn/mcp_server.py#L108), [`handle`](../../src/cairn/mcp_server.py#L519) |
+| Can an agent use several vaults? | Yes, by connecting to separately configured MCP server processes, each pinned to its own vault. CLI commands can likewise specify `--vault`. Search and exact lookups run on that client’s backend only. | [`_tool_retrieve`](../../src/cairn/mcp_server.py#L143), [`_tool_get`](../../src/cairn/mcp_server.py#L171) |
+| Does MCP make the active vault obvious? | Not reliably today. CLI `whoami` reports the effective vault path, but the MCP `cairn_whoami` response reports agent, embedder, dimensions, and count without a vault name or ID. | [`_cmd_whoami`](../../src/cairn/cli.py#L882), [`_tool_whoami`](../../src/cairn/mcp_server.py#L188) |
+| What protects a local MCP vault? | Stdio MCP uses the configured filesystem path. `CAIRN_DIR` selects storage; it is not an authorization token. Local isolation depends on who can access the directory and which MCP entries the host exposes. | [`make_client`](../../src/cairn/mcp_server.py#L108), bootstrap environment at [`cli.py:987`](../../src/cairn/cli.py#L987) |
+| Can one `cairn serve` host multiple vaults? | No. The HTTP server’s client factory closes over one client and reopens that client’s backend for each request. Per-agent tokens are looked up in that backend’s token table. | [`_factory_for`](../../src/cairn/serve.py#L29), [`_authorize`](../../src/cairn/serve.py#L62), [`_bind`](../../src/cairn/serve.py#L306) |
+| What does a token currently authorize? | A per-agent token authenticates against one server’s token registry. It gives that agent shared-vault reads and writes to its own rows; the curator flag permits cross-agent state changes and correction resolution. It is not a private row or task role. | [`_authorize`](../../src/cairn/serve.py#L62), [`_sync_pack_matches_agent`](../../src/cairn/serve.py#L84), [sync ownership policy](sync-updates.md#ownership-and-curator-tokens) |
+| Where do sync cursors and conflicts live? | SQLite and PostgreSQL store tokens, event feeds, tombstones, cursors, and conflict records alongside a vault’s memories. Server cursor rows include peer and direction; HTTP sync additionally incorporates token ID and peer identity. | [SQLite schema](../../src/cairn/store.py#L70), [token backend contract](../../src/cairn/storage.py#L174), [cursor and conflict contract](../../src/cairn/storage.py#L212), [`/pull` cursor scope](../../src/cairn/serve.py#L205), [`/push` cursor scope](../../src/cairn/serve.py#L272) |
 
 Task and team filters narrow a search request, but are supplied by the caller
 and are not authorization checks. They must never be described as privacy
@@ -205,8 +205,8 @@ to enter a vault. Relevant paths are [`CairnClient.store_memory`](../../src/cair
 whose two direct insert sites are [`client.py:132`](../../src/cairn/client.py#L132)
 and [`client.py:165`](../../src/cairn/client.py#L165); [`import_pack`](../../src/cairn/client.py#L347)
 inserts snapshots at [`client.py:373`](../../src/cairn/client.py#L373);
-`import_sync_pack` applies events at [`store.py:887`](../../src/cairn/store.py#L887)
-and [`postgres.py:609`](../../src/cairn/postgres.py#L609). Document ingestion
+`import_sync_pack` applies events at [`store.py:911`](../../src/cairn/store.py#L911)
+and [`postgres.py:607`](../../src/cairn/postgres.py#L607). Document ingestion
 chunks then batch-embeds before its call to `store_memory()` at
 [`ingest.py:97`](../../src/cairn/ingest.py#L97). Apply the same contract to
 future cloud writes.
@@ -256,8 +256,8 @@ fact that rejected content is absent from every storage and logging path.
 
 Do not rewrite existing memories during a schema migration. Existing vaults
 may already contain content that the scanner recognizes, and SQLite/PostgreSQL
-sync migrations can backfill old rows as snapshot events ([SQLite](../../src/cairn/store.py#L496),
-[PostgreSQL](../../src/cairn/postgres.py#L385)). Add a read-only preflight scan
+sync migrations can backfill old rows as snapshot events ([SQLite](../../src/cairn/store.py#L530),
+[PostgreSQL](../../src/cairn/postgres.py#L439)). Add a read-only preflight scan
 that reports finding categories without showing matched content or memory
 keys; run it before enabling a new scanner rollout or syncing an existing
 vault. Remediation and secret rotation stay explicit operator actions. This
@@ -290,9 +290,13 @@ configured peer at the start of `import_sync_pack()`, before examining or
 applying any event, writing tombstones, or advancing a cursor. Do this even when
 embedder and dimensions match; otherwise an event-only tombstone could pollute
 the receiving vault before the mismatch is noticed. Keep cursors local to
-`(vault_id, peer, token_id, direction)`; separate local databases provide the
-vault boundary today, and the explicit key is needed by cloud tables or any
-later shared server.
+`(vault_id, peer, token_id, direction)`. The HTTP handshake returns the peer's
+`origin_id`; each replica keys its cursor by the other replica's origin ID. Use
+the same `shared` token sentinel on both sides, and read the legacy empty-token
+cursor when upgrading a shared-token server. A client with an older URL-keyed
+cursor safely replays from zero; event IDs make that replay idempotent. Separate
+local databases provide the vault boundary today, and the explicit key is
+needed by cloud tables or any later shared server.
 
 Curator rights remain local to one vault. Resolving a competing correction
 changes ordinary state events in that vault and its replicas. Do not let a

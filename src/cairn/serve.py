@@ -45,6 +45,14 @@ def _request_client(server):
         client.vault.close()
 
 
+def _server_sync_cursor(vault, peer: str, direction: str, token_id: str) -> int:
+    cursor = vault.get_sync_cursor(peer, direction, token_id)
+    if cursor == 0 and token_id == "shared":
+        # Older shared-token servers persisted the empty token ID.
+        return vault.get_sync_cursor(peer, direction, "")
+    return cursor
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "cairn-sync/1"
 
@@ -69,8 +77,8 @@ class _Handler(BaseHTTPRequestHandler):
 
         token = getattr(self.server, "token", "")
         if not token:
-            return True, None, False, None
-        return hmac.compare_digest(authorization, f"Bearer {token}"), None, False, None
+            return True, None, False, "shared"
+        return hmac.compare_digest(authorization, f"Bearer {token}"), None, False, "shared"
 
     @staticmethod
     def _sync_pack_matches_agent(pack: dict, agent_id: str, curator: bool, client) -> bool:
@@ -166,7 +174,17 @@ class _Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if u.path == "/health":
             with _request_client(self.server) as client:
-                self._send(200, {"ok": True, "memories": client.vault.count()})
+                authorized, _agent_id, _curator, token_id = self._authorize(client)
+                identity = client.vault.vault_identity
+                result = {"ok": True, "memories": client.vault.count()}
+                if authorized:
+                    result.update({
+                        "vault_id": identity.vault_id,
+                        "vault_name": identity.name,
+                        "origin_id": client.vault.sync_origin_id(),
+                        "token_id": token_id,
+                    })
+                self._send(200, result)
             return
         if u.path == "/pull":
             qs = parse_qs(u.query)
@@ -184,14 +202,15 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send(400, {"error": "cursor cannot be negative"})
                     return
                 peer_identity = self.headers.get("X-Cairn-Peer") or "anonymous"
-                peer = f"{token_id}:{peer_identity}" if token_id else peer_identity
-                if after > client.vault.get_sync_cursor(peer, "pull"):
+                if after > _server_sync_cursor(client.vault, peer_identity, "pull", token_id):
                     self._send(409, {"error": "requested cursor is ahead of the saved peer cursor"})
                     return
                 pack = client.export_delta(after)
                 with client.vault.transaction():
-                    client.vault.set_sync_cursor(peer, "pull", pack["cursor"],
-                                                 int(pack["exported_at"]))
+                    client.vault.set_sync_cursor(
+                        peer_identity, "pull", pack["cursor"], int(pack["exported_at"]),
+                        token_id,
+                    )
                 self._send(200, pack)
             return
         self._send(404, {"error": "not found"})
@@ -250,16 +269,18 @@ class _Handler(BaseHTTPRequestHandler):
                             self._send(400, {"error": "invalid sync pack cursor"})
                             return
                         peer_identity = pack.get("origin_id", "anonymous")
-                        peer = f"{token_id}:{peer_identity}" if token_id else peer_identity
-                        if after > client.vault.get_sync_cursor(peer, "push"):
+                        if after > _server_sync_cursor(
+                            client.vault, peer_identity, "push", token_id,
+                        ):
                             self._send(409, {"error": "pushed cursor skips events"})
                             return
                     out = client.import_pack(pack)
                     peer_identity = pack.get("origin_id", "anonymous")
-                    peer = f"{token_id}:{peer_identity}" if token_id else peer_identity
                     if pack.get("pack") == "cairn-sync-2":
-                        client.vault.set_sync_cursor(peer, "push", int(pack["cursor"]),
-                                                     int(pack.get("exported_at", 0)))
+                        client.vault.set_sync_cursor(
+                            peer_identity, "push", int(pack["cursor"]),
+                            int(pack.get("exported_at", 0)), token_id,
+                        )
             except ValueError as e:  # cross-space pack
                 self._send(400, {"error": str(e)})
                 return
@@ -345,10 +366,31 @@ def pull_from(base_url: str, token: str = "", since: int | None = None,
         return json.load(resp)
 
 
-def health_from(base_url: str, cafile: str | None = None) -> dict:
-    req = urlrequest.Request(base_url.rstrip("/") + "/health")
+def health_from(base_url: str, cafile: str | None = None, token: str = "") -> dict:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    req = urlrequest.Request(base_url.rstrip("/") + "/health", headers=headers)
     with urlrequest.urlopen(req, timeout=10, context=_client_context(base_url, cafile)) as resp:
         return json.load(resp)
+
+
+def sync_handshake(base_url: str, vault_id: str, token: str = "",
+                   cafile: str | None = None) -> dict:
+    """Validate a peer's vault and token identity before starting a sync exchange."""
+    peer = health_from(base_url, cafile=cafile, token=token)
+    if peer.get("ok") is not True:
+        raise ValueError("sync peer health check failed")
+    peer_vault_id = peer.get("vault_id")
+    if not isinstance(peer_vault_id, str) or not peer_vault_id:
+        raise ValueError("sync peer is missing its vault identity")
+    if peer_vault_id != vault_id:
+        raise ValueError("sync peer belongs to a different vault")
+    token_id = peer.get("token_id")
+    if not isinstance(token_id, str) or not token_id:
+        raise ValueError("sync peer did not identify the active token")
+    origin_id = peer.get("origin_id")
+    if not isinstance(origin_id, str) or not origin_id:
+        raise ValueError("sync peer did not identify its vault replica")
+    return peer
 
 
 def push_to(base_url: str, pack: dict, token: str = "", cafile: str | None = None) -> dict:

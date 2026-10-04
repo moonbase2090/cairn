@@ -379,11 +379,17 @@ class CairnClient:
     def export_delta(self, after: int = 0) -> dict:
         pack = self.vault.export_sync_events(after)
         pack.update({"embed_model": self.embedder.name, "dims": self.embedder.dims,
-                     "exported_at": now_epoch(), "origin_id": self.vault.sync_origin_id()})
+                     "exported_at": now_epoch(), "origin_id": self.vault.sync_origin_id(),
+                     "vault_id": self.vault.vault_identity.vault_id})
         return pack
 
     def import_sync_pack(self, pack: dict, peer: str | None = None,
-                         direction: str = "pull") -> dict:
+                         direction: str = "pull", token_id: str = "") -> dict:
+        incoming_vault_id = pack.get("vault_id") if isinstance(pack, dict) else None
+        if not isinstance(incoming_vault_id, str) or not incoming_vault_id:
+            raise ValueError("sync pack is missing its vault identity")
+        if incoming_vault_id != self.vault.vault_identity.vault_id:
+            raise ValueError("sync pack belongs to a different vault")
         if (not isinstance(pack, dict) or pack.get("pack") != "cairn-sync-2"
                 or not isinstance(pack.get("events"), list)
                 or "embed_model" not in pack or "dims" not in pack):
@@ -398,7 +404,7 @@ class CairnClient:
                 or not isinstance(cursor, int) or isinstance(cursor, bool)
                 or after < 0 or cursor < after):
             raise ValueError("invalid sync pack cursor")
-        saved_cursor = self.vault.get_sync_cursor(peer, direction) if peer is not None else 0
+        saved_cursor = self.vault.get_sync_cursor(peer, direction, token_id) if peer is not None else 0
         if peer is not None and after > saved_cursor:
             raise ValueError("sync pack starts after the saved peer cursor")
         previous = after
@@ -457,7 +463,9 @@ class CairnClient:
                 counts[result] += 1
             self.vault.record_competing_corrections(now_epoch())
             if peer is not None:
-                self.vault.set_sync_cursor(peer, direction, max(saved_cursor, cursor), now_epoch())
+                self.vault.set_sync_cursor(
+                    peer, direction, max(saved_cursor, cursor), now_epoch(), token_id,
+                )
         counts["cursor"] = max(saved_cursor, cursor)
         counts["conflicts"] = len(self.vault.list_sync_conflicts())
         self._audit("sync_import", counts)
@@ -468,7 +476,9 @@ class CairnClient:
         cursors = self.vault.list_sync_cursors()
         if peer is not None:
             cursors = [item for item in cursors if item["peer"] == peer]
-        return {"origin_id": self.vault.sync_origin_id(), "cursors": cursors,
+        identity = self.vault.vault_identity
+        return {"origin_id": self.vault.sync_origin_id(), "vault_id": identity.vault_id,
+                "vault_name": identity.name, "cursors": cursors,
                 "conflicts": self.vault.list_sync_conflicts()}
 
     def resolve_competing_correction(self, base_key: str, winner_key: str,

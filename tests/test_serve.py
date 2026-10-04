@@ -5,20 +5,27 @@ import shutil
 import subprocess
 import urllib.error
 import urllib.request
+from types import SimpleNamespace
 
 import pytest
 
 from cairn import cli
 from cairn.client import CairnClient
 from cairn.embed import HashEmbedder
-from cairn.serve import pull_from, push_to, start_background
+from cairn.serve import pull_from, push_to, start_background, sync_handshake
 from cairn.storage import MemoryQuery
 from cairn.store import Vault
+from cairn.vault_identity import VaultIdentity
 
 
 def make_client(db_path, agent="test"):
     emb = HashEmbedder()
-    return CairnClient(Vault(db_path, emb.name, emb.dims, create=True), agent, emb)
+    vault = Vault(db_path, emb.name, emb.dims, create=True)
+    vault._set_meta("vault_id", "shared-serve-test-vault")
+    vault._set_meta("vault_name", "serve-test")
+    vault.conn.commit()
+    vault._vault_identity = VaultIdentity("shared-serve-test-vault", "serve-test")
+    return CairnClient(vault, agent, emb)
 
 
 def add_server_token(client, token_id, raw_token, agent_id, curator=False):
@@ -61,6 +68,99 @@ def test_server_rejects_push_that_skips_the_saved_peer_cursor(tmp_path):
             push_to(url, pack)
         assert rejected.value.code == 409
         assert server.vault.count() == 0
+    finally:
+        srv.shutdown()
+
+
+def _cursor_value(vault, peer, direction, token_id):
+    return vault.get_sync_cursor(peer, direction, token_id)
+
+
+def _replace_shared_cursor_with_legacy_empty_token(vault, peer, direction, cursor):
+    vault.conn.execute(
+        "DELETE FROM sync_cursors WHERE peer=? AND direction=? AND token_id='shared'",
+        (peer, direction),
+    )
+    vault.conn.commit()
+    vault.set_sync_cursor(peer, direction, cursor, 1, "")
+
+
+def test_cli_sync_uses_replica_peer_and_shared_token_cursors(tmp_path, capsys):
+    source = make_client(tmp_path / "source" / "vault.db", "source-agent")
+    source.store_memory("first shared-token sync fact", team_id="t", task_id="sync")
+    server = make_client(tmp_path / "server" / "vault.db", "server-agent")
+    server.store_memory("server starts with an event", team_id="t", task_id="sync")
+    srv = start_background(server, token="shared-secret")
+    args = SimpleNamespace(
+        url=f"http://127.0.0.1:{srv.server_address[1]}", token="shared-secret",
+        tls_ca=None, json=True, since=None, out=None,
+    )
+    try:
+        # Older clients keyed local cursors by URL; replay from zero on upgrade.
+        source.vault.set_sync_cursor(args.url, "push", 999, 1, "shared")
+        source.vault.set_sync_cursor(args.url, "pull", 999, 1, "shared")
+        handshake = sync_handshake(args.url, source.vault.vault_identity.vault_id,
+                                   token=args.token)
+        source_origin = source.vault.sync_origin_id()
+        server_origin = server.vault.sync_origin_id()
+        assert handshake["origin_id"] == server_origin
+        assert handshake["token_id"] == "shared"
+
+        assert cli._cmd_push(args, source) == 0
+        capsys.readouterr()
+        pushed = _cursor_value(source.vault, server_origin, "push", "shared")
+        assert pushed > 0
+        assert _cursor_value(server.vault, source_origin, "push", "shared") == pushed
+
+        assert cli._cmd_pull(args, source) == 0
+        capsys.readouterr()
+        pulled = _cursor_value(source.vault, server_origin, "pull", "shared")
+        assert pulled > 0
+        assert _cursor_value(server.vault, source_origin, "pull", "shared") == pulled
+
+        # A pre-sentinel server cursor remains resumable when upgraded.
+        _replace_shared_cursor_with_legacy_empty_token(
+            server.vault, source_origin, "push", pushed,
+        )
+        source.store_memory("incremental shared-token sync fact", team_id="t", task_id="sync")
+        assert cli._cmd_push(args, source) == 0
+        capsys.readouterr()
+        pushed = _cursor_value(source.vault, server_origin, "push", "shared")
+        assert _cursor_value(server.vault, source_origin, "push", "shared") == pushed
+
+        _replace_shared_cursor_with_legacy_empty_token(
+            server.vault, source_origin, "pull", pulled,
+        )
+        server.store_memory("incremental server sync fact", team_id="t", task_id="sync")
+        assert cli._cmd_pull(args, source) == 0
+        capsys.readouterr()
+        pulled = _cursor_value(source.vault, server_origin, "pull", "shared")
+        assert _cursor_value(server.vault, source_origin, "pull", "shared") == pulled
+        assert source.vault.get_sync_cursor(args.url, "push", "shared") == 999
+        assert source.vault.get_sync_cursor(args.url, "pull", "shared") == 999
+    finally:
+        srv.shutdown()
+
+
+def test_sync_handshake_and_push_reject_a_different_vault(tmp_path):
+    source = make_client(tmp_path / "source" / "vault.db", "source-agent")
+    source.vault._set_meta("vault_id", "different-serve-vault")
+    source.vault._set_meta("vault_name", "different")
+    source.vault.conn.commit()
+    source.vault._vault_identity = VaultIdentity("different-serve-vault", "different")
+    source.store_memory("This pack must not cross vaults.", team_id="t", task_id="sync")
+
+    server = make_client(tmp_path / "server" / "vault.db", "server-agent")
+    srv = start_background(server)
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        with pytest.raises(ValueError, match="different vault"):
+            sync_handshake(url, source.vault.vault_identity.vault_id)
+        with pytest.raises(urllib.error.HTTPError) as rejected:
+            push_to(url, source.export_delta())
+        assert rejected.value.code == 400
+        assert server.vault.count() == 0
+        assert server.vault.list_sync_cursors() == []
     finally:
         srv.shutdown()
 
