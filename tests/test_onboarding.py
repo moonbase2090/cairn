@@ -89,6 +89,16 @@ def test_bootstrap_adds_named_vault_entry_without_replacing_others(tmp_path, mon
     assert servers["other"] == existing
     assert servers["cairn-personal"]["env"]["CAIRN_DIR"] == str(vault.resolve())
 
+    named_entry = servers["cairn-personal"]
+    rc, out, _ = run([
+        "bootstrap", "--name", "cairn-personal", "--no-seed", "--json",
+    ], capsys)
+
+    assert rc == 0 and json.loads(out)["mcp_server_name"] == "cairn-personal"
+    servers = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]
+    assert servers["other"] == existing
+    assert servers["cairn-personal"] == named_entry
+
 
 def test_bootstrap_name_collision_fails_before_changing_project_or_config(tmp_path, monkeypatch, capsys):
     vault = tmp_path / ".cairn"
