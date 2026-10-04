@@ -70,7 +70,10 @@ def test_push_uses_configured_aws_sync_endpoint(monkeypatch, tmp_path, capsys):
         lambda _vdir: SimpleNamespace(sync_endpoint="https://configured.example.com"),
     )
     monkeypatch.setattr(cli, "_open_client", lambda _args: SyncClient())
-    monkeypatch.setattr(cli, "sync_handshake", lambda *args, **kwargs: {"token_id": "ct-peer"})
+    monkeypatch.setattr(
+        cli, "sync_handshake",
+        lambda *args, **kwargs: {"token_id": "ct-peer", "origin_id": "remote-origin"},
+    )
     calls = []
     monkeypatch.setattr(
         cli, "push_to",
