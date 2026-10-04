@@ -208,7 +208,7 @@ inserts snapshots at [`client.py:373`](../../src/cairn/client.py#L373);
 `import_sync_pack` applies events at [`store.py:887`](../../src/cairn/store.py#L887)
 and [`postgres.py:609`](../../src/cairn/postgres.py#L609). Document ingestion
 chunks then batch-embeds before its call to `store_memory()` at
-[`ingest.py:95`](../../src/cairn/ingest.py#L95). Apply the same contract to
+[`ingest.py:97`](../../src/cairn/ingest.py#L97). Apply the same contract to
 future cloud writes.
 
 Start with three detector families:
