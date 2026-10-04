@@ -207,8 +207,9 @@ and [`client.py:165`](../../src/cairn/client.py#L165); [`import_pack`](../../src
 inserts snapshots at [`client.py:373`](../../src/cairn/client.py#L373);
 `import_sync_pack` applies events at [`store.py:911`](../../src/cairn/store.py#L911)
 and [`postgres.py:607`](../../src/cairn/postgres.py#L607). Document ingestion
-chunks then batch-embeds before its call to `store_memory()` at
-[`ingest.py:97`](../../src/cairn/ingest.py#L97). Apply the same contract to
+scans each chunk before batch embedding at [`ingest.py:91-92`](../../src/cairn/ingest.py#L91),
+then calls `store_memory()` at [`ingest.py:104`](../../src/cairn/ingest.py#L104).
+Apply the same contract to
 future cloud writes.
 
 Start with three detector families:
