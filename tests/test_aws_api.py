@@ -8,6 +8,8 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 LAMBDA_DIR = Path(__file__).resolve().parents[1] / "aws" / "infra" / "lambda"
 sys.path.insert(0, str(LAMBDA_DIR))
 authorizer = importlib.import_module("authorizer")
@@ -225,3 +227,173 @@ def test_search_validates_vector_dimensions_and_returns_vault_identity():
     }
     assert vault.query == ([1.0, 0.0, 0.0], 2, "active", None)
     assert invalid["statusCode"] == 400
+
+
+@pytest.mark.parametrize(
+    "payload,expected_status",
+    [
+        ({"vector": "1,0,0"}, 400),
+        ({"vector": [1, 0]}, 400),
+        ({"vector": [True, 0, 0]}, 400),
+        ({"vector": ["1", 0, 0]}, 400),
+        ({"vector": [float("inf"), 0, 0]}, 400),
+        ({"vector": [float("nan"), 0, 0]}, 400),
+        ({"vector": [10**400, 0, 0]}, 400),
+        ({"vector": [1, 0, 0], "limit": True}, 400),
+        ({"vector": [1, 0, 0], "limit": 0}, 400),
+        ({"vector": [1, 0, 0], "limit": 21}, 400),
+        ({"vector": [1, 0, 0], "status": "missing"}, 400),
+        ({"vector": [1, 0, 0], "filters": []}, 400),
+        ({"vector": [1, 0, 0], "filters": {"unknown": "x"}}, 400),
+        ({"vector": [1, 0, 0], "filters": {"team_id": 1}}, 400),
+    ],
+)
+def test_search_rejects_invalid_vector_and_query_options(payload, expected_status):
+    response = sync_api.handle_request(
+        event("/search", "POST", body=payload), fake_client(),
+        endpoint_origin_id=f"aws-{VAULT_ID}", embed_dims=3,
+    )
+
+    assert response["statusCode"] == expected_status
+
+
+@pytest.mark.parametrize(
+    "query,headers,expected_status",
+    [
+        ({"after": "bad"}, {"x-cairn-peer": "peer"}, 400),
+        ({"limit": "bad"}, {"x-cairn-peer": "peer"}, 400),
+        ({"after": "-1"}, {"x-cairn-peer": "peer"}, 400),
+        ({"limit": "0"}, {"x-cairn-peer": "peer"}, 400),
+        ({"limit": "101"}, {"x-cairn-peer": "peer"}, 400),
+        ({}, {}, 400),
+        ({}, {"X-Cairn-Peer": ""}, 400),
+        ({"after": "11"}, {"x-cairn-peer": "agent-b-origin"}, 409),
+    ],
+)
+def test_pull_rejects_invalid_cursors_limits_and_peer_headers(query, headers, expected_status):
+    response = sync_api.handle_request(
+        event("/pull", "GET", headers=headers, query=query), fake_client(),
+        endpoint_origin_id=f"aws-{VAULT_ID}", embed_dims=3, exported_at=123,
+    )
+
+    assert response["statusCode"] == expected_status
+
+
+def test_pull_accepts_raw_query_string_and_drops_events_to_fit_response(monkeypatch):
+    vault = FakeVault()
+    vault.events = [
+        {"event_id": "a:1", "feed_seq": 1, "content": "x" * 200},
+        {"event_id": "a:2", "feed_seq": 2, "content": "y" * 200},
+    ]
+    request = event("/pull", "GET", headers={"x-cairn-peer": "agent-b-origin"})
+    request["rawQueryString"] = "after=0&after=0&limit=5"
+    monkeypatch.setattr(sync_api, "MAX_RESPONSE_BYTES", 550)
+
+    response = sync_api.handle_request(
+        request, fake_client(vault), endpoint_origin_id=f"aws-{VAULT_ID}",
+        embed_dims=3, exported_at=123,
+    )
+
+    assert response["statusCode"] == 200
+    pack = response_body(response)
+    assert [item["feed_seq"] for item in pack["events"]] == [1]
+    assert pack["cursor"] == 1
+    assert vault.cursor_writes[-1][2] == 1
+
+
+def test_pull_rejects_a_single_event_larger_than_the_response_limit(monkeypatch):
+    vault = FakeVault()
+    vault.events = [{"event_id": "a:1", "feed_seq": 1, "content": "x" * 1000}]
+    monkeypatch.setattr(sync_api, "MAX_RESPONSE_BYTES", 250)
+
+    response = sync_api.handle_request(
+        event("/pull", "GET", headers={"x-cairn-peer": "agent-b-origin"}),
+        fake_client(vault), endpoint_origin_id=f"aws-{VAULT_ID}", embed_dims=3,
+        exported_at=123,
+    )
+
+    assert response["statusCode"] == 413
+    assert "one sync event" in response_body(response)["error"]
+    assert vault.cursor_writes == []
+
+
+@pytest.mark.parametrize(
+    "pack,expected_status",
+    [
+        ({"origin_id": ""}, 400),
+        ({"origin_id": "x" * 129}, 400),
+        ({"origin_id": "ok", "after": 1, "events": []}, 409),
+    ],
+)
+def test_push_rejects_invalid_origin_and_skipped_cursor(pack, expected_status):
+    response = sync_api.handle_request(
+        event("/push", "POST", body=pack), fake_client(),
+        endpoint_origin_id=f"aws-{VAULT_ID}", embed_dims=3,
+    )
+
+    assert response["statusCode"] == expected_status
+
+
+def test_push_rejects_invalid_json_and_inconsistent_authorizer_metadata():
+    invalid_json = event("/push", "POST")
+    invalid_json["body"] = "{"
+    bad_caller = event("/health", "GET", caller={**CALLER, "vault_id": "f" * 32})
+    bad_dims = event("/health", "GET")
+
+    assert sync_api.handle_request(
+        invalid_json, fake_client(), endpoint_origin_id="origin", embed_dims=3,
+    )["statusCode"] == 400
+    assert sync_api.handle_request(
+        bad_caller, fake_client(), endpoint_origin_id="origin", embed_dims=3,
+    )["statusCode"] == 403
+    assert sync_api.handle_request(
+        bad_dims, fake_client(), endpoint_origin_id="origin", embed_dims=8,
+    )["statusCode"] == 500
+
+
+@pytest.mark.parametrize(
+    "body_fields",
+    [
+        {"body": 1},
+        {"body": "@@", "isBase64Encoded": True},
+        {"body": "not-json"},
+        {"body": "[]"},
+    ],
+)
+def test_request_body_validation_errors_are_returned_as_client_errors(body_fields):
+    event_data = event("/search", "POST")
+    event_data.update(body_fields)
+
+    response = sync_api.handle_request(
+        event_data, fake_client(), endpoint_origin_id="origin", embed_dims=3,
+    )
+
+    assert response["statusCode"] == 400
+
+
+def test_request_body_size_limit_and_route_errors_are_explicit(monkeypatch):
+    monkeypatch.setattr(sync_api, "MAX_REQUEST_BYTES", 3)
+    oversized = event("/search", "POST", body={"vector": [1, 2, 3]})
+    wrong_route = event("/unavailable", "GET")
+    no_path = event(None, "GET")
+    no_path.pop("rawPath")
+    no_path.pop("path", None)
+
+    assert sync_api.handle_request(
+        oversized, fake_client(), endpoint_origin_id="origin", embed_dims=3,
+    )["statusCode"] == 413
+    assert sync_api.handle_request(
+        wrong_route, fake_client(), endpoint_origin_id="origin", embed_dims=3,
+    )["statusCode"] == 404
+    assert sync_api.handle_request(
+        no_path, fake_client(), endpoint_origin_id="origin", embed_dims=3,
+    )["statusCode"] == 404
+
+
+def test_response_size_limit_replaces_an_oversized_payload(monkeypatch):
+    monkeypatch.setattr(sync_api, "MAX_RESPONSE_BYTES", 10)
+
+    response = sync_api._response(200, {"payload": "x" * 100})
+
+    assert response["statusCode"] == 413
+    assert response_body(response) == {"error": "response exceeds the sync API size limit"}

@@ -493,32 +493,18 @@ class AwsVault(StorageBackend):
             return None
         return np.frombuffer(bytes(item["embedding"]), dtype=np.float32).copy()
 
-    def _commit_remote_events(
-        self, events: list[dict], cursors: list[dict] | None = None,
-        conflicts: list[dict] | None = None,
-    ) -> None:
-        events = [
-            event for event in events
-            if not self._event_marker_exists(str(event.get("event_id", "")))
-        ]
-        cursors_by_peer: dict[tuple[str, str, str], dict] = {}
-        for cursor in cursors or []:
-            identity = (cursor["peer"], cursor["direction"], cursor["token_id"])
-            current = cursors_by_peer.get(identity)
-            if current is None or int(cursor["cursor"]) >= int(current["cursor"]):
-                cursors_by_peer[identity] = cursor
-        cursors = list(cursors_by_peer.values())
+    def _remote_event_rows(self, events: list[dict]) -> dict[str, tuple[dict, Mapping | None]]:
         latest: dict[str, tuple[dict, Mapping | None]] = {}
         for event in events:
             key = event.get("key")
             if not isinstance(key, str):
                 raise ValueError("AWS sync event is missing its memory key")
             cached = self._cache.get(key)
-            row = dict(cached) if cached is not None else None
-            latest[key] = (event, row)
-        counter = self._get_counter() if events else 0
+            latest[key] = (event, dict(cached) if cached is not None else None)
+        return latest
+
+    def _remote_event_actions(self, events: list[dict], counter: int) -> list[dict]:
         actions: list[dict] = []
-        vector_updates: list[tuple[dict, Mapping | None, bytes | None]] = []
         for offset, event in enumerate(events, start=1):
             seq = counter + offset
             event_payload = dict(event)
@@ -536,10 +522,9 @@ class AwsVault(StorageBackend):
                     snapshot.pop("content", None)
                     event_payload["contentObjectKey"] = content_object_key
             encoded_event = json.dumps(event_payload, separators=(",", ":"), default=str)
-            partition = self._event_partition(str(event["key"]))
-            shard = _shard(str(event["key"]))
+            key = str(event["key"])
             event_item = {
-                "PK": partition,
+                "PK": self._event_partition(key),
                 "SK": f"SEQ#{seq:020d}",
                 "recordType": "event",
                 "vault_id": self._identity.vault_id,
@@ -565,94 +550,101 @@ class AwsVault(StorageBackend):
                 }),
                 "ConditionExpression": "attribute_not_exists(PK)",
             }})
+        return actions
 
+    def _remote_tombstone_actions(self, key: str, event: dict) -> list[dict]:
+        existing = self._table.get_item(Key=self._memory_key(key), ConsistentRead=True).get("Item")
+        old_tombstone = self._table.get_item(
+            Key=self._tombstone_key(key), ConsistentRead=True,
+        ).get("Item")
+        revision = int(event.get("state_revision", 0))
+        origin = str(event.get("state_origin", event.get("origin_id", "")))
+        event_id = str(event.get("state_event_id", event["event_id"]))
+        condition = (
+            "attribute_not_exists(PK) OR #revision < :revision OR "
+            "(#revision = :revision AND #origin < :origin) OR "
+            "(#revision = :revision AND #origin = :origin AND #event <= :event)"
+        )
+        names = {"#revision": "state_revision", "#origin": "state_origin",
+                 "#event": "state_event_id"}
+        values = self._serialize({":revision": revision, ":origin": origin, ":event": event_id})
+        tombstone = {
+            **self._tombstone_key(key),
+            "recordType": "tombstone",
+            "vault_id": self._identity.vault_id,
+            "key": key,
+            "event_id": event["event_id"],
+            "state_revision": event.get("state_revision", 0),
+            "state_origin": event.get("state_origin", event.get("origin_id", "")),
+            "state_event_id": event.get("state_event_id", event["event_id"]),
+            "content_hash": (existing or old_tombstone or {}).get("content_hash"),
+            "contentObjectKey": (existing or old_tombstone or {}).get("contentObjectKey"),
+            "GSI0PK": f"VAULT#{self._identity.vault_id}#TOMBSTONE",
+            "GSI0SK": f"TOMBSTONE#{key}",
+        }
+        return [
+            {"Delete": {
+                "TableName": self._config.table,
+                "Key": self._serialize(self._memory_key(key)),
+                "ConditionExpression": condition,
+                "ExpressionAttributeNames": names,
+                "ExpressionAttributeValues": values,
+            }},
+            {"Put": {
+                **self._table_item(tombstone),
+                "ConditionExpression": condition,
+                "ExpressionAttributeNames": names,
+                "ExpressionAttributeValues": values,
+            }},
+        ]
+
+    def _remote_memory_action(self, key: str, event: dict, row: Mapping) -> tuple[dict, tuple[dict, Mapping, bytes]]:
+        full_content = self._cache.read_content(row)
+        content_hash = str(row["content_hash"])
+        content_key = self._content_object(content_hash, full_content)
+        cache_row = self._cache.conn.execute(
+            "SELECT embedding FROM memories WHERE key=?", (key,),
+        ).fetchone()
+        vector = bytes(cache_row["embedding"])
+        item = self._memory_item(row, vector, content_key)
+        action = {"Put": {
+            **self._table_item(item),
+            "ConditionExpression": (
+                "attribute_not_exists(PK) OR #revision < :revision OR "
+                "(#revision = :revision AND #origin < :origin) OR "
+                "(#revision = :revision AND #origin = :origin AND #event < :event)"
+            ),
+            "ExpressionAttributeNames": {
+                "#revision": "state_revision", "#origin": "state_origin",
+                "#event": "state_event_id",
+            },
+            "ExpressionAttributeValues": self._serialize({
+                ":revision": int(event.get("state_revision", item.get("state_revision", 1))),
+                ":origin": str(event.get("state_origin", event.get("origin_id", ""))),
+                ":event": str(event.get("state_event_id", event["event_id"])),
+            }),
+        }}
+        return action, (item, row, vector)
+
+    def _remote_state_actions(
+        self, latest: dict[str, tuple[dict, Mapping | None]],
+    ) -> tuple[list[dict], list[tuple[dict, Mapping | None, bytes | None]]]:
+        actions: list[dict] = []
+        vector_updates: list[tuple[dict, Mapping | None, bytes | None]] = []
         for key, (event, row) in latest.items():
             if event.get("kind") == "tombstone":
-                existing = self._table.get_item(Key=self._memory_key(key), ConsistentRead=True).get("Item")
-                old_tombstone = self._table.get_item(
-                    Key=self._tombstone_key(key), ConsistentRead=True,
-                ).get("Item")
-                tombstone = {
-                    **self._tombstone_key(key),
-                    "recordType": "tombstone",
-                    "vault_id": self._identity.vault_id,
-                    "key": key,
-                    "event_id": event["event_id"],
-                    "state_revision": event.get("state_revision", 0),
-                    "state_origin": event.get("state_origin", event.get("origin_id", "")),
-                    "state_event_id": event.get("state_event_id", event["event_id"]),
-                    "content_hash": (existing or old_tombstone or {}).get("content_hash"),
-                    "contentObjectKey": (existing or old_tombstone or {}).get("contentObjectKey"),
-                    "GSI0PK": f"VAULT#{self._identity.vault_id}#TOMBSTONE",
-                    "GSI0SK": f"TOMBSTONE#{key}",
-                }
-                actions.append({"Delete": {
-                    "TableName": self._config.table,
-                    "Key": self._serialize(self._memory_key(key)),
-                    "ConditionExpression": (
-                        "attribute_not_exists(PK) OR #revision < :revision OR "
-                        "(#revision = :revision AND #origin < :origin) OR "
-                        "(#revision = :revision AND #origin = :origin AND #event <= :event)"
-                    ),
-                    "ExpressionAttributeNames": {
-                        "#revision": "state_revision", "#origin": "state_origin",
-                        "#event": "state_event_id",
-                    },
-                    "ExpressionAttributeValues": self._serialize({
-                        ":revision": int(event.get("state_revision", 0)),
-                        ":origin": str(event.get("state_origin", event.get("origin_id", ""))),
-                        ":event": str(event.get("state_event_id", event["event_id"])),
-                    }),
-                }})
-                actions.append({"Put": {
-                    **self._table_item(tombstone),
-                    "ConditionExpression": (
-                        "attribute_not_exists(PK) OR #revision < :revision OR "
-                        "(#revision = :revision AND #origin < :origin) OR "
-                        "(#revision = :revision AND #origin = :origin AND #event <= :event)"
-                    ),
-                    "ExpressionAttributeNames": {
-                        "#revision": "state_revision", "#origin": "state_origin",
-                        "#event": "state_event_id",
-                    },
-                    "ExpressionAttributeValues": self._serialize({
-                        ":revision": int(event.get("state_revision", 0)),
-                        ":origin": str(event.get("state_origin", event.get("origin_id", ""))),
-                        ":event": str(event.get("state_event_id", event["event_id"])),
-                    }),
-                }})
+                actions.extend(self._remote_tombstone_actions(key, event))
                 vector_updates.append((dict(event), None, None))
                 continue
             if row is None:
                 raise ValueError("AWS sync event references a missing memory row")
-            full_content = self._cache.read_content(row)
-            content_hash = str(row["content_hash"])
-            content_key = self._content_object(content_hash, full_content)
-            cache_row = self._cache.conn.execute(
-                "SELECT embedding FROM memories WHERE key=?", (key,),
-            ).fetchone()
-            vector = bytes(cache_row["embedding"])
-            item = self._memory_item(row, vector, content_key)
-            final_event = event
-            actions.append({"Put": {
-                **self._table_item(item),
-                "ConditionExpression": (
-                    "attribute_not_exists(PK) OR #revision < :revision OR "
-                    "(#revision = :revision AND #origin < :origin) OR "
-                    "(#revision = :revision AND #origin = :origin AND #event < :event)"
-                ),
-                "ExpressionAttributeNames": {
-                    "#revision": "state_revision", "#origin": "state_origin",
-                    "#event": "state_event_id",
-                },
-                "ExpressionAttributeValues": self._serialize({
-                    ":revision": int(final_event.get("state_revision", item.get("state_revision", 1))),
-                    ":origin": str(final_event.get("state_origin", final_event.get("origin_id", ""))),
-                    ":event": str(final_event.get("state_event_id", final_event["event_id"])),
-                }),
-            }})
-            vector_updates.append((item, row, vector))
+            action, vector_update = self._remote_memory_action(key, event, row)
+            actions.append(action)
+            vector_updates.append(vector_update)
+        return actions, vector_updates
 
+    def _remote_cursor_actions(self, cursors: list[dict]) -> list[dict]:
+        actions = []
         for cursor in cursors:
             item = {
                 **self._cursor_key(cursor["peer"], cursor["direction"], cursor["token_id"]),
@@ -666,8 +658,15 @@ class AwsVault(StorageBackend):
                 "ExpressionAttributeNames": {"#cursor": "cursor"},
                 "ExpressionAttributeValues": self._serialize({":cursor": int(cursor["cursor"])}),
             }})
-        for conflict in {str(row.get("base_key", "")): row
-                         for row in (conflicts or []) if row.get("base_key")}.values():
+        return actions
+
+    def _remote_conflict_actions(self, conflicts: list[dict] | None) -> list[dict]:
+        actions = []
+        latest = {
+            str(row.get("base_key", "")): row
+            for row in (conflicts or []) if row.get("base_key")
+        }
+        for conflict in latest.values():
             conflict_item = {
                 "PK": f"VAULT#{self._identity.vault_id}#CONFLICTS",
                 "SK": f"BASE#{conflict['base_key']}",
@@ -679,35 +678,28 @@ class AwsVault(StorageBackend):
                 Key={"PK": conflict_item["PK"], "SK": conflict_item["SK"]},
                 ConsistentRead=True,
             ).get("Item")
-            if any(existing is None or existing.get(name) != value
-                   for name, value in conflict_item.items()
-                   if name not in {"PK", "SK"}):
+            changed = any(
+                existing is None or existing.get(name) != value
+                for name, value in conflict_item.items()
+                if name not in {"PK", "SK"}
+            )
+            if changed:
                 actions.append({"Put": self._table_item(conflict_item)})
-        if events:
-            actions.append({"Update": {
-                "TableName": self._config.table,
-                "Key": self._serialize(self._event_counter_key()),
-                "UpdateExpression": "SET #seq = :next",
-                "ConditionExpression": "attribute_not_exists(#seq) OR #seq = :previous",
-                "ExpressionAttributeNames": {"#seq": "seq"},
-                "ExpressionAttributeValues": self._serialize({":next": counter + len(events), ":previous": counter}),
-            }})
-        if not actions:
-            return
+        return actions
+
+    def _check_remote_transaction_limits(self, actions: list[dict]) -> None:
         if len(actions) > _DYNAMODB_ACTION_LIMIT:
             raise ValueError("AWS transaction exceeds the documented DynamoDB action limit")
-        put_items = [
-            action["Put"]["Item"] for action in actions if "Put" in action
-        ]
+        put_items = [action["Put"]["Item"] for action in actions if "Put" in action]
         item_sizes = [_item_size(item) for item in put_items]
         if any(size > 400 * 1024 for size in item_sizes):
             raise ValueError("AWS item exceeds the documented DynamoDB item-size limit")
         if sum(item_sizes) > _DYNAMODB_TRANSACTION_BYTES:
             raise ValueError("AWS transaction exceeds the documented DynamoDB size limit")
-        self._ddb.transact_write_items(
-            TransactItems=actions,
-            ClientRequestToken=uuid.uuid4().hex,
-        )
+
+    def _apply_remote_vector_updates(
+        self, vector_updates: list[tuple[dict, Mapping | None, bytes | None]],
+    ) -> None:
         for item, row, vector in vector_updates:
             try:
                 if row is None:
@@ -727,6 +719,46 @@ class AwsVault(StorageBackend):
             except Exception as error:
                 self._vector_projection_ok = False
                 self._vector_error = type(error).__name__
+
+    def _commit_remote_events(
+        self, events: list[dict], cursors: list[dict] | None = None,
+        conflicts: list[dict] | None = None,
+    ) -> None:
+        events = [
+            event for event in events
+            if not self._event_marker_exists(str(event.get("event_id", "")))
+        ]
+        cursors_by_peer: dict[tuple[str, str, str], dict] = {}
+        for cursor in cursors or []:
+            identity = (cursor["peer"], cursor["direction"], cursor["token_id"])
+            current = cursors_by_peer.get(identity)
+            if current is None or int(cursor["cursor"]) >= int(current["cursor"]):
+                cursors_by_peer[identity] = cursor
+        cursors = list(cursors_by_peer.values())
+        latest = self._remote_event_rows(events)
+        counter = self._get_counter() if events else 0
+        actions = self._remote_event_actions(events, counter)
+        state_actions, vector_updates = self._remote_state_actions(latest)
+        actions.extend(state_actions)
+        actions.extend(self._remote_cursor_actions(cursors))
+        actions.extend(self._remote_conflict_actions(conflicts))
+        if events:
+            actions.append({"Update": {
+                "TableName": self._config.table,
+                "Key": self._serialize(self._event_counter_key()),
+                "UpdateExpression": "SET #seq = :next",
+                "ConditionExpression": "attribute_not_exists(#seq) OR #seq = :previous",
+                "ExpressionAttributeNames": {"#seq": "seq"},
+                "ExpressionAttributeValues": self._serialize({":next": counter + len(events), ":previous": counter}),
+            }})
+        if not actions:
+            return
+        self._check_remote_transaction_limits(actions)
+        self._ddb.transact_write_items(
+            TransactItems=actions,
+            ClientRequestToken=uuid.uuid4().hex,
+        )
+        self._apply_remote_vector_updates(vector_updates)
 
     def insert(self, rec: dict, vector: np.ndarray) -> int:
         from .secret_scan import scan_content
@@ -917,6 +949,7 @@ class AwsVault(StorageBackend):
                 token = page.get("NextContinuationToken")
                 if not token:
                     break
+        return removed
 
     def _delete_object_versions(self, key: str) -> None:
         markers: dict[str, str] = {}

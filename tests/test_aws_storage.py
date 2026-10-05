@@ -108,6 +108,7 @@ class FakeS3:
     def __init__(self, aws):
         self.aws = aws
         self.objects: dict[str, bytes] = {}
+        self.deleted_batches: list[list[dict]] = []
 
     def head_object(self, *, Key, **_kwargs):
         self.aws.ensure_online()
@@ -140,6 +141,7 @@ class FakeS3:
         }
 
     def delete_objects(self, *, Delete, **_kwargs):
+        self.deleted_batches.append(deepcopy(Delete["Objects"]))
         for item in Delete["Objects"]:
             self.objects.pop(item["Key"], None)
         return {}
@@ -149,6 +151,8 @@ class FakeVectors:
     def __init__(self, aws):
         self.aws = aws
         self.vectors: dict[str, dict] = {}
+        self.query_pages: list[dict] = []
+        self.query_calls: list[dict] = []
 
     def put_vectors(self, *, vectors, **_kwargs):
         self.aws.ensure_online()
@@ -166,6 +170,10 @@ class FakeVectors:
             {"key": key, "data": self.vectors[key]["data"]}
             for key in keys if key in self.vectors
         ]}
+
+    def query_vectors(self, **kwargs):
+        self.query_calls.append(kwargs)
+        return self.query_pages.pop(0) if self.query_pages else {"vectors": []}
 
 
 class FakeAws:
@@ -427,3 +435,290 @@ def test_migration_preflight_reports_only_secret_categories(tmp_path):
     assert result["findings"]["GitHub token"] >= 1
     assert secret not in str(result)
     source.close()
+
+
+def test_sqlite_migration_rejects_backend_and_identity_mismatches():
+    source = type("Source", (), {"name": "aws", "vault_identity": VaultIdentity(VAULT_ID, "work-vault")})()
+    destination = type("Destination", (), {"name": "aws", "vault_identity": source.vault_identity})()
+    with pytest.raises(ValueError, match="SQLite source and AWS destination"):
+        _migrate_sqlite_to_aws(source, destination)
+
+    source.name = "sqlite"
+    destination.vault_identity = VaultIdentity("f" * 32, "other-vault")
+    with pytest.raises(ValueError, match="identities do not match"):
+        _migrate_sqlite_to_aws(source, destination)
+
+
+def test_migration_skips_a_memory_that_already_exists_in_aws():
+    row = _memory()
+
+    class QueryResult:
+        def fetchall(self):
+            return []
+
+    source = type("Source", (), {
+        "name": "sqlite", "vault_identity": VaultIdentity(VAULT_ID, "work-vault"),
+        "conn": type("Connection", (), {"execute": lambda *_args: QueryResult()})(),
+        "export_sync_events": lambda _self, *, after, limit: {"events": [], "cursor": after},
+        "iter_memories": lambda _self: [row],
+        "list_sync_cursors": lambda _self: [],
+        "list_sync_conflicts": lambda _self, *, include_resolved: [],
+    })()
+    destination = type("Destination", (), {
+        "name": "aws", "vault_identity": source.vault_identity,
+        "apply_sync_event": lambda *_args: None,
+        "get": lambda _self, key: row if key == row["key"] else None,
+        "_memory_items": lambda _self: [{"key": row["key"], "content_hash": row["content_hash"]}],
+        "vec_status": lambda _self: {"vec_in_sync": True},
+    })()
+
+    result = _migrate_sqlite_to_aws(source, destination)
+
+    assert result == {"memories": 1, "events": 0, "cursors": 0, "tokens": 0, "conflicts": 0}
+
+
+def test_migration_copies_a_memory_and_its_local_embedding_when_event_copy_did_not(
+    monkeypatch,
+):
+    row = _memory() | {"state_revision": 1, "state_origin": "local", "state_event_id": ""}
+    embedding = np.asarray([0.25, 0.5, 0.75], dtype=np.float32).tobytes()
+
+    class QueryResult:
+        def fetchone(self):
+            return {"embedding": embedding}
+
+        def fetchall(self):
+            return []
+
+    source = type("Source", (), {
+        "name": "sqlite", "vault_identity": VaultIdentity(VAULT_ID, "work-vault"),
+        "conn": type("Connection", (), {"execute": lambda *_args: QueryResult()})(),
+        "export_sync_events": lambda _self, *, after, limit: {"events": [], "cursor": after},
+        "iter_memories": lambda _self: [row],
+        "read_content": lambda _self, _row: "durable text",
+        "list_sync_cursors": lambda _self: [],
+        "list_sync_conflicts": lambda _self, *, include_resolved: [],
+    })()
+    inserted = []
+    destination = type("Destination", (), {
+        "name": "aws", "vault_identity": source.vault_identity,
+        "apply_sync_event": lambda *_args: None,
+        "get": lambda *_args: None,
+        "insert": lambda _self, record, vector: inserted.append((record, vector.copy())),
+        "set_sync_cursor": lambda *_args: None,
+        "get_server_token": lambda *_args: None,
+        "create_server_token": lambda *_args: None,
+        "_table": type("Table", (), {"put_item": lambda *_args, **_kwargs: None})(),
+        "_memory_items": lambda _self: [{
+            "key": row["key"], "content_hash": row["content_hash"],
+        }],
+        "vec_status": lambda _self: {"vec_in_sync": True},
+    })()
+
+    result = _migrate_sqlite_to_aws(source, destination)
+
+    assert result["memories"] == 1
+    assert len(inserted) == 1
+    assert inserted[0][0]["content"] == "durable text"
+    assert inserted[0][0]["state_event_id"] == ""
+    assert inserted[0][1].tolist() == [0.25, 0.5, 0.75]
+
+
+def test_remote_tombstone_commit_updates_dedupe_feed_and_vector_state(tmp_path):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    key = "mem_agent-a_removed_1"
+    aws.vectors.vectors[key] = {"key": key, "data": {"float32": [1, 0, 0]}}
+    event = {
+        "event_id": "peer:2", "kind": "tombstone", "key": key,
+        "state_revision": 2, "state_origin": "peer", "state_event_id": "peer:2",
+    }
+
+    vault._commit_remote_events([event])
+
+    tombstone = next(item for item in aws.items.values() if item.get("recordType") == "tombstone")
+    assert tombstone["key"] == key
+    assert tombstone["state_revision"] == 2
+    assert key not in aws.vectors.vectors
+    assert aws.items[(f"VAULT#{VAULT_ID}#META", "SYNC_COUNTER")]["seq"] == 1
+    vault.close()
+
+
+def test_remote_commit_deduplicates_cursors_and_conflicts_idempotently(tmp_path):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    cursors = [
+        {"peer": "peer", "direction": "pull", "token_id": "token", "cursor": 3},
+        {"peer": "peer", "direction": "pull", "token_id": "token", "cursor": 8},
+    ]
+    conflicts = [
+        {"base_key": "base", "winner": "old"},
+        {"base_key": "base", "winner": "new"},
+        {"winner": "ignored"},
+    ]
+
+    vault._commit_remote_events([], cursors, conflicts)
+
+    saved = vault.get_sync_cursor("peer", "pull", "token")
+    row = aws.items[(f"VAULT#{VAULT_ID}#CONFLICTS", "BASE#base")]
+    assert saved == 8
+    assert row["winner"] == "new"
+    assert len(aws.transactions[-1]) == 2
+
+    vault._commit_remote_events([], cursors, conflicts[:2])
+    assert len(aws.transactions[-1]) == 1  # unchanged conflict is not rewritten
+    vault.close()
+
+
+@pytest.mark.parametrize(
+    "events,message",
+    [
+        ([{"event_id": "missing-key"}], "missing its memory key"),
+        ([{"event_id": "missing-row", "key": "mem_missing_1", "kind": "snapshot"}],
+         "references a missing memory row"),
+    ],
+)
+def test_remote_commit_rejects_events_that_cannot_be_materialized(tmp_path, events, message):
+    vault = _open(tmp_path, FakeAws())
+
+    with pytest.raises(ValueError, match=message):
+        vault._commit_remote_events(events)
+
+    assert not vault._ddb.transactions
+    vault.close()
+
+
+def test_remote_transaction_limits_cover_action_item_and_total_size_guards(tmp_path):
+    vault = _open(tmp_path, FakeAws())
+    with pytest.raises(ValueError, match="action limit"):
+        vault._check_remote_transaction_limits([
+            {"Put": {"Item": {"v": {"S": "x"}}}} for _ in range(101)
+        ])
+    with pytest.raises(ValueError, match="item-size limit"):
+        vault._check_remote_transaction_limits([
+            {"Put": {"Item": {"v": {"S": "x" * (400 * 1024)}}}},
+        ])
+    with pytest.raises(ValueError, match="DynamoDB size limit"):
+        vault._check_remote_transaction_limits([
+            {"Put": {"Item": {"v": {"S": "x" * 390_000}}}} for _ in range(11)
+        ])
+    vault.close()
+
+
+def test_vector_filter_includes_supported_filters_and_expiry_only_when_requested(tmp_path):
+    vault = _open(tmp_path, FakeAws())
+
+    assert vault._vector_filter("active", {"unknown": "ignored"}, None) == {"status": "active"}
+    assert vault._vector_filter(
+        "archived", {"team_id": "team", "memory_type": "semantic", "unknown": "ignored"}, 100,
+    ) == {
+        "$and": [
+            {"status": "archived"}, {"team_id": "team"}, {"memory_type": "semantic"},
+            {"$or": [{"expires_at": {"$exists": False}}, {"expires_at": {"$gt": 100}}]},
+        ],
+    }
+    vault.close()
+
+
+def test_knn_uses_paged_vector_results_and_filters_invalid_candidates(tmp_path, monkeypatch):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    valid = _memory()
+    expired = _memory("expired") | {"key": "mem_agent_expired_1", "expires_at": 1}
+    other_team = _memory("other team") | {"key": "mem_agent_other_1", "team_id": "other"}
+    archived = _memory("archived") | {"key": "mem_agent_archived_1", "status": "archived"}
+    rows = {row["key"]: row for row in (valid, expired, other_team, archived)}
+    monkeypatch.setattr(vault, "_refresh_cloud_events", lambda: True)
+    monkeypatch.setattr(vault, "get", lambda key: rows.get(key))
+    aws.vectors.query_pages = [
+        {"vectors": [
+            {"key": "absent", "distance": 0.01},
+            {"key": expired["key"], "distance": 0.02},
+            {"key": other_team["key"], "distance": 0.03},
+            {"key": archived["key"], "distance": 0.04},
+        ], "nextToken": "page-2"},
+        {"vectors": [{"key": valid["key"], "distance": 0.25}]},
+    ]
+
+    result = vault.knn(np.asarray([1, 0, 0]), 1, filters={"team_id": "team"}, now=2)
+
+    assert [(row["key"], distance) for row, distance in result] == [(valid["key"], 0.25)]
+    assert aws.vectors.query_calls[0]["filter"] == vault._vector_filter(
+        "active", {"team_id": "team"}, 2,
+    )
+    assert aws.vectors.query_calls[1]["nextToken"] == "page-2"
+    vault.close()
+
+
+def test_knn_handles_empty_queries_and_uses_local_fallback_when_vectors_are_unavailable(
+    tmp_path, monkeypatch,
+):
+    vault = _open(tmp_path, FakeAws())
+    vector = np.asarray([1, 0, 0], dtype=np.float32)
+    vault._cache.insert(_memory(), vector)
+    monkeypatch.setattr(vault, "_refresh_cloud_events", lambda: True)
+
+    assert vault.knn(vector, 0) == []
+    assert vault.knn(np.zeros(3, dtype=np.float32), 1) == []
+    vault._stale = True
+    stale = vault.knn(vector, 1)
+    assert stale and stale[0][0]["storage_stale"] is True
+    vault._stale = False
+    vault._vector_projection_ok = False
+    fallback = vault.knn(vector, 1)
+    assert fallback and fallback[0][0]["key"] == _memory()["key"]
+    assert "storage_stale" not in fallback[0][0].keys()
+    vault.close()
+
+
+def test_sweep_orphan_docs_preserves_referenced_content_and_removes_orphans(tmp_path, monkeypatch):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    content_prefix = f"{VAULT_ID}/content/"
+    event_prefix = f"{VAULT_ID}/events/content/"
+    referenced = content_prefix + "kept"
+    event_referenced = event_prefix + "kept"
+    orphan = content_prefix + "orphan"
+    event_orphan = event_prefix + "orphan"
+    aws.s3.objects.update({key: b"body" for key in (referenced, event_referenced, orphan, event_orphan)})
+    monkeypatch.setattr(vault, "_memory_items", lambda: [{"contentObjectKey": referenced}])
+    monkeypatch.setattr(
+        vault, "export_sync_events",
+        lambda *, after, limit: {
+            "events": [{"contentObjectKey": event_referenced}], "cursor": 1,
+        },
+    )
+
+    removed = vault.sweep_orphan_docs()
+
+    assert removed == 2
+    assert set(aws.s3.objects) == {referenced, event_referenced}
+    vault.close()
+
+
+def test_delete_object_versions_follows_version_markers_and_filters_other_keys(tmp_path, monkeypatch):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    key = f"{VAULT_ID}/content/object"
+    pages = [
+        {
+            "Versions": [{"Key": key, "VersionId": "v1"}, {"Key": key + "/child", "VersionId": "v0"}],
+            "DeleteMarkers": [{"Key": key, "VersionId": "marker"}],
+            "IsTruncated": True, "NextKeyMarker": key, "NextVersionIdMarker": "v1",
+        },
+        {"Versions": [{"Key": key, "VersionId": "v2"}], "IsTruncated": False},
+    ]
+    calls = []
+    monkeypatch.setattr(
+        aws.s3, "list_object_versions",
+        lambda **kwargs: calls.append(kwargs) or pages.pop(0),
+    )
+
+    vault._delete_object_versions(key)
+
+    assert calls[1]["KeyMarker"] == key
+    assert calls[1]["VersionIdMarker"] == "v1"
+    assert [entry["VersionId"] for batch in aws.s3.deleted_batches for entry in batch] == [
+        "v1", "marker", "v2",
+    ]
+    vault.close()
