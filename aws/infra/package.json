@@ -1,0 +1,21 @@
+{
+  "name": "cairn-aws-infrastructure",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "synth": "cdk synth",
+    "synth:mock": "cdk synth --context vaultId=0123456789abcdef0123456789abcdef --context vaultName=local-mock --context dimensions=384 --context region=us-west-2 --context embedModel=hash --context enableSyncEndpoint=false",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.272.0",
+    "constructs": "10.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.15",
+    "aws-cdk": "2.1144.0",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}

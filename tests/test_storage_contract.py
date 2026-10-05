@@ -7,7 +7,9 @@ must pass unchanged. Nothing in the contract may touch a database driver.
 from __future__ import annotations
 
 import os
+import tomllib
 import uuid
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -26,8 +28,9 @@ from cairn.storage import (
 )
 from cairn.store import Vault
 
-CONTRACT_BACKENDS = ["sqlite", "postgres"]
+CONTRACT_BACKENDS = ["sqlite", "postgres", "aws"]
 POSTGRES_URL = os.environ.get("CAIRN_TEST_POSTGRES_URL")
+AWS_CONFIG_PATH = os.environ.get("CAIRN_TEST_AWS_CONFIG")
 
 DIMS = 8
 EMBED = "contract-embed"
@@ -90,7 +93,16 @@ def interface_members():
 
 
 class TestStorageContract:
-    @pytest.fixture(params=CONTRACT_BACKENDS)
+    @pytest.fixture(params=[
+        pytest.param(
+            backend_name,
+            marks=pytest.mark.skipif(
+                backend_name == "aws" and not AWS_CONFIG_PATH,
+                reason="CAIRN_TEST_AWS_CONFIG is not set",
+            ),
+        )
+        for backend_name in CONTRACT_BACKENDS
+    ])
     def backend_name(self, request):
         return request.param
 
@@ -111,6 +123,17 @@ class TestStorageContract:
                 conn.execute(SQL("CREATE SCHEMA {}").format(Identifier(schema)))
             url = make_conninfo(POSTGRES_URL, options=f"-c search_path={schema},public")
             config = StorageConfig(backend=backend_name, url=url)
+        elif backend_name == "aws":
+            if not AWS_CONFIG_PATH:
+                pytest.skip("CAIRN_TEST_AWS_CONFIG is not set")
+            with Path(AWS_CONFIG_PATH).expanduser().open("rb") as config_file:
+                aws_config = tomllib.load(config_file).get("storage")
+            if not isinstance(aws_config, dict) or aws_config.get("backend") != "aws":
+                pytest.fail(
+                    "CAIRN_TEST_AWS_CONFIG must point to a TOML file with "
+                    "[storage] backend = 'aws'"
+                )
+            config = StorageConfig(**aws_config)
         else:
             config = StorageConfig(backend=backend_name)
 

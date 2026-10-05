@@ -66,6 +66,15 @@ TOOL_DEFS = [
     {"name": "cairn_secret_scan",
      "description": "Read-only preflight scan of existing vault content; returns category counts without content or memory identifiers.",
      "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "cairn_aws_storage",
+     "description": "Check AWS tool versions, preview an AWS plan, inspect deployment status, explicitly apply a reviewed plan, or tear down its stack while retaining vault data. Plan uses the configured AWS region unless you pass one. Apply and teardown require the exact confirmation phrase returned by a prior call. Credentials stay in the signed-in AWS CLI profile.",
+     "inputSchema": {"type": "object", "properties": {
+         "action": {"type": "string", "enum": ["check", "plan", "apply", "status", "teardown"]},
+         "region": {"type": "string", "description": "Optional region override; otherwise Cairn reads the selected AWS CLI profile's configured region."},
+         "profile": {"type": "string", "description": "Optional AWS CLI profile; defaults to the standard signed-in CLI identity."},
+         "enable_sync_endpoint": {"type": "boolean", "default": False, "description": "Opt in to a public API Gateway sync endpoint protected by per-agent Cairn tokens."},
+         "plan_id": {"type": "string"}, "confirm": {"type": "string"}},
+         "required": ["action"]}},
     {"name": "cairn_gc", "description": "Lifecycle sweep. Dry-run unless apply=true (promote stale superseded, delete archived/expired, circuit-breaker capped).",
      "inputSchema": {"type": "object", "properties": {"apply": {"type": "boolean", "default": False}}}},
     {"name": "cairn_export", "description": "Export a sync pack (merge it elsewhere with cairn_import).",
@@ -206,6 +215,12 @@ def _tool_secret_scan(client: CairnClient, _args: dict) -> str:
     return _dump(client.preflight_secret_scan())
 
 
+def _tool_aws_storage(client: CairnClient, args: dict) -> str:
+    from cairn.aws_control import run_action
+
+    return _dump(run_action(client, args))
+
+
 def _tool_gc(client: CairnClient, args: dict) -> str:
     return json.dumps(client.gc(dry_run=not bool(args.get("apply", False))), default=str)
 
@@ -230,7 +245,10 @@ def _tool_ingest(client: CairnClient, args: dict) -> str:
 
 def _tool_sync(client: CairnClient, args: dict) -> str:
     action = args.get("action")
-    url = args.get("url") or os.environ.get("CAIRN_URL")
+    from cairn.cli import storage_config
+
+    url = (args.get("url") or os.environ.get("CAIRN_URL")
+           or storage_config(client.vault.vault_dir).sync_endpoint)
     if action == "status":
         if not url:
             return _dump(client.sync_status())
@@ -455,6 +473,7 @@ _TOOLS = {
     "cairn_howto": _tool_howto,
     "cairn_whoami": _tool_whoami,
     "cairn_secret_scan": _tool_secret_scan,
+    "cairn_aws_storage": _tool_aws_storage,
     "cairn_gc": _tool_gc,
     "cairn_export": _tool_export,
     "cairn_import": _tool_import,

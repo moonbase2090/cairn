@@ -59,6 +59,8 @@ def _row_to_record(row, content: str | None, similarity: float | None = None) ->
         content_hash=row["content_hash"],
         distance=(1.0 - similarity) if similarity is not None else None,
         similarity=similarity,
+        storage_stale=(bool(row["storage_stale"])
+                       if "storage_stale" in row.keys() else False),
     )
 
 
@@ -71,7 +73,45 @@ class CairnClient:
 
     # -- internal ---------------------------------------------------------
     def _embed_one(self, text: str) -> np.ndarray:
-        return np.asarray(self.embedder.embed([text])[0], dtype=np.float32)
+        return self._embed_many([text])[0]
+
+    def _embed_many(self, texts: list[str]) -> np.ndarray:
+        if not texts:
+            return np.empty((0, self.embedder.dims), dtype=np.float32)
+        cache_get = getattr(self.vault, "get_embedding_cache", None)
+        cache_put = getattr(self.vault, "put_embedding_cache", None)
+        hashes = [f"sha256:{content_digest(text)}" for text in texts]
+        vectors: dict[str, np.ndarray] = {}
+        missing: dict[str, str] = {}
+        for text, digest in zip(texts, hashes):
+            if digest in vectors or digest in missing:
+                continue
+            cached = None
+            if cache_get is not None:
+                try:
+                    cached = cache_get(digest, self.embedder.name)
+                except Exception:
+                    cached = None
+            if cached is not None:
+                candidate = np.asarray(cached, dtype=np.float32)
+                if candidate.shape == (self.embedder.dims,):
+                    vectors[digest] = candidate
+                    continue
+            missing[digest] = text
+        if missing:
+            encoded = np.asarray(
+                self.embedder.embed(list(missing.values())), dtype=np.float32,
+            )
+            if encoded.shape != (len(missing), self.embedder.dims):
+                raise ValueError("embedder returned vectors with unexpected dimensions")
+            for (digest, text), vector in zip(missing.items(), encoded):
+                vectors[digest] = vector
+                if cache_put is not None:
+                    try:
+                        cache_put(digest, self.embedder.name, vector)
+                    except Exception:
+                        pass  # The cache is optional; memory writes remain authoritative.
+        return np.stack([vectors[digest] for digest in hashes]).astype(np.float32, copy=False)
 
     def _available_key(self, task_id: str, digest: str, first_version: int) -> tuple[str, int]:
         version = first_version

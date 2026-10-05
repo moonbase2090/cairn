@@ -100,25 +100,40 @@ def _config_storage(path: Path) -> StorageConfig | None:
     if not isinstance(storage, dict):
         # ValueError, not TypeError: the CLI and cairn-mcp report ValueErrors cleanly.
         raise ValueError(f"{path}: [storage] must be a table")  # noqa: TRY004
+    allowed = {
+        "backend", "url", "region", "profile", "vault_id", "vault_name", "table", "cache_table",
+        "content_bucket", "vector_bucket", "vector_index", "vector_index_arn", "sync_endpoint",
+    }
+    unknown = set(storage) - allowed
+    if unknown:
+        raise ValueError(f"{path}: unknown [storage] setting(s): {', '.join(sorted(unknown))}")
     backend = storage.get("backend")
     if backend is not None and not isinstance(backend, str):
         raise ValueError(f"{path}: [storage] backend must be a string")
-    url = storage.get("url")
-    if url is not None and not isinstance(url, str):
-        raise ValueError(f"{path}: [storage] url must be a string")
+    values = {key: storage.get(key) for key in allowed - {"backend"}}
+    for key, value in values.items():
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{path}: [storage] {key} must be a string")
     if backend is None:
-        if url is not None:
-            raise ValueError(f"{path}: [storage] url requires backend = 'postgres'")
+        configured = sorted(key for key, value in values.items() if value is not None)
+        if configured:
+            if configured == ["url"]:
+                raise ValueError(f"{path}: [storage] url requires backend = 'postgres'")
+            raise ValueError(f"{path}: [storage] {configured[0]} requires a backend setting")
         return None
     try:
-        return StorageConfig(backend=backend, url=url)
+        return StorageConfig(backend=backend, **values)
     except ValueError as e:
         raise ValueError(f"{path}: {e}") from e
 
 
 def storage_config(vdir: Path) -> StorageConfig:
-    """Use the vault's [storage] settings, then ~/.cairn/config.toml, then sqlite."""
-    for path in (vdir / "config.toml", Path.home() / ".cairn" / "config.toml"):
+    """Use vault settings, generated AWS settings, then the home config or SQLite."""
+    for path in (
+        vdir / "config.toml",
+        vdir / "aws" / "storage.toml",
+        Path.home() / ".cairn" / "config.toml",
+    ):
         config = _config_storage(path)
         if config is not None:
             return config
@@ -1197,12 +1212,18 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     args.json = as_json or args.json
+    def configured_sync_url() -> str | None:
+        try:
+            return storage_config(vault_dir(args)).sync_endpoint
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+
     if args.cmd in {"push", "pull"}:
-        args.url = args.url or os.environ.get("CAIRN_URL")
+        args.url = args.url or os.environ.get("CAIRN_URL") or configured_sync_url()
         if not args.url:
-            parser.error("push and pull need a server URL; pass one or set CAIRN_URL")
+            parser.error("push and pull need a server URL; pass one, set CAIRN_URL, or configure AWS sync_endpoint")
     if args.cmd == "sync" and args.sync_action == "status":
-        args.url = args.url or os.environ.get("CAIRN_URL")
+        args.url = args.url or os.environ.get("CAIRN_URL") or configured_sync_url()
     # explicit --agent-id only; captured BEFORE env/config pre-fill below
     flag_agent_id = args.agent_id
     if args.agent_id is None and args.cmd not in {"init", "skills"}:

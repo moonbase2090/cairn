@@ -99,7 +99,7 @@ def ingest_dir(client, team: str, path: str | Path, memory_type: str = "document
             pending.append((content, heading))
         if not pending:
             continue
-        vecs = client.embedder.embed([c for c, _h in pending])
+        vecs = client._embed_many([c for c, _h in pending])
         for (content, heading), vec in zip(pending, vecs):
             res = client.store_memory(
                 content, team_id=team, task_id=task_id, memory_type=memory_type,

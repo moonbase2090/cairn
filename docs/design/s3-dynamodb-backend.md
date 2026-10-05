@@ -38,7 +38,11 @@ DynamoDB items have a 400 KB size limit. S3 content objects avoid placing long m
 
 A client with AWS credentials can open the DynamoDB and S3 resources directly. Several clients can share one cloud vault this way. They do not need `cairn serve`; IAM grants replace the HTTP server's network boundary.
 
-Keep a Lambda endpoint for clients that should not receive direct database and bucket permissions. Put the endpoint behind an API Gateway HTTP API and a Lambda authorizer. The API implements `push`, `pull`, `health`, and vector search. Store only a digest of each Cairn agent token. Apply the ownership checks in [sync-updates.md](sync-updates.md).
+Keep the HTTP API off by default. Set `enable_sync_endpoint` to `true` in `cairn_aws_storage` plan input to include it in the reviewed plan. The stack then creates an API Gateway HTTP API, a sync Lambda, and a Lambda authorizer.
+
+The API exposes `GET /health`, `POST /push`, `GET /pull`, and `POST /search`. Push and pull use `cairn-sync-2` packs. Search accepts a query vector from the client, so the client does not need to send its text query to AWS. The endpoint URL appears in stack outputs and in the generated `[storage].sync_endpoint` setting. Cairn uses it for push, pull, and sync status unless `--url` or `CAIRN_URL` overrides it.
+
+The authorizer hashes each bearer token and makes a strongly consistent lookup at `VAULT#<vault_id>#TOKEN#<sha256>` in the memory table. It rejects missing, revoked, malformed, or other-vault token records. API Gateway does not cache authorizer results, so revocation takes effect on the next request. The sync Lambda applies the same per-agent event ownership checks as `cairn serve`. It also runs the secret scanner before importing event content. Search remains a shared-vault read for any active member token.
 
 A Lambda Function URL is another deploy option. `AWS_IAM` requires SigV4 signing, which suits AWS-native clients. `NONE` makes the URL internet-accessible and leaves token enforcement to the function. Do not expose a Function URL with `NONE` unless the deployment shows that exposure and the function checks every request. Read [Function URL auth modes](https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html) and [Function URL invocation](https://docs.aws.amazon.com/lambda/latest/dg/urls-invocation.html). API Gateway HTTP APIs are documented [here](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api.html).
 
@@ -55,10 +59,19 @@ A config contains resource names and a profile reference, not secret material:
 backend = "aws"
 region = "us-west-2"
 profile = "work"
-vault = "team-memory"
+vault_id = "0123456789abcdef0123456789abcdef"
+vault_name = "team-memory"
+table = "cairn-vault-0123456789abcdef0123456789abcdef-memory"
+cache_table = "cairn-vault-0123456789abcdef0123456789abcdef-embedding-cache"
+content_bucket = "example-content-bucket"
+vector_bucket = "cairn-vault-0123456789abcdef0123456789abcdef-vectors"
+vector_index = "cairn-vault-0123456789abcdef0123456789abcdef-index"
+vector_index_arn = "arn:aws:s3vectors:us-west-2:123456789012:bucket/example/index/example"
+# Present only when the AWS plan enabled the sync endpoint.
+sync_endpoint = "https://example.execute-api.us-west-2.amazonaws.com"
 ```
 
-Setup may fill in bucket, vector index, table, and endpoint names after it deploys them. Keep the local vault identity and audit log on disk as the `StorageBackend` contract requires.
+Setup fills in resource names after deployment. Keep the local vault identity and audit log on disk as the `StorageBackend` contract requires.
 
 ## Cache reads and migrate from SQLite
 
@@ -68,7 +81,7 @@ Migration copies every SQLite row, content document, and embedding, including no
 
 ## Show costs before deployment
 
-Report each billable resource and its pricing unit. The stack uses KMS, S3, S3 Vectors, DynamoDB, Lambda, and API Gateway. Link these current prices in the plan:
+Report each billable resource and its pricing unit. The stack uses KMS, S3, S3 Vectors, DynamoDB, Lambda, and EventBridge. Include API Gateway pricing only when the sync endpoint is enabled.
 
 - [S3 pricing](https://aws.amazon.com/s3/pricing/)
 - [DynamoDB pricing](https://aws.amazon.com/dynamodb/pricing/)

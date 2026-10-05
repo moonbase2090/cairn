@@ -61,6 +61,32 @@ def test_push_uses_environment_url_and_token(monkeypatch, capsys):
     )]
 
 
+def test_push_uses_configured_aws_sync_endpoint(monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv("CAIRN_URL", raising=False)
+    monkeypatch.delenv("CAIRN_TOKEN", raising=False)
+    monkeypatch.setattr(cli, "vault_dir", lambda _args: tmp_path)
+    monkeypatch.setattr(
+        cli, "storage_config",
+        lambda _vdir: SimpleNamespace(sync_endpoint="https://configured.example.com"),
+    )
+    monkeypatch.setattr(cli, "_open_client", lambda _args: SyncClient())
+    monkeypatch.setattr(
+        cli, "sync_handshake",
+        lambda *args, **kwargs: {"token_id": "ct-peer", "origin_id": "remote-origin"},
+    )
+    calls = []
+    monkeypatch.setattr(
+        cli, "push_to",
+        lambda url, pack, token, cafile=None: calls.append((url, token))
+        or {"added": 0, "skipped": 0, "cursor": pack["cursor"]},
+    )
+
+    assert cli.main(["push"]) == 0
+    capsys.readouterr()
+
+    assert calls == [("https://configured.example.com", "")]
+
+
 def test_pull_explicit_url_and_token_override_environment(monkeypatch, capsys):
     monkeypatch.setenv("CAIRN_URL", "https://default.example.com")
     monkeypatch.setenv("CAIRN_TOKEN", "environment-token")
@@ -94,4 +120,4 @@ def test_sync_commands_require_url_or_environment(monkeypatch, capsys):
 
     assert exc.value.code == 2
     _out, err = capsys.readouterr()
-    assert "pass one or set CAIRN_URL" in err
+    assert "pass one, set CAIRN_URL, or configure AWS sync_endpoint" in err
