@@ -435,13 +435,16 @@ def test_cli_token_create_list_revoke(tmp_path, monkeypatch, capsys):
     ).fetchone()["token_hash"]
     assert stored_hash == digest
     assert stored_hash != created["token"]
+    stored_created_at = client.vault.conn.execute(
+        "SELECT created_at FROM server_tokens WHERE token_id=?", (created["token_id"],)
+    ).fetchone()["created_at"]
 
     assert cli.main(["--vault", str(tmp_path / "vault"), "token", "list", "--json"]) == 0
     listed_output = capsys.readouterr().out
     listed = json.loads(listed_output)
     assert listed == [{
         "token_id": created["token_id"], "agent_id": "client-a", "curator": False,
-        "created_at": listed[0]["created_at"],
+        "created_at": stored_created_at,
     }]
     assert created["token"] not in listed_output
 
