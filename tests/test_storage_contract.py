@@ -224,6 +224,8 @@ class TestStorageContract:
         v = open_vault(create=True)
         v.close()
         v.close()
+        with pytest.raises(Exception, match="(?i)closed"):
+            v.count()
 
     def test_reopen_handle_sees_same_data(self, vault):
         vault.insert(record("k1", "shared fact"), unit(0))
@@ -430,7 +432,7 @@ class TestStorageContract:
 
     def test_vec_status_reports_sync(self, vault):
         vault.insert(record("a", "alpha"), unit(0))
-        assert isinstance(vault.vec_status()["vec_in_sync"], bool)
+        assert vault.vec_status()["vec_in_sync"] is True
 
     # -- documents ---------------------------------------------------------------------------
     def test_small_content_stays_inline(self, vault):
