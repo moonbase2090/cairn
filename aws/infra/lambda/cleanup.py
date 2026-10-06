@@ -5,6 +5,8 @@ import os
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
+
+
 def handler(_event, _context):
     table_name = os.environ["MEMORY_TABLE"]
     bucket_name = os.environ["CONTENT_BUCKET"]
