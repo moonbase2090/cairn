@@ -38,7 +38,18 @@ The PR body has a **Proof** section with real evidence: test output, a CI run li
 
 New behavior in trunk code ships behind a flag or setting that is off by default, unless it is a pure fix. Turning a flag on by default is its own PR, and that PR is trunk.
 
-## 6. Merging
+## 6. Tests
+
+For every test, ask: would it fail if the behavior it names broke? If not, reject it. Reject tests that:
+
+- assert a value against itself, or a constant against the same constant
+- compute the expected value with the code under test or a copy of its logic
+- mock or stub the unit under test, then assert what the mock returns
+- only check that something ran, was called, or didn't raise, with no assertion on the result
+- compare against a snapshot or golden file regenerated from current output without review
+- still pass when the implementation is deleted or replaced with a stub or default
+
+## 7. Merging
 
 - Merge commits only. No admin overrides.
 - Code-scanning threads are resolved only when they are report-only or addressed, never just to unblock a merge.
