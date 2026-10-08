@@ -100,6 +100,42 @@ test("adds an authenticated sync API only when explicitly enabled", () => {
   assert.match(synthesized, /CairnTokenTableKeyDecrypt/);
 });
 
+test("grants the S3 Vectors indexer scoped decrypt access to the vault key", () => {
+  const template = synth(vaultA);
+
+  template.hasResourceProperties("AWS::KMS::Key", {
+    KeyPolicy: {
+      Statement: assertions.Match.arrayWith([
+        assertions.Match.objectLike({
+          Sid: "AllowS3VectorsIndexMaintenance",
+          Effect: "Allow",
+          Principal: { Service: "indexing.s3vectors.amazonaws.com" },
+          Action: "kms:Decrypt",
+          Resource: "*",
+          Condition: {
+            ArnEquals: {
+              "aws:SourceArn": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    { Ref: "AWS::Partition" },
+                    ":s3vectors:us-west-2:123456789012:bucket/cairn-vault-0123456789abcdef0123456789abcdef-vectors",
+                  ],
+                ],
+              },
+            },
+            StringEquals: { "aws:SourceAccount": "123456789012" },
+            "ForAnyValue:StringEquals": {
+              "kms:EncryptionContextKeys": ["aws:s3vectors:arn", "aws:s3vectors:resource-id"],
+            },
+          },
+        }),
+      ]),
+    },
+  });
+});
+
 test("qualifies physical data resources and policy partition keys by vault ID", () => {
   const templateA = synth(vaultA).toJSON();
   const templateB = synth(vaultB).toJSON();

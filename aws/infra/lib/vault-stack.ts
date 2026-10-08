@@ -1,4 +1,5 @@
 import {
+  ArnFormat,
   CfnOutput,
   Duration,
   RemovalPolicy,
@@ -119,6 +120,8 @@ export class CairnVaultStack extends Stack {
     super(scope, id, props);
 
     const slug = resourceSlug(props.vaultId);
+    const vectorBucketName = `${slug}-vectors`;
+    const vectorIndexName = `${slug}-index`;
     const vaultPartition = `VAULT#${props.vaultId}`;
     const vaultPrefix = `${props.vaultId}/`;
     const key = new kms.Key(this, "VaultKey", {
@@ -178,7 +181,7 @@ export class CairnVaultStack extends Stack {
     });
 
     const vectorBucket = new s3vectors.CfnVectorBucket(this, "VectorBucket", {
-      vectorBucketName: `${slug}-vectors`,
+      vectorBucketName,
       encryptionConfiguration: {
         sseType: "aws:kms",
         kmsKeyArn: key.keyArn,
@@ -188,9 +191,29 @@ export class CairnVaultStack extends Stack {
         { key: "cairn:vault-name", value: props.vaultName.slice(0, 128) },
       ],
     });
+    key.addToResourcePolicy(new iam.PolicyStatement({
+      sid: "AllowS3VectorsIndexMaintenance",
+      principals: [new iam.ServicePrincipal("indexing.s3vectors.amazonaws.com")],
+      actions: ["kms:Decrypt"],
+      resources: ["*"],
+      conditions: {
+        ArnEquals: {
+          "aws:SourceArn": this.formatArn({
+            service: "s3vectors",
+            resource: "bucket",
+            resourceName: vectorBucketName,
+            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+          }),
+        },
+        StringEquals: { "aws:SourceAccount": this.account },
+        "ForAnyValue:StringEquals": {
+          "kms:EncryptionContextKeys": ["aws:s3vectors:arn", "aws:s3vectors:resource-id"],
+        },
+      },
+    }));
     const vectorIndex = new s3vectors.CfnIndex(this, "VectorIndex", {
       vectorBucketArn: vectorBucket.attrVectorBucketArn,
-      indexName: `${slug}-index`,
+      indexName: vectorIndexName,
       dataType: "float32",
       dimension: props.dimensions,
       distanceMetric: "cosine",
