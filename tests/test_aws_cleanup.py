@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib.util
 import threading
-import time
 from pathlib import Path
 
 from botocore.exceptions import ClientError
@@ -47,9 +46,10 @@ class FakeTable:
     def update_item(self, *, Key, UpdateExpression, ConditionExpression=None,
                     ExpressionAttributeValues=None, **_kwargs):
         if Key["PK"].endswith("#CLEANUP#LOCK"):
-            now = int(time.time())
             with self.lease_lock:
-                if self.lease_expires_at is not None and self.lease_expires_at >= now:
+                if not self._lease_condition_holds(
+                    ConditionExpression, ExpressionAttributeValues,
+                ):
                     raise _conditional_failure()
                 self.lease_owner = ExpressionAttributeValues[":owner"]
                 self.lease_expires_at = ExpressionAttributeValues[":expires"]
@@ -60,8 +60,21 @@ class FakeTable:
         if "contentCleanupDone" in UpdateExpression:
             self.tombstone["contentCleanupDone"] = True
 
+    def _lease_condition_holds(self, expression, values):
+        prefix = "attribute_not_exists(leaseExpiresAt) OR leaseExpiresAt "
+        assert expression.startswith(prefix)
+        operator, reference = expression[len(prefix):].split()
+        assert operator in {"<", ">"}
+        assert reference == ":now"
+        if self.lease_expires_at is None:
+            return True
+        if operator == "<":
+            return self.lease_expires_at < values[reference]
+        return self.lease_expires_at > values[reference]
+
     def delete_item(self, *, Key, ConditionExpression, ExpressionAttributeValues):
         assert Key["PK"].endswith("#CLEANUP#LOCK")
+        assert ConditionExpression == "leaseOwner = :owner"
         with self.lease_lock:
             if self.lease_owner != ExpressionAttributeValues[":owner"]:
                 raise _conditional_failure()
