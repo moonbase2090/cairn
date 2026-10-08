@@ -254,6 +254,19 @@ export class CairnVaultStack extends Stack {
       },
     }));
     cleanup.addToRolePolicy(new iam.PolicyStatement({
+      sid: "CairnCleanupVectorKmsDecrypt",
+      actions: ["kms:Decrypt"],
+      resources: [key.keyArn],
+      conditions: {
+        StringEquals: {
+          "kms:ViaService": `s3vectors.${this.region}.amazonaws.com`,
+        },
+        "ForAnyValue:StringEquals": {
+          "kms:EncryptionContextKeys": ["aws:s3vectors:arn", "aws:s3vectors:resource-id"],
+        },
+      },
+    }));
+    cleanup.addToRolePolicy(new iam.PolicyStatement({
       sid: "CairnCleanupTombstones",
       actions: ["dynamodb:Query", "dynamodb:UpdateItem"],
       resources: [memories.tableArn, `${memories.tableArn}/index/ByVault`],

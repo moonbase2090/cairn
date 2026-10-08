@@ -127,8 +127,6 @@ class FakeS3:
         self.table = table
 
     def list_object_versions(self, *, Prefix, **_kwargs):
-        if self.table and self.table.on_version_delete:
-            self.table.on_version_delete(Prefix)
         return {
             "Versions": [{"Key": Prefix, "VersionId": "version-1"}],
             "DeleteMarkers": [],
@@ -136,6 +134,8 @@ class FakeS3:
         }
 
     def delete_objects(self, *, Delete, **_kwargs):
+        if self.table and self.table.on_version_delete:
+            self.table.on_version_delete(Delete["Objects"])
         self.deleted.extend(Delete["Objects"])
         return {}
 

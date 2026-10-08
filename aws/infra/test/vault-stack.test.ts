@@ -103,6 +103,32 @@ test("limits cleanup KMS decryption to its DynamoDB table", () => {
   });
 });
 
+test("grants cleanup vector deletion scoped KMS decryption", () => {
+  const template = synth(vaultA);
+  const keyId = Object.keys(template.findResources("AWS::KMS::Key"))[0];
+
+  template.hasResourceProperties("AWS::IAM::Policy", {
+    PolicyDocument: {
+      Statement: assertions.Match.arrayWith([
+        {
+          Sid: "CairnCleanupVectorKmsDecrypt",
+          Effect: "Allow",
+          Action: "kms:Decrypt",
+          Resource: { "Fn::GetAtt": [keyId, "Arn"] },
+          Condition: {
+            StringEquals: {
+              "kms:ViaService": "s3vectors.us-west-2.amazonaws.com",
+            },
+            "ForAnyValue:StringEquals": {
+              "kms:EncryptionContextKeys": ["aws:s3vectors:arn", "aws:s3vectors:resource-id"],
+            },
+          },
+        },
+      ]),
+    },
+  });
+});
+
 test("scopes the cleanup lease to its vault partition", () => {
   const template = synth(vaultA);
 

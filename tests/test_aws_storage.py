@@ -251,9 +251,17 @@ class FakeAws:
                        for name, value in spec["Key"].items()}
                 values = {name: self.deserializer.deserialize(value)
                           for name, value in spec["ExpressionAttributeValues"].items()}
-                updates[(key["PK"], key["SK"])] = {
-                    "PK": key["PK"], "SK": key["SK"], "seq": values[":next"],
-                }
+                row_key = (key["PK"], key["SK"])
+                if ":owner" in values:
+                    item = self.items.get(row_key)
+                    if (not item or item.get("leaseOwner") != values[":owner"]
+                            or item.get("leaseExpiresAt", 0) < values[":now"]):
+                        raise FakeConditionalCheckFailed()
+                    updates[row_key] = {**item, "leaseExpiresAt": values[":expires"]}
+                else:
+                    updates[row_key] = {
+                        "PK": key["PK"], "SK": key["SK"], "seq": values[":next"],
+                    }
             elif "ConditionCheck" in action:
                 spec = action["ConditionCheck"]
                 key = {name: self.deserializer.deserialize(value)
@@ -339,9 +347,16 @@ def test_insert_commits_memory_event_cursor_and_vector_projection_atomically(tmp
     assert aws.vectors.vectors[key]["data"]["float32"] == vector.tolist()
     assert len(aws.transactions) == 1
     action_types = [next(iter(action)) for action in aws.transactions[0]]
-    assert "ConditionCheck" in action_types
+    assert "ConditionCheck" not in action_types
     assert action_types.count("Put") == 3  # event, dedupe marker, and memory row
     assert "Update" in action_types  # the durable event-feed counter
+    assert any(
+        "leaseOwner = :owner" in action["Update"].get("ConditionExpression", "")
+        for action in aws.transactions[0] if "Update" in action
+    )
+    assert vault._content_lease_key(_memory()["content_hash"]).get("PK") not in {
+        key[0] for key in aws.items
+    }
     assert aws.items[(f"VAULT#{VAULT_ID}#META", "SYNC_COUNTER")]["seq"] == 1
     cloud_row = next(item for item in aws.items.values() if item.get("recordType") == "memory")
     assert str(cloud_row["confidence"]) == "0.75"
@@ -772,7 +787,7 @@ def test_content_sweep_blocks_same_hash_insert_between_owner_check_and_delete(tm
     racing_errors = []
 
     def race_with_insert(_objects):
-        with pytest.raises(FakeConditionalCheckFailed):
+        with pytest.raises(OSError, match="content is being swept"):
             vault.insert(record, np.asarray([1, 0, 0], dtype=np.float32))
         racing_errors.append("blocked")
 
@@ -787,6 +802,58 @@ def test_content_sweep_blocks_same_hash_insert_between_owner_check_and_delete(tm
     stored = vault.get(record["key"])
     assert stored and vault.read_content(stored) == "durable text"
     assert object_key in aws.s3.objects
+    vault.close()
+
+
+def test_content_writer_holds_lease_until_event_transaction_commits(tmp_path, monkeypatch):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    transact = aws.transact_write_items
+    sweeps = []
+
+    def sweep_before_commit(**kwargs):
+        sweeps.append(vault.sweep_orphan_docs())
+        return transact(**kwargs)
+
+    monkeypatch.setattr(aws, "transact_write_items", sweep_before_commit)
+
+    vault.insert(_memory(), np.asarray([1, 0, 0], dtype=np.float32))
+
+    assert sweeps == [0]
+    stored = vault.get(_memory()["key"])
+    assert stored and vault.read_content(stored) == "durable text"
+    assert len(aws.s3.objects) == 2
+    assert not any("#CONTENT#LOCK#" in key[0] for key in aws.items)
+    vault.close()
+
+
+def test_content_sweep_reads_event_references_across_shard_pages(tmp_path):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    target_key = f"{VAULT_ID}/events/content/{content_digest('still referenced')}"
+    aws.s3.objects[target_key] = b"still referenced"
+    shard_zero = f"VAULT#{VAULT_ID}#EVENTS#00"
+    shard_one = f"VAULT#{VAULT_ID}#EVENTS#01"
+    for seq in range(1, 2002):
+        item = {
+            "PK": shard_zero,
+            "SK": f"SEQ#{seq:020d}",
+            "recordType": "event",
+            "seq": seq,
+        }
+        if seq == 2001:
+            item["contentObjectKey"] = target_key
+        aws.items[(item["PK"], item["SK"])] = item
+    high_seq = {
+        "PK": shard_one,
+        "SK": f"SEQ#{3000:020d}",
+        "recordType": "event",
+        "seq": 3000,
+    }
+    aws.items[(high_seq["PK"], high_seq["SK"])] = high_seq
+
+    assert vault.sweep_orphan_docs() == 0
+    assert target_key in aws.s3.objects
     vault.close()
 
 

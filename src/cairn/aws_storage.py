@@ -266,23 +266,15 @@ class AwsVault(StorageBackend):
             "SK": "LEASE",
         }
 
-    def _content_write_guards(self, events: list[dict]) -> list[dict]:
-        content_hashes = {
+    def _event_content_hashes(self, events: list[dict]) -> list[str]:
+        return sorted({
             snapshot.get("content_hash")
             for event in events
             if isinstance((snapshot := event.get("snapshot")), dict)
             and isinstance(snapshot.get("content"), str)
             and isinstance(snapshot.get("content_hash"), str)
             and snapshot.get("content_hash")
-        }
-        now = int(time.time())
-        condition = "attribute_not_exists(leaseExpiresAt) OR leaseExpiresAt < :now"
-        return [{"ConditionCheck": {
-            "TableName": self._config.table,
-            "Key": self._serialize(self._content_lease_key(content_hash)),
-            "ConditionExpression": condition,
-            "ExpressionAttributeValues": self._serialize({":now": now}),
-        }} for content_hash in sorted(content_hashes)]
+        })
 
     def _acquire_content_lease(self, content_hash: str) -> str | None:
         key = self._content_lease_key(content_hash)
@@ -317,6 +309,20 @@ class AwsVault(StorageBackend):
         except Exception as error:
             if getattr(error, "response", {}).get("Error", {}).get("Code") != "ConditionalCheckFailedException":
                 raise
+
+    def _content_lease_commit_actions(self, leases: dict[str, str]) -> list[dict]:
+        now = int(time.time())
+        return [{"Update": {
+            "TableName": self._config.table,
+            "Key": self._serialize(self._content_lease_key(content_hash)),
+            "UpdateExpression": "SET leaseExpiresAt = :expires",
+            "ConditionExpression": "leaseOwner = :owner AND leaseExpiresAt >= :now",
+            "ExpressionAttributeValues": self._serialize({
+                ":owner": owner,
+                ":expires": now + _CONTENT_LEASE_SECONDS,
+                ":now": now,
+            }),
+        }} for content_hash, owner in sorted(leases.items())]
 
     def _query_pages(self, **kwargs) -> Iterator[dict]:
         request = dict(kwargs)
@@ -819,39 +825,49 @@ class AwsVault(StorageBackend):
             event for event in events
             if not self._event_marker_exists(str(event.get("event_id", "")))
         ]
-        cursors_by_peer: dict[tuple[str, str, str], dict] = {}
-        for cursor in cursors or []:
-            identity = (cursor["peer"], cursor["direction"], cursor["token_id"])
-            current = cursors_by_peer.get(identity)
-            if current is None or int(cursor["cursor"]) >= int(current["cursor"]):
-                cursors_by_peer[identity] = cursor
-        cursors = list(cursors_by_peer.values())
-        latest = self._remote_event_rows(events)
-        counter = self._get_counter() if events else 0
-        content_write_guards = self._content_write_guards(events)
-        actions = self._remote_event_actions(events, counter)
-        actions.extend(content_write_guards)
-        state_actions, vector_updates = self._remote_state_actions(latest)
-        actions.extend(state_actions)
-        actions.extend(self._remote_cursor_actions(cursors))
-        actions.extend(self._remote_conflict_actions(conflicts))
-        if events:
-            actions.append({"Update": {
-                "TableName": self._config.table,
-                "Key": self._serialize(self._event_counter_key()),
-                "UpdateExpression": "SET #seq = :next",
-                "ConditionExpression": "attribute_not_exists(#seq) OR #seq = :previous",
-                "ExpressionAttributeNames": {"#seq": "seq"},
-                "ExpressionAttributeValues": self._serialize({":next": counter + len(events), ":previous": counter}),
-            }})
-        if not actions:
-            return
-        self._check_remote_transaction_limits(actions)
-        self._ddb.transact_write_items(
-            TransactItems=actions,
-            ClientRequestToken=uuid.uuid4().hex,
-        )
-        self._apply_remote_vector_updates(vector_updates)
+        content_leases: dict[str, str] = {}
+        try:
+            for content_hash in self._event_content_hashes(events):
+                owner = self._acquire_content_lease(content_hash)
+                if owner is None:
+                    raise OSError("AWS content is being swept; retry the write")
+                content_leases[content_hash] = owner
+
+            cursors_by_peer: dict[tuple[str, str, str], dict] = {}
+            for cursor in cursors or []:
+                identity = (cursor["peer"], cursor["direction"], cursor["token_id"])
+                current = cursors_by_peer.get(identity)
+                if current is None or int(cursor["cursor"]) >= int(current["cursor"]):
+                    cursors_by_peer[identity] = cursor
+            cursors = list(cursors_by_peer.values())
+            latest = self._remote_event_rows(events)
+            counter = self._get_counter() if events else 0
+            actions = self._remote_event_actions(events, counter)
+            actions.extend(self._content_lease_commit_actions(content_leases))
+            state_actions, vector_updates = self._remote_state_actions(latest)
+            actions.extend(state_actions)
+            actions.extend(self._remote_cursor_actions(cursors))
+            actions.extend(self._remote_conflict_actions(conflicts))
+            if events:
+                actions.append({"Update": {
+                    "TableName": self._config.table,
+                    "Key": self._serialize(self._event_counter_key()),
+                    "UpdateExpression": "SET #seq = :next",
+                    "ConditionExpression": "attribute_not_exists(#seq) OR #seq = :previous",
+                    "ExpressionAttributeNames": {"#seq": "seq"},
+                    "ExpressionAttributeValues": self._serialize({":next": counter + len(events), ":previous": counter}),
+                }})
+            if not actions:
+                return
+            self._check_remote_transaction_limits(actions)
+            self._ddb.transact_write_items(
+                TransactItems=actions,
+                ClientRequestToken=uuid.uuid4().hex,
+            )
+            self._apply_remote_vector_updates(vector_updates)
+        finally:
+            for content_hash, owner in content_leases.items():
+                self._release_content_lease(content_hash, owner)
 
     def insert(self, rec: dict, vector: np.ndarray) -> int:
         from .secret_scan import scan_content
@@ -1077,19 +1093,19 @@ class AwsVault(StorageBackend):
             item["contentObjectKey"] for item in self._memory_items()
             if item.get("contentObjectKey")
         }
-        cursor = 0
-        while True:
-            items = self._query_event_items(cursor, 1000)
-            for item in items:
-                content_key = item.get("contentObjectKey")
-                if content_key:
-                    referenced.add(content_key)
-            if not items:
-                break
-            next_cursor = max(int(item.get("seq", 0)) for item in items)
-            if next_cursor <= cursor or len(items) < 1000:
-                break
-            cursor = next_cursor
+        for shard in range(_EVENT_SHARDS):
+            partition = f"VAULT#{self._identity.vault_id}#EVENTS#{shard:02x}"
+            for page in self._query_pages(
+                KeyConditionExpression=self._key("PK").eq(partition),
+                ConsistentRead=True,
+                Limit=1000,
+            ):
+                for item in page.get("Items", []):
+                    if item.get("recordType") != "event":
+                        continue
+                    content_key = item.get("contentObjectKey")
+                    if content_key:
+                        referenced.add(content_key)
         return referenced
 
     def _delete_object_versions(self, key: str) -> None:
