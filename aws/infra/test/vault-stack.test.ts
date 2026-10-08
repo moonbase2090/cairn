@@ -76,6 +76,27 @@ test("cleanup Lambda does not reserve account concurrency", () => {
   assert.equal(cleanup.Properties.ReservedConcurrentExecutions, undefined);
 });
 
+test("scopes the cleanup lease to its vault partition", () => {
+  const template = synth(vaultA);
+
+  template.hasResourceProperties("AWS::IAM::Policy", {
+    PolicyDocument: {
+      Statement: assertions.Match.arrayWith([
+        assertions.Match.objectLike({
+          Sid: "CairnCleanupLease",
+          Effect: "Allow",
+          Action: ["dynamodb:DeleteItem", "dynamodb:UpdateItem"],
+          Condition: {
+            "ForAllValues:StringLike": {
+              "dynamodb:LeadingKeys": [`VAULT#${vaultA}#CLEANUP#LOCK`],
+            },
+          },
+        }),
+      ]),
+    },
+  });
+});
+
 test("rejects unsafe embed model context before synthesis", () => {
   assert.throws(() => parseStackConfig({
     vaultId: vaultA,

@@ -2,9 +2,15 @@
 from __future__ import annotations
 
 import os
+import time
+import uuid
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
+from botocore.exceptions import ClientError
+
+
+_LEASE_SECONDS = 30 * 60
 
 
 def handler(_event, _context):
@@ -16,8 +22,59 @@ def handler(_event, _context):
 
     dynamodb = boto3.resource("dynamodb")
     table = dynamodb.Table(table_name)
-    s3 = boto3.client("s3")
-    vectors = boto3.client("s3vectors")
+    lease_key = {
+        "PK": f"VAULT#{vault_id}#CLEANUP#LOCK",
+        "SK": "LEASE",
+    }
+    lease_owner = uuid.uuid4().hex
+    if not _acquire_lease(table, lease_key, lease_owner):
+        return {"processed": 0, "skipped": "lease-held", "vault_id": vault_id}
+
+    try:
+        return _cleanup_vault(
+            table, boto3.client("s3"), boto3.client("s3vectors"),
+            bucket_name, vector_bucket, vector_index, vault_id,
+        )
+    finally:
+        _release_lease(table, lease_key, lease_owner)
+
+
+def _acquire_lease(table, lease_key: dict, lease_owner: str) -> bool:
+    now = int(time.time())
+    try:
+        table.update_item(
+            Key=lease_key,
+            UpdateExpression="SET leaseOwner = :owner, leaseExpiresAt = :expires",
+            ConditionExpression=(
+                "attribute_not_exists(leaseExpiresAt) OR leaseExpiresAt < :now"
+            ),
+            ExpressionAttributeValues={
+                ":owner": lease_owner,
+                ":expires": now + _LEASE_SECONDS,
+                ":now": now,
+            },
+        )
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        raise
+    return True
+
+
+def _release_lease(table, lease_key: dict, lease_owner: str) -> None:
+    try:
+        table.delete_item(
+            Key=lease_key,
+            ConditionExpression="leaseOwner = :owner",
+            ExpressionAttributeValues={":owner": lease_owner},
+        )
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+
+
+def _cleanup_vault(table, s3, vectors, bucket_name: str, vector_bucket: str,
+                   vector_index: str, vault_id: str) -> dict:
     tombstone_partition = f"VAULT#{vault_id}#TOMBSTONE"
     memory_prefix = f"VAULT#{vault_id}#MEMORY#"
     removed_objects = 0

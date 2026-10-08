@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import threading
+import time
 from pathlib import Path
 
+from botocore.exceptions import ClientError
 from boto3.dynamodb.conditions import Key
 
 
@@ -20,23 +23,50 @@ class FakeTable:
         self.tombstone = tombstone
         self.memory = memory
         self.updates = []
+        self.lease_owner = None
+        self.lease_expires_at = None
+        self.lease_lock = threading.Lock()
+        self.query_entered = None
+        self.allow_query = None
+        self.block_first_query = False
 
     def query(self, **kwargs):
         condition = kwargs["KeyConditionExpression"].get_expression()
         key = condition["values"][0].name
         value = condition["values"][1]
         if key == "GSI0PK" and value == f"VAULT#{VAULT_ID}#TOMBSTONE":
+            if self.query_entered is not None and self.block_first_query:
+                self.block_first_query = False
+                self.query_entered.set()
+                self.allow_query.wait(timeout=5)
             return {"Items": [self.tombstone]}
         if key == "PK" and self.memory and self.memory["PK"] == value:
             return {"Items": [self.memory]}
         return {"Items": []}
 
-    def update_item(self, *, Key, UpdateExpression, **_kwargs):
+    def update_item(self, *, Key, UpdateExpression, ConditionExpression=None,
+                    ExpressionAttributeValues=None, **_kwargs):
+        if Key["PK"].endswith("#CLEANUP#LOCK"):
+            now = int(time.time())
+            with self.lease_lock:
+                if self.lease_expires_at is not None and self.lease_expires_at >= now:
+                    raise _conditional_failure()
+                self.lease_owner = ExpressionAttributeValues[":owner"]
+                self.lease_expires_at = ExpressionAttributeValues[":expires"]
+            return
         self.updates.append((Key, UpdateExpression))
         if "vectorCleanupDone" in UpdateExpression:
             self.tombstone["vectorCleanupDone"] = True
         if "contentCleanupDone" in UpdateExpression:
             self.tombstone["contentCleanupDone"] = True
+
+    def delete_item(self, *, Key, ConditionExpression, ExpressionAttributeValues):
+        assert Key["PK"].endswith("#CLEANUP#LOCK")
+        with self.lease_lock:
+            if self.lease_owner != ExpressionAttributeValues[":owner"]:
+                raise _conditional_failure()
+            self.lease_owner = None
+            self.lease_expires_at = None
 
 
 class FakeDynamo:
@@ -82,6 +112,13 @@ def _table(memory=None):
     return FakeTable(tombstone, memory)
 
 
+def _conditional_failure():
+    return ClientError(
+        {"Error": {"Code": "ConditionalCheckFailedException", "Message": "condition failed"}},
+        "UpdateItem",
+    )
+
+
 def _run(monkeypatch, table):
     s3 = FakeS3()
     vectors = FakeVectors()
@@ -114,6 +151,7 @@ def test_cleanup_removes_unreferenced_versions_and_vector_idempotently(monkeypat
     assert s3.deleted == [{"Key": OBJECT_KEY, "VersionId": "version-1"}]
     assert vectors.deleted == ["mem_agent_old"]
     assert again["processed"] == 0
+    assert table.lease_owner is None
 
 
 def test_cleanup_keeps_content_while_another_memory_owns_the_hash(monkeypatch):
@@ -132,3 +170,37 @@ def test_cleanup_keeps_content_while_another_memory_owns_the_hash(monkeypatch):
     assert vectors.deleted == ["mem_agent_old"]
     assert table.tombstone["vectorCleanupDone"] is True
     assert "contentCleanupDone" not in table.tombstone
+
+
+def test_overlapping_cleanup_invocations_share_a_lease(monkeypatch):
+    table = _table()
+    table.query_entered = threading.Event()
+    table.allow_query = threading.Event()
+    table.block_first_query = True
+    s3 = FakeS3()
+    vectors = FakeVectors()
+    monkeypatch.setattr(cleanup.boto3, "resource", lambda _name: FakeDynamo(table))
+    monkeypatch.setattr(
+        cleanup.boto3, "client",
+        lambda name: s3 if name == "s3" else vectors,
+    )
+    monkeypatch.setenv("MEMORY_TABLE", "table")
+    monkeypatch.setenv("CONTENT_BUCKET", "bucket")
+    monkeypatch.setenv("VECTOR_BUCKET", "vectors")
+    monkeypatch.setenv("VECTOR_INDEX", "index")
+    monkeypatch.setenv("VAULT_ID", VAULT_ID)
+    first_result = []
+    first = threading.Thread(target=lambda: first_result.append(cleanup.handler({}, None)))
+
+    first.start()
+    assert table.query_entered.wait(timeout=5)
+    second = cleanup.handler({}, None)
+    table.allow_query.set()
+    first.join(timeout=5)
+
+    assert not first.is_alive()
+    assert first_result[0]["processed"] == 1
+    assert second == {"processed": 0, "skipped": "lease-held", "vault_id": VAULT_ID}
+    assert len(s3.deleted) == 1
+    assert vectors.deleted == ["mem_agent_old"]
+    assert table.lease_owner is None

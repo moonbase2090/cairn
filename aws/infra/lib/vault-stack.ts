@@ -254,6 +254,16 @@ export class CairnVaultStack extends Stack {
       },
     }));
     cleanup.addToRolePolicy(new iam.PolicyStatement({
+      sid: "CairnCleanupLease",
+      actions: ["dynamodb:DeleteItem", "dynamodb:UpdateItem"],
+      resources: [memories.tableArn],
+      conditions: {
+        "ForAllValues:StringLike": {
+          "dynamodb:LeadingKeys": [`${vaultPartition}#CLEANUP#LOCK`],
+        },
+      },
+    }));
+    cleanup.addToRolePolicy(new iam.PolicyStatement({
       sid: "CairnCleanupContentObjects",
       actions: ["s3:DeleteObjectVersion"],
       resources: [content.arnForObjects(`${vaultPrefix}*`)],
