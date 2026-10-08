@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
+import time
 
 from boto3.dynamodb.conditions import Key
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
@@ -90,6 +91,10 @@ class FakeDynamoTable:
     def update_item(self, *, Key, ExpressionAttributeValues, UpdateExpression="", **_kwargs):
         self.aws.ensure_online()
         if "leaseOwner" in UpdateExpression:
+            assert UpdateExpression == "SET leaseOwner = :owner, leaseExpiresAt = :expires"
+            assert _kwargs["ConditionExpression"] == (
+                "attribute_not_exists(leaseExpiresAt) OR leaseExpiresAt < :now"
+            )
             row_key = (Key["PK"], Key["SK"])
             current = self.aws.items.get(row_key)
             now = ExpressionAttributeValues[":now"]
@@ -100,6 +105,18 @@ class FakeDynamoTable:
                 "leaseOwner": ExpressionAttributeValues[":owner"],
                 "leaseExpiresAt": ExpressionAttributeValues[":expires"],
             }
+            return {}
+        if UpdateExpression == "SET leaseExpiresAt = :expires":
+            assert _kwargs["ConditionExpression"] == (
+                "leaseOwner = :owner AND leaseExpiresAt >= :now"
+            )
+            row_key = (Key["PK"], Key["SK"])
+            current = self.aws.items.get(row_key)
+            now = ExpressionAttributeValues[":now"]
+            if (not current or current.get("leaseOwner") != ExpressionAttributeValues[":owner"]
+                    or current.get("leaseExpiresAt", 0) < now):
+                raise FakeConditionalCheckFailed()
+            current["leaseExpiresAt"] = ExpressionAttributeValues[":expires"]
             return {}
         item = self.aws.items[(Key["PK"], Key["SK"])]
         if ":yes" in ExpressionAttributeValues:
@@ -253,6 +270,10 @@ class FakeAws:
                           for name, value in spec["ExpressionAttributeValues"].items()}
                 row_key = (key["PK"], key["SK"])
                 if ":owner" in values:
+                    assert spec["UpdateExpression"] == "SET leaseExpiresAt = :expires"
+                    assert spec["ConditionExpression"] == (
+                        "leaseOwner = :owner AND leaseExpiresAt >= :now"
+                    )
                     item = self.items.get(row_key)
                     if (not item or item.get("leaseOwner") != values[":owner"]
                             or item.get("leaseExpiresAt", 0) < values[":now"]):
@@ -824,6 +845,30 @@ def test_content_writer_holds_lease_until_event_transaction_commits(tmp_path, mo
     assert stored and vault.read_content(stored) == "durable text"
     assert len(aws.s3.objects) == 2
     assert not any("#CONTENT#LOCK#" in key[0] for key in aws.items)
+    vault.close()
+
+
+def test_content_sweep_aborts_after_writer_takes_over_expired_lease(tmp_path, monkeypatch):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    record = _memory()
+    content_hash = record["content_hash"]
+    object_key = f"{VAULT_ID}/content/{content_hash.removeprefix('sha256:')}"
+    aws.s3.objects[object_key] = b"durable text"
+    now = [int(time.time())]
+    monkeypatch.setattr("cairn.aws_storage.time.time", lambda: now[0])
+
+    def take_over_after_reference_scan():
+        now[0] += 30 * 60 + 1
+        vault.insert(record, np.asarray([1, 0, 0], dtype=np.float32))
+        return set()  # stale sweep snapshot from before the writer committed
+
+    monkeypatch.setattr(vault, "_content_object_references", take_over_after_reference_scan)
+
+    assert vault.sweep_orphan_docs() == 0
+    stored = vault.get(record["key"])
+    assert stored and vault.read_content(stored) == "durable text"
+    assert object_key in aws.s3.objects
     vault.close()
 
 

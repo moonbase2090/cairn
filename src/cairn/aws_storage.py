@@ -5,7 +5,7 @@ DynamoDB row and event transaction succeeds; writes fail while AWS is offline.
 """
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 import hashlib
 import json
@@ -37,6 +37,10 @@ _DYNAMODB_ACTION_LIMIT = 100
 _DYNAMODB_TRANSACTION_BYTES = 4 * 1024 * 1024
 _EMBEDDING_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
 _CONTENT_LEASE_SECONDS = 30 * 60
+
+
+class _ContentLeaseLostError(RuntimeError):
+    pass
 
 
 def _sha(text: str) -> str:
@@ -309,6 +313,25 @@ class AwsVault(StorageBackend):
         except Exception as error:
             if getattr(error, "response", {}).get("Error", {}).get("Code") != "ConditionalCheckFailedException":
                 raise
+
+    def _renew_content_lease(self, content_hash: str, owner: str) -> bool:
+        now = int(time.time())
+        try:
+            self._table.update_item(
+                Key=self._content_lease_key(content_hash),
+                UpdateExpression="SET leaseExpiresAt = :expires",
+                ConditionExpression="leaseOwner = :owner AND leaseExpiresAt >= :now",
+                ExpressionAttributeValues={
+                    ":owner": owner,
+                    ":expires": now + _CONTENT_LEASE_SECONDS,
+                    ":now": now,
+                },
+            )
+        except Exception as error:
+            if getattr(error, "response", {}).get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return False
+            raise
+        return True
 
     def _content_lease_commit_actions(self, leases: dict[str, str]) -> list[dict]:
         now = int(time.time())
@@ -1081,7 +1104,15 @@ class AwsVault(StorageBackend):
                 for key in batch:
                     content_hash = f"sha256:{key.rsplit('/', 1)[-1]}"
                     if content_hash in leases and key not in referenced:
-                        self._delete_object_versions(key)
+                        owner = leases[content_hash]
+                        try:
+                            self._delete_object_versions(
+                                key,
+                                before_delete=lambda digest=content_hash, lease_owner=owner:
+                                    self._renew_content_lease(digest, lease_owner),
+                            )
+                        except _ContentLeaseLostError:
+                            continue
                         removed += 1
             finally:
                 for content_hash, owner in leases.items():
@@ -1108,7 +1139,9 @@ class AwsVault(StorageBackend):
                         referenced.add(content_key)
         return referenced
 
-    def _delete_object_versions(self, key: str) -> None:
+    def _delete_object_versions(
+        self, key: str, before_delete: Callable[[], bool] | None = None,
+    ) -> None:
         markers: dict[str, str] = {}
         while True:
             page = self._s3.list_object_versions(
@@ -1122,6 +1155,8 @@ class AwsVault(StorageBackend):
                 if version.get("Key") == key
             ]
             if versions:
+                if before_delete is not None and not before_delete():
+                    raise _ContentLeaseLostError("content cleanup lease expired or changed owner")
                 self._s3.delete_objects(
                     Bucket=self._config.content_bucket,
                     Delete={"Objects": versions, "Quiet": True},
