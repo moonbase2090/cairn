@@ -148,7 +148,15 @@ class FakeS3:
     def __init__(self, aws):
         self.aws = aws
         self.objects: dict[str, bytes] = {}
+        self.versions: dict[str, list[tuple[str, bytes]]] = {}
         self.deleted_batches: list[list[dict]] = []
+        self.fail_deletes = False
+
+    def _versions_for(self, key: str) -> list[tuple[str, bytes]]:
+        versions = self.versions.setdefault(key, [])
+        if not versions and key in self.objects:
+            versions.append(("v1", self.objects[key]))
+        return versions
 
     def head_object(self, *, Key, **_kwargs):
         self.aws.ensure_online()
@@ -158,7 +166,11 @@ class FakeS3:
 
     def put_object(self, *, Key, Body, **_kwargs):
         self.aws.ensure_online()
-        self.objects[Key] = bytes(Body)
+        versions = self._versions_for(Key)
+        version_id = f"v{len(versions) + 1}"
+        body = bytes(Body)
+        versions.append((version_id, body))
+        self.objects[Key] = body
         return {}
 
     def get_object(self, *, Key, **_kwargs):
@@ -173,8 +185,9 @@ class FakeS3:
     def list_object_versions(self, *, Prefix, **_kwargs):
         return {
             "Versions": [
-                {"Key": key, "VersionId": "v1"}
+                {"Key": key, "VersionId": version_id}
                 for key in self.objects if key.startswith(Prefix)
+                for version_id, _body in reversed(self._versions_for(key))
             ],
             "DeleteMarkers": [],
             "IsTruncated": False,
@@ -184,8 +197,19 @@ class FakeS3:
         self.deleted_batches.append(deepcopy(Delete["Objects"]))
         if getattr(self, "on_delete", None):
             self.on_delete(Delete["Objects"])
+        if self.fail_deletes:
+            return {"Errors": [{"Key": item["Key"], "VersionId": item["VersionId"]}
+                                for item in Delete["Objects"]]}
         for item in Delete["Objects"]:
-            self.objects.pop(item["Key"], None)
+            key = item["Key"]
+            version_id = item["VersionId"]
+            versions = self._versions_for(key)
+            versions[:] = [version for version in versions if version[0] != version_id]
+            if versions:
+                self.objects[key] = versions[-1][1]
+            else:
+                self.versions.pop(key, None)
+                self.objects.pop(key, None)
         return {}
 
 
@@ -869,6 +893,47 @@ def test_content_sweep_aborts_after_writer_takes_over_expired_lease(tmp_path, mo
     stored = vault.get(record["key"])
     assert stored and vault.read_content(stored) == "durable text"
     assert object_key in aws.s3.objects
+    vault.close()
+
+
+def test_content_sweep_deletes_only_preexisting_versions_after_writer_takes_over(
+    tmp_path, monkeypatch,
+):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    record = _memory()
+    content_hash = record["content_hash"]
+    object_key = f"{VAULT_ID}/content/{content_hash.removeprefix('sha256:')}"
+    aws.s3.objects[object_key] = b"durable text"
+    now = [int(time.time())]
+    monkeypatch.setattr("cairn.aws_storage.time.time", lambda: now[0])
+
+    def take_over_after_lease_renewal(_objects):
+        now[0] += 30 * 60 + 1
+        vault.insert(record, np.asarray([1, 0, 0], dtype=np.float32))
+
+    aws.s3.on_delete = take_over_after_lease_renewal
+
+    assert vault.sweep_orphan_docs() == 0
+    stored = vault.get(record["key"])
+    assert stored and vault.read_content(stored) == "durable text"
+    assert aws.s3.versions[object_key] == [("v2", b"durable text")]
+    assert aws.s3.deleted_batches == [[{"Key": object_key, "VersionId": "v1"}]]
+    vault.close()
+
+
+def test_content_sweep_reports_s3_per_version_delete_errors(tmp_path, monkeypatch):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    key = f"{VAULT_ID}/content/{content_digest('orphan')}"
+    aws.s3.objects[key] = b"orphan"
+    aws.s3.fail_deletes = True
+    monkeypatch.setattr(vault, "_content_object_references", lambda: set())
+
+    with pytest.raises(OSError, match="could not delete all object versions"):
+        vault.sweep_orphan_docs()
+
+    assert key in aws.s3.objects
     vault.close()
 
 

@@ -273,7 +273,8 @@ export class CairnVaultStack extends Stack {
       conditions: {
         "ForAllValues:StringLike": {
           "dynamodb:LeadingKeys": [
-            `${vaultPartition}#TOMBSTONE`, `${vaultPartition}#MEMORY#*`,
+            `${vaultPartition}#TOMBSTONE`, `${vaultPartition}#TOMBSTONE#*`,
+            `${vaultPartition}#MEMORY#*`,
           ],
         },
       },

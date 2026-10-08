@@ -153,6 +153,31 @@ test("scopes the cleanup lease to its vault partition", () => {
   });
 });
 
+test("scopes cleanup tombstone access to tombstone rows in its vault", () => {
+  const template = synth(vaultA);
+
+  template.hasResourceProperties("AWS::IAM::Policy", {
+    PolicyDocument: {
+      Statement: assertions.Match.arrayWith([
+        assertions.Match.objectLike({
+          Sid: "CairnCleanupTombstones",
+          Effect: "Allow",
+          Action: ["dynamodb:Query", "dynamodb:UpdateItem"],
+          Condition: {
+            "ForAllValues:StringLike": {
+              "dynamodb:LeadingKeys": [
+                `VAULT#${vaultA}#TOMBSTONE`,
+                `VAULT#${vaultA}#TOMBSTONE#*`,
+                `VAULT#${vaultA}#MEMORY#*`,
+              ],
+            },
+          },
+        }),
+      ]),
+    },
+  });
+});
+
 test("rejects unsafe embed model context before synthesis", () => {
   assert.throws(() => parseStackConfig({
     vaultId: vaultA,

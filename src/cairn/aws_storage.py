@@ -480,18 +480,12 @@ class AwsVault(StorageBackend):
 
     def _put_content_object(self, key: str, content: str) -> None:
         body = content.encode("utf-8")
-        try:
-            self._s3.head_object(Bucket=self._config.content_bucket, Key=key)
-        except Exception as error:
-            status = getattr(error, "response", {}).get("ResponseMetadata", {}).get("HTTPStatusCode")
-            if status != 404:
-                raise OSError("AWS content storage could not be checked") from None
-            self._s3.put_object(
-                Bucket=self._config.content_bucket,
-                Key=key,
-                Body=body,
-                ContentType="text/plain; charset=utf-8",
-            )
+        self._s3.put_object(
+            Bucket=self._config.content_bucket,
+            Key=key,
+            Body=body,
+            ContentType="text/plain; charset=utf-8",
+        )
 
     def _get_content_object(self, key: str, content_hash: str) -> str:
         try:
@@ -635,7 +629,6 @@ class AwsVault(StorageBackend):
                 content = snapshot.get("content")
                 content_hash = snapshot.get("content_hash")
                 if isinstance(content, str) and isinstance(content_hash, str):
-                    self._content_object(content_hash, content)
                     content_object_key = self._event_content_key(content_hash)
                     self._put_content_object(content_object_key, content)
                 if content_object_key:
@@ -1091,6 +1084,7 @@ class AwsVault(StorageBackend):
         removed = 0
         for start in range(0, len(candidates), 100):
             batch = candidates[start:start + 100]
+            versions = {key: self._list_object_versions(key) for key in batch}
             hashes = sorted({f"sha256:{key.rsplit('/', 1)[-1]}" for key in batch})
             leases: dict[str, str] = {}
             try:
@@ -1106,14 +1100,15 @@ class AwsVault(StorageBackend):
                     if content_hash in leases and key not in referenced:
                         owner = leases[content_hash]
                         try:
-                            self._delete_object_versions(
+                            deleted = self._delete_object_versions(
                                 key,
+                                versions=versions[key],
                                 before_delete=lambda digest=content_hash, lease_owner=owner:
                                     self._renew_content_lease(digest, lease_owner),
                             )
                         except _ContentLeaseLostError:
                             continue
-                        removed += 1
+                        removed += int(deleted)
             finally:
                 for content_hash, owner in leases.items():
                     self._release_content_lease(content_hash, owner)
@@ -1139,33 +1134,51 @@ class AwsVault(StorageBackend):
                         referenced.add(content_key)
         return referenced
 
-    def _delete_object_versions(
-        self, key: str, before_delete: Callable[[], bool] | None = None,
-    ) -> None:
+    def _list_object_versions(self, key: str) -> list[dict[str, str]]:
         markers: dict[str, str] = {}
+        versions: list[dict[str, str]] = []
         while True:
             page = self._s3.list_object_versions(
                 Bucket=self._config.content_bucket,
                 Prefix=key,
                 **markers,
             )
-            versions = [
+            versions.extend(
                 {"Key": version["Key"], "VersionId": version["VersionId"]}
                 for version in (*page.get("Versions", []), *page.get("DeleteMarkers", []))
                 if version.get("Key") == key
-            ]
-            if versions:
-                if before_delete is not None and not before_delete():
-                    raise _ContentLeaseLostError("content cleanup lease expired or changed owner")
-                self._s3.delete_objects(
-                    Bucket=self._config.content_bucket,
-                    Delete={"Objects": versions, "Quiet": True},
-                )
+            )
             if not page.get("IsTruncated"):
-                return
+                return versions
             markers = {"KeyMarker": page["NextKeyMarker"]}
             if page.get("NextVersionIdMarker"):
                 markers["VersionIdMarker"] = page["NextVersionIdMarker"]
+
+    def _delete_object_versions(
+        self,
+        key: str,
+        versions: list[dict[str, str]] | None = None,
+        before_delete: Callable[[], bool] | None = None,
+    ) -> bool:
+        snapshot = self._list_object_versions(key) if versions is None else versions
+        for start in range(0, len(snapshot), 1000):
+            batch = snapshot[start:start + 1000]
+            if before_delete is not None and not before_delete():
+                raise _ContentLeaseLostError("content cleanup lease expired or changed owner")
+            response = self._s3.delete_objects(
+                Bucket=self._config.content_bucket,
+                Delete={"Objects": batch, "Quiet": True},
+            )
+            if response.get("Errors"):
+                raise OSError("AWS content cleanup could not delete all object versions")
+        try:
+            self._s3.head_object(Bucket=self._config.content_bucket, Key=key)
+        except Exception as error:
+            status = getattr(error, "response", {}).get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if status == 404:
+                return True
+            raise OSError("AWS content storage could not be checked after cleanup") from None
+        return False
 
     def doc_stats(self) -> dict:
         self._refresh_cloud_events()
