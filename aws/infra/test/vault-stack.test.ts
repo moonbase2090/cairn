@@ -76,6 +76,22 @@ test("cleanup Lambda does not reserve account concurrency", () => {
   assert.equal(cleanup.Properties.ReservedConcurrentExecutions, undefined);
 });
 
+test("grants the cleanup Lambda use of the vault encryption key", () => {
+  const template = synth(vaultA);
+  const keyId = Object.keys(template.findResources("AWS::KMS::Key"))[0];
+
+  template.hasResourceProperties("AWS::IAM::Policy", {
+    PolicyDocument: {
+      Statement: assertions.Match.arrayWith([
+        assertions.Match.objectLike({
+          Action: assertions.Match.arrayWith(["kms:Decrypt"]),
+          Resource: { "Fn::GetAtt": [keyId, "Arn"] },
+        }),
+      ]),
+    },
+  });
+});
+
 test("scopes the cleanup lease to its vault partition", () => {
   const template = synth(vaultA);
 

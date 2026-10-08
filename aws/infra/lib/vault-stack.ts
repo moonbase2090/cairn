@@ -241,6 +241,7 @@ export class CairnVaultStack extends Stack {
         VAULT_ID: props.vaultId,
       },
     });
+    key.grantEncryptDecrypt(cleanup);
     cleanup.addToRolePolicy(new iam.PolicyStatement({
       sid: "CairnCleanupTombstones",
       actions: ["dynamodb:Query", "dynamodb:UpdateItem"],
