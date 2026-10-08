@@ -116,16 +116,28 @@ test("grants the S3 Vectors indexer scoped decrypt access to the vault key", () 
     Resource: "*",
     Condition: {
       ArnEquals: {
-        "aws:SourceArn": {
-          "Fn::Join": [
-            "",
-            [
-              "arn:",
-              { Ref: "AWS::Partition" },
-              ":s3vectors:us-west-2:123456789012:bucket/cairn-vault-0123456789abcdef0123456789abcdef-vectors",
+        "aws:SourceArn": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                { Ref: "AWS::Partition" },
+                ":s3vectors:us-west-2:123456789012:bucket/cairn-vault-0123456789abcdef0123456789abcdef-vectors",
+              ],
             ],
-          ],
-        },
+          },
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                { Ref: "AWS::Partition" },
+                ":s3vectors:us-west-2:123456789012:bucket/cairn-vault-0123456789abcdef0123456789abcdef-vectors/index/cairn-vault-0123456789abcdef0123456789abcdef-index",
+              ],
+            ],
+          },
+        ],
       },
       StringEquals: { "aws:SourceAccount": "123456789012" },
       "ForAnyValue:StringEquals": {

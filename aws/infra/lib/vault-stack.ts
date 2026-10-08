@@ -122,6 +122,18 @@ export class CairnVaultStack extends Stack {
     const slug = resourceSlug(props.vaultId);
     const vectorBucketName = `${slug}-vectors`;
     const vectorIndexName = `${slug}-index`;
+    const vectorBucketArn = this.formatArn({
+      service: "s3vectors",
+      resource: "bucket",
+      resourceName: vectorBucketName,
+      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+    });
+    const vectorIndexArn = this.formatArn({
+      service: "s3vectors",
+      resource: "bucket",
+      resourceName: `${vectorBucketName}/index/${vectorIndexName}`,
+      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+    });
     const vaultPartition = `VAULT#${props.vaultId}`;
     const vaultPrefix = `${props.vaultId}/`;
     const key = new kms.Key(this, "VaultKey", {
@@ -198,12 +210,7 @@ export class CairnVaultStack extends Stack {
       resources: ["*"],
       conditions: {
         ArnEquals: {
-          "aws:SourceArn": this.formatArn({
-            service: "s3vectors",
-            resource: "bucket",
-            resourceName: vectorBucketName,
-            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
-          }),
+          "aws:SourceArn": [vectorBucketArn, vectorIndexArn],
         },
         StringEquals: { "aws:SourceAccount": this.account },
         "ForAnyValue:StringEquals": {
