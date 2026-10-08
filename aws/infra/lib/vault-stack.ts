@@ -233,7 +233,6 @@ export class CairnVaultStack extends Stack {
       handler: "cleanup.handler",
       code: lambda_.Code.fromAsset(join(__dirname, "../lambda")),
       timeout: Duration.minutes(15),
-      reservedConcurrentExecutions: 1,
       environment: {
         MEMORY_TABLE: memories.tableName,
         CONTENT_BUCKET: content.bucketName,

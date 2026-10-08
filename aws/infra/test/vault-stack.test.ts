@@ -68,6 +68,14 @@ test("creates isolated on-demand metadata, cache, content, and vector resources"
   });
 });
 
+test("cleanup Lambda does not reserve account concurrency", () => {
+  const template = synth(vaultA);
+  const [cleanup] = Object.values(template.findResources("AWS::Lambda::Function"));
+
+  assert.ok(cleanup);
+  assert.equal(cleanup.Properties.ReservedConcurrentExecutions, undefined);
+});
+
 test("rejects unsafe embed model context before synthesis", () => {
   assert.throws(() => parseStackConfig({
     vaultId: vaultA,
