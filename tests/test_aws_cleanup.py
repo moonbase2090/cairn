@@ -46,6 +46,16 @@ class FakeTable:
     def update_item(self, *, Key, UpdateExpression, ConditionExpression=None,
                     ExpressionAttributeValues=None, **_kwargs):
         if Key["PK"].endswith("#CLEANUP#LOCK"):
+            prefix = "SET "
+            assert UpdateExpression.startswith(prefix)
+            assignments = {
+                assignment.split("=", 1)[0].strip(): assignment.split("=", 1)[1].strip()
+                for assignment in UpdateExpression[len(prefix):].split(",")
+            }
+            assert assignments == {
+                "leaseOwner": ":owner",
+                "leaseExpiresAt": ":expires",
+            }
             with self.lease_lock:
                 if not self._lease_condition_holds(
                     ConditionExpression, ExpressionAttributeValues,
@@ -203,10 +213,23 @@ def test_overlapping_cleanup_invocations_share_a_lease(monkeypatch):
     monkeypatch.setenv("VECTOR_INDEX", "index")
     monkeypatch.setenv("VAULT_ID", VAULT_ID)
     first_result = []
-    first = threading.Thread(target=lambda: first_result.append(cleanup.handler({}, None)))
+    first_errors = []
+    first_done = threading.Event()
+
+    def run_first():
+        try:
+            first_result.append(cleanup.handler({}, None))
+        except Exception as error:
+            first_errors.append(error)
+        finally:
+            first_done.set()
+
+    first = threading.Thread(target=run_first)
 
     first.start()
-    assert table.query_entered.wait(timeout=5)
+    while not table.query_entered.is_set() and not first_done.wait(timeout=0.01):
+        pass
+    assert table.query_entered.is_set(), first_errors
     second = cleanup.handler({}, None)
     table.allow_query.set()
     first.join(timeout=5)
