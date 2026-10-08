@@ -449,7 +449,7 @@ class TestStorageContract:
         assert vault.read_content(vault.get("b")) == big
         assert vault.doc_stats()["files"] == 1
 
-    def test_documents_are_refcounted(self, vault):
+    def test_documents_are_refcounted(self, vault, backend_name):
         big = "y" * 200
         vault.insert(record("a", big), unit(0))
         vault.insert(record("b", big, task_id="t2"), unit(1))
@@ -458,6 +458,9 @@ class TestStorageContract:
         assert vault.read_content(vault.get("b")) == big
         vault.delete_by_keys(["b"])
         assert vault.doc_stats()["files"] == 0
+        # AWS document objects remain until the explicit orphan sweep or the
+        # scheduled tombstone cleaner removes them from the versioned bucket.
+        assert vault.sweep_orphan_docs() == (1 if backend_name == "aws" else 0)
         assert vault.sweep_orphan_docs() == 0
 
     def test_missing_document_is_loud(self, vault):

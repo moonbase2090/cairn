@@ -259,7 +259,7 @@ def _config() -> StorageConfig:
 
 def _open(tmp_path: Path, aws: FakeAws) -> AwsVault:
     return AwsVault(
-        tmp_path, "mock-embedder", 3, _config(),
+        tmp_path, "mock-embedder", 3, _config(), create=True,
         doc_threshold=4, _session=FakeSession(aws), _key_factory=Key,
         _serializer=aws.serializer,
     )

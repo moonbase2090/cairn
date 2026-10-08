@@ -59,6 +59,19 @@ def _dynamo_value(value):
     return value
 
 
+def _python_value(value):
+    """Convert DynamoDB resource numbers to SQLite-compatible Python values."""
+    if isinstance(value, Decimal):
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
+    if isinstance(value, dict):
+        return {key: _python_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_python_value(item) for item in value]
+    return value
+
+
 def _attribute_value_size(value: dict) -> int:
     kind, raw = next(iter(value.items()))
     if kind == "S":
@@ -106,7 +119,6 @@ class AwsVault(StorageBackend):
         _key_factory=None,
         _serializer=None,
     ) -> None:
-        del create  # Cloud resources are created only by the reviewed CDK control plane.
         if config.backend != "aws":
             raise ValueError("AwsVault requires backend = 'aws'")
         if not config.vault_id:
@@ -119,6 +131,7 @@ class AwsVault(StorageBackend):
         self._vector_error: str | None = None
         self._tx_depth = 0
         self._pending_cursors: list[dict] = []
+        self._pending_doc_sweep = False
 
         if _session is None:
             try:
@@ -155,7 +168,7 @@ class AwsVault(StorageBackend):
         from .store import Vault
 
         self._cache = Vault(cache_dir / "vault.db", embed_name, dims,
-                            create=True, doc_threshold=doc_threshold)
+                            create=create, doc_threshold=doc_threshold)
         self._set_cache_identity()
         self._check_local_identity()
         self._load_cloud_snapshot()
@@ -264,6 +277,8 @@ class AwsVault(StorageBackend):
     def _load_cloud_snapshot(self) -> None:
         items = self._memory_items()
         with self._cache.transaction():
+            if self._cache._vec_ok:
+                self._cache.conn.execute("DELETE FROM mem_vec")
             self._cache.conn.execute("DELETE FROM memories")
             self._cache.conn.execute("DELETE FROM sync_events")
             self._cache.conn.execute("DELETE FROM sync_tombstones")
@@ -329,6 +344,7 @@ class AwsVault(StorageBackend):
             self._ensure_online_for_write()
             start = int(self._cache.export_sync_events().get("cursor", 0))
             self._pending_cursors = []
+            self._pending_doc_sweep = False
         self._tx_depth += 1
         try:
             with self._cache.transaction():
@@ -339,10 +355,13 @@ class AwsVault(StorageBackend):
                     self._commit_remote_events(
                         feed["events"], self._pending_cursors, conflicts,
                     )
+            if outer and self._pending_doc_sweep:
+                self._cache.sweep_orphan_docs()
         finally:
             self._tx_depth -= 1
             if outer:
                 self._pending_cursors = []
+                self._pending_doc_sweep = False
 
     def _serialize(self, values: dict) -> dict:
         return {
@@ -399,7 +418,7 @@ class AwsVault(StorageBackend):
         return np.asarray(found[0]["data"]["float32"], dtype=np.float32)
 
     def _decode_row(self, item: dict) -> Mapping:
-        values = {field: item.get(field) for field in MEMORY_FIELDS}
+        values = {field: _python_value(item.get(field)) for field in MEMORY_FIELDS}
         values["content_ref"] = item.get("contentObjectKey") if values.get("content") is None else None
         values["contentObjectKey"] = item.get("contentObjectKey")
         return MappingProxyType(values)
@@ -801,11 +820,15 @@ class AwsVault(StorageBackend):
 
     def delete_by_keys(self, keys: list[str], reason: str = "deleted") -> int:
         with self.transaction():
-            return self._cache.delete_by_keys(keys, reason)
+            deleted = self._cache.delete_by_keys(keys, reason)
+            self._pending_doc_sweep = self._pending_doc_sweep or deleted > 0
+            return deleted
 
     def delete_by_canonical(self, canonical_id: str, reason: str = "purged") -> int:
         with self.transaction():
-            return self._cache.delete_by_canonical(canonical_id, reason)
+            deleted = self._cache.delete_by_canonical(canonical_id, reason)
+            self._pending_doc_sweep = self._pending_doc_sweep or deleted > 0
+            return deleted
 
     def count(self) -> int:
         self._refresh_cloud_events()
@@ -900,14 +923,33 @@ class AwsVault(StorageBackend):
         return {"rebuilt": rebuilt, "vec_in_sync": True}
 
     def read_content(self, row: Mapping) -> str:
-        if self._stale:
-            return self._cache.read_content(row)
         content = row.get("content")
         content_hash = str(row.get("content_hash") or "")
         if isinstance(content, str):
             if f"sha256:{content_digest(content)}" != content_hash:
                 raise ContentIntegrityError("stored content failed its integrity check")
             return content
+        memory_key = row.get("key")
+        if not isinstance(memory_key, str):
+            raise ContentIntegrityError("stored content document is missing")
+        if self._stale:
+            cached = self._cache.get(memory_key)
+            if cached is None:
+                raise ContentIntegrityError("stored content document is missing")
+            return self._cache.read_content(cached)
+        try:
+            current = self._table.get_item(
+                Key=self._memory_key(memory_key), ConsistentRead=True,
+            ).get("Item")
+            self._stale = False
+        except Exception:
+            self._stale = True
+            cached = self._cache.get(memory_key)
+            if cached is None:
+                raise ContentIntegrityError("stored content document is missing") from None
+            return self._cache.read_content(cached)
+        if not current or current.get("recordType") != "memory":
+            raise ContentIntegrityError("stored content document is missing")
         key = row.get("contentObjectKey") or self._content_key(content_hash)
         if not content_hash or not isinstance(key, str):
             raise ContentIntegrityError("stored content document is missing")
@@ -1132,6 +1174,7 @@ class AwsVault(StorageBackend):
         ):
             items.extend(page.get("Items", []))
         return [{
+            "vault_id": self._identity.vault_id,
             "peer": item.get("peer", ""),
             "direction": item.get("direction", ""),
             "token_id": item.get("token_id", ""),
