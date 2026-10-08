@@ -241,7 +241,18 @@ export class CairnVaultStack extends Stack {
         VAULT_ID: props.vaultId,
       },
     });
-    key.grantEncryptDecrypt(cleanup);
+    cleanup.addToRolePolicy(new iam.PolicyStatement({
+      sid: "CairnCleanupKmsDecrypt",
+      actions: ["kms:Decrypt"],
+      resources: [key.keyArn],
+      conditions: {
+        StringEquals: {
+          "kms:ViaService": `dynamodb.${this.region}.amazonaws.com`,
+          "kms:EncryptionContext:aws:dynamodb:tableName": memories.tableName,
+          "kms:EncryptionContext:aws:dynamodb:subscriberId": this.account,
+        },
+      },
+    }));
     cleanup.addToRolePolicy(new iam.PolicyStatement({
       sid: "CairnCleanupTombstones",
       actions: ["dynamodb:Query", "dynamodb:UpdateItem"],
@@ -260,7 +271,10 @@ export class CairnVaultStack extends Stack {
       resources: [memories.tableArn],
       conditions: {
         "ForAllValues:StringLike": {
-          "dynamodb:LeadingKeys": [`${vaultPartition}#CLEANUP#LOCK`],
+          "dynamodb:LeadingKeys": [
+            `${vaultPartition}#CLEANUP#LOCK`,
+            `${vaultPartition}#CONTENT#LOCK#*`,
+          ],
         },
       },
     }));

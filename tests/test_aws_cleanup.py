@@ -24,10 +24,12 @@ class FakeTable:
         self.updates = []
         self.lease_owner = None
         self.lease_expires_at = None
+        self.content_leases = {}
         self.lease_lock = threading.Lock()
         self.query_entered = None
         self.allow_query = None
         self.block_first_query = False
+        self.on_version_delete = None
 
     def query(self, **kwargs):
         condition = kwargs["KeyConditionExpression"].get_expression()
@@ -45,7 +47,7 @@ class FakeTable:
 
     def update_item(self, *, Key, UpdateExpression, ConditionExpression=None,
                     ExpressionAttributeValues=None, **_kwargs):
-        if Key["PK"].endswith("#CLEANUP#LOCK"):
+        if Key["PK"].endswith("#CLEANUP#LOCK") or "#CONTENT#LOCK#" in Key["PK"]:
             prefix = "SET "
             assert UpdateExpression.startswith(prefix)
             assignments = {
@@ -57,12 +59,23 @@ class FakeTable:
                 "leaseExpiresAt": ":expires",
             }
             with self.lease_lock:
+                content_key = Key["PK"] if "#CONTENT#LOCK#" in Key["PK"] else None
+                lease = self.content_leases.get(content_key) if content_key else None
+                lease_expires_at = (
+                    lease[1] if lease else None
+                ) if content_key else self.lease_expires_at
                 if not self._lease_condition_holds(
-                    ConditionExpression, ExpressionAttributeValues,
+                    ConditionExpression, ExpressionAttributeValues, lease_expires_at,
                 ):
                     raise _conditional_failure()
-                self.lease_owner = ExpressionAttributeValues[":owner"]
-                self.lease_expires_at = ExpressionAttributeValues[":expires"]
+                if content_key:
+                    self.content_leases[content_key] = (
+                        ExpressionAttributeValues[":owner"],
+                        ExpressionAttributeValues[":expires"],
+                    )
+                else:
+                    self.lease_owner = ExpressionAttributeValues[":owner"]
+                    self.lease_expires_at = ExpressionAttributeValues[":expires"]
             return
         self.updates.append((Key, UpdateExpression))
         if "vectorCleanupDone" in UpdateExpression:
@@ -70,19 +83,27 @@ class FakeTable:
         if "contentCleanupDone" in UpdateExpression:
             self.tombstone["contentCleanupDone"] = True
 
-    def _lease_condition_holds(self, expression, values):
+    def _lease_condition_holds(self, expression, values, lease_expires_at):
         prefix = "attribute_not_exists(leaseExpiresAt) OR leaseExpiresAt "
         assert expression.startswith(prefix)
         operator, reference = expression[len(prefix):].split()
         assert operator in {"<", ">"}
         assert reference == ":now"
-        if self.lease_expires_at is None:
+        if lease_expires_at is None:
             return True
         if operator == "<":
-            return self.lease_expires_at < values[reference]
-        return self.lease_expires_at > values[reference]
+            return lease_expires_at < values[reference]
+        return lease_expires_at > values[reference]
 
     def delete_item(self, *, Key, ConditionExpression, ExpressionAttributeValues):
+        if "#CONTENT#LOCK#" in Key["PK"]:
+            assert ConditionExpression == "leaseOwner = :owner"
+            with self.lease_lock:
+                lease = self.content_leases.get(Key["PK"])
+                if not lease or lease[0] != ExpressionAttributeValues[":owner"]:
+                    raise _conditional_failure()
+                self.content_leases.pop(Key["PK"])
+            return
         assert Key["PK"].endswith("#CLEANUP#LOCK")
         assert ConditionExpression == "leaseOwner = :owner"
         with self.lease_lock:
@@ -101,10 +122,13 @@ class FakeDynamo:
 
 
 class FakeS3:
-    def __init__(self):
+    def __init__(self, table=None):
         self.deleted = []
+        self.table = table
 
     def list_object_versions(self, *, Prefix, **_kwargs):
+        if self.table and self.table.on_version_delete:
+            self.table.on_version_delete(Prefix)
         return {
             "Versions": [{"Key": Prefix, "VersionId": "version-1"}],
             "DeleteMarkers": [],
@@ -143,7 +167,7 @@ def _conditional_failure():
 
 
 def _run(monkeypatch, table):
-    s3 = FakeS3()
+    s3 = FakeS3(table)
     vectors = FakeVectors()
     monkeypatch.setattr(cleanup.boto3, "resource", lambda _name: FakeDynamo(table))
     monkeypatch.setattr(
@@ -193,6 +217,22 @@ def test_cleanup_keeps_content_while_another_memory_owns_the_hash(monkeypatch):
     assert vectors.deleted == ["mem_agent_old"]
     assert table.tombstone["vectorCleanupDone"] is True
     assert "contentCleanupDone" not in table.tombstone
+
+
+def test_cleanup_holds_content_hash_lease_through_version_deletion(monkeypatch):
+    table = _table()
+    observed = []
+    table.on_version_delete = lambda _key: observed.append(
+        any(owner for owner, _expires in table.content_leases.values())
+    )
+
+    result, s3, _vectors = _run(monkeypatch, table)
+
+    content_lock = f"VAULT#{VAULT_ID}#CONTENT#LOCK#abc123"
+    assert observed == [True]
+    assert result["removed_content_objects"] == 1
+    assert s3.deleted == [{"Key": OBJECT_KEY, "VersionId": "version-1"}]
+    assert content_lock not in table.content_leases
 
 
 def test_overlapping_cleanup_invocations_share_a_lease(monkeypatch):

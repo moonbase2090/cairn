@@ -36,6 +36,7 @@ _EVENT_SHARDS = 16
 _DYNAMODB_ACTION_LIMIT = 100
 _DYNAMODB_TRANSACTION_BYTES = 4 * 1024 * 1024
 _EMBEDDING_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
+_CONTENT_LEASE_SECONDS = 30 * 60
 
 
 def _sha(text: str) -> str:
@@ -44,6 +45,18 @@ def _sha(text: str) -> str:
 
 def _shard(text: str, count: int = _EVENT_SHARDS) -> str:
     return f"{int(_sha(text)[:8], 16) % count:02x}"
+
+
+def _is_content_object_key(key: str, vault_id: str) -> bool:
+    prefixes = (
+        f"{vault_id}/content/",
+        f"{vault_id}/events/content/",
+    )
+    prefix = next((value for value in prefixes if key.startswith(value)), None)
+    if prefix is None:
+        return False
+    digest = key[len(prefix):]
+    return len(digest) == 64 and all(char in "0123456789abcdef" for char in digest)
 
 
 def _dynamo_value(value):
@@ -245,6 +258,65 @@ class AwsVault(StorageBackend):
     def _event_content_key(self, content_hash: str) -> str:
         digest = content_hash.removeprefix("sha256:")
         return f"{self._identity.vault_id}/events/content/{digest}"
+
+    def _content_lease_key(self, content_hash: str) -> dict[str, str]:
+        digest = content_hash.removeprefix("sha256:")
+        return {
+            "PK": f"VAULT#{self._identity.vault_id}#CONTENT#LOCK#{digest}",
+            "SK": "LEASE",
+        }
+
+    def _content_write_guards(self, events: list[dict]) -> list[dict]:
+        content_hashes = {
+            snapshot.get("content_hash")
+            for event in events
+            if isinstance((snapshot := event.get("snapshot")), dict)
+            and isinstance(snapshot.get("content"), str)
+            and isinstance(snapshot.get("content_hash"), str)
+            and snapshot.get("content_hash")
+        }
+        now = int(time.time())
+        condition = "attribute_not_exists(leaseExpiresAt) OR leaseExpiresAt < :now"
+        return [{"ConditionCheck": {
+            "TableName": self._config.table,
+            "Key": self._serialize(self._content_lease_key(content_hash)),
+            "ConditionExpression": condition,
+            "ExpressionAttributeValues": self._serialize({":now": now}),
+        }} for content_hash in sorted(content_hashes)]
+
+    def _acquire_content_lease(self, content_hash: str) -> str | None:
+        key = self._content_lease_key(content_hash)
+        owner = uuid.uuid4().hex
+        now = int(time.time())
+        try:
+            self._table.update_item(
+                Key=key,
+                UpdateExpression="SET leaseOwner = :owner, leaseExpiresAt = :expires",
+                ConditionExpression=(
+                    "attribute_not_exists(leaseExpiresAt) OR leaseExpiresAt < :now"
+                ),
+                ExpressionAttributeValues={
+                    ":owner": owner,
+                    ":expires": now + _CONTENT_LEASE_SECONDS,
+                    ":now": now,
+                },
+            )
+        except Exception as error:
+            if getattr(error, "response", {}).get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return None
+            raise
+        return owner
+
+    def _release_content_lease(self, content_hash: str, owner: str) -> None:
+        try:
+            self._table.delete_item(
+                Key=self._content_lease_key(content_hash),
+                ConditionExpression="leaseOwner = :owner",
+                ExpressionAttributeValues={":owner": owner},
+            )
+        except Exception as error:
+            if getattr(error, "response", {}).get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
 
     def _query_pages(self, **kwargs) -> Iterator[dict]:
         request = dict(kwargs)
@@ -756,7 +828,9 @@ class AwsVault(StorageBackend):
         cursors = list(cursors_by_peer.values())
         latest = self._remote_event_rows(events)
         counter = self._get_counter() if events else 0
+        content_write_guards = self._content_write_guards(events)
         actions = self._remote_event_actions(events, counter)
+        actions.extend(content_write_guards)
         state_actions, vector_updates = self._remote_state_actions(latest)
         actions.extend(state_actions)
         actions.extend(self._remote_cursor_actions(cursors))
@@ -933,10 +1007,7 @@ class AwsVault(StorageBackend):
         if not isinstance(memory_key, str):
             raise ContentIntegrityError("stored content document is missing")
         if self._stale:
-            cached = self._cache.get(memory_key)
-            if cached is None:
-                raise ContentIntegrityError("stored content document is missing")
-            return self._cache.read_content(cached)
+            return self._read_cached_content(memory_key, content_hash)
         try:
             current = self._table.get_item(
                 Key=self._memory_key(memory_key), ConsistentRead=True,
@@ -944,10 +1015,7 @@ class AwsVault(StorageBackend):
             self._stale = False
         except Exception:
             self._stale = True
-            cached = self._cache.get(memory_key)
-            if cached is None:
-                raise ContentIntegrityError("stored content document is missing") from None
-            return self._cache.read_content(cached)
+            return self._read_cached_content(memory_key, content_hash)
         if not current or current.get("recordType") != "memory":
             raise ContentIntegrityError("stored content document is missing")
         key = row.get("contentObjectKey") or self._content_key(content_hash)
@@ -955,24 +1023,14 @@ class AwsVault(StorageBackend):
             raise ContentIntegrityError("stored content document is missing")
         return self._get_content_object(key, content_hash)
 
+    def _read_cached_content(self, memory_key: str, expected_hash: str) -> str:
+        cached = self._cache.get(memory_key)
+        if cached is None or not expected_hash or cached["content_hash"] != expected_hash:
+            raise ContentIntegrityError("cached content does not match the requested revision")
+        return self._cache.read_content(cached)
+
     def sweep_orphan_docs(self) -> int:
-        referenced = {
-            item.get("contentObjectKey") for item in self._memory_items()
-            if item.get("contentObjectKey")
-        }
-        cursor = 0
-        while True:
-            pack = self.export_sync_events(after=cursor, limit=1000)
-            if not pack["events"]:
-                break
-            for event in pack["events"]:
-                content_key = event.get("contentObjectKey")
-                if content_key:
-                    referenced.add(content_key)
-            cursor = int(pack["cursor"])
-            if len(pack["events"]) < 1000:
-                break
-        removed = 0
+        candidates = []
         for prefix in (
             f"{self._identity.vault_id}/content/",
             f"{self._identity.vault_id}/events/content/",
@@ -984,14 +1042,55 @@ class AwsVault(StorageBackend):
                     Prefix=prefix,
                     **({"ContinuationToken": token} if token else {}),
                 )
-                for item in page.get("Contents", []):
-                    if item["Key"] not in referenced:
-                        self._delete_object_versions(item["Key"])
-                        removed += 1
+                candidates.extend(
+                    item["Key"] for item in page.get("Contents", [])
+                    if _is_content_object_key(item.get("Key", ""), self._identity.vault_id)
+                )
                 token = page.get("NextContinuationToken")
                 if not token:
                     break
+        removed = 0
+        for start in range(0, len(candidates), 100):
+            batch = candidates[start:start + 100]
+            hashes = sorted({f"sha256:{key.rsplit('/', 1)[-1]}" for key in batch})
+            leases: dict[str, str] = {}
+            try:
+                for content_hash in hashes:
+                    owner = self._acquire_content_lease(content_hash)
+                    if owner is not None:
+                        leases[content_hash] = owner
+                if not leases:
+                    continue
+                referenced = self._content_object_references()
+                for key in batch:
+                    content_hash = f"sha256:{key.rsplit('/', 1)[-1]}"
+                    if content_hash in leases and key not in referenced:
+                        self._delete_object_versions(key)
+                        removed += 1
+            finally:
+                for content_hash, owner in leases.items():
+                    self._release_content_lease(content_hash, owner)
         return removed
+
+    def _content_object_references(self) -> set[str]:
+        referenced = {
+            item["contentObjectKey"] for item in self._memory_items()
+            if item.get("contentObjectKey")
+        }
+        cursor = 0
+        while True:
+            items = self._query_event_items(cursor, 1000)
+            for item in items:
+                content_key = item.get("contentObjectKey")
+                if content_key:
+                    referenced.add(content_key)
+            if not items:
+                break
+            next_cursor = max(int(item.get("seq", 0)) for item in items)
+            if next_cursor <= cursor or len(items) < 1000:
+                break
+            cursor = next_cursor
+        return referenced
 
     def _delete_object_versions(self, key: str) -> None:
         markers: dict[str, str] = {}
@@ -1173,7 +1272,7 @@ class AwsVault(StorageBackend):
             KeyConditionExpression=self._key("PK").eq(f"VAULT#{self._identity.vault_id}#CURSORS"),
         ):
             items.extend(page.get("Items", []))
-        return [{
+        cursors = [{
             "vault_id": self._identity.vault_id,
             "peer": item.get("peer", ""),
             "direction": item.get("direction", ""),
@@ -1181,6 +1280,12 @@ class AwsVault(StorageBackend):
             "cursor": int(item.get("cursor", 0)),
             "updated_at": int(item.get("updated_at", 0)),
         } for item in items if item.get("recordType") == "sync-cursor"]
+        return sorted(
+            cursors,
+            key=lambda cursor: (
+                cursor["vault_id"], cursor["peer"], cursor["token_id"], cursor["direction"],
+            ),
+        )
 
     def set_sync_cursor(self, peer: str, direction: str, cursor: int, now: int,
                         token_id: str = "") -> None:

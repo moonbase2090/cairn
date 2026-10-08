@@ -76,17 +76,28 @@ test("cleanup Lambda does not reserve account concurrency", () => {
   assert.equal(cleanup.Properties.ReservedConcurrentExecutions, undefined);
 });
 
-test("grants the cleanup Lambda use of the vault encryption key", () => {
+test("limits cleanup KMS decryption to its DynamoDB table", () => {
   const template = synth(vaultA);
   const keyId = Object.keys(template.findResources("AWS::KMS::Key"))[0];
 
   template.hasResourceProperties("AWS::IAM::Policy", {
     PolicyDocument: {
       Statement: assertions.Match.arrayWith([
-        assertions.Match.objectLike({
-          Action: assertions.Match.arrayWith(["kms:Decrypt"]),
+        {
+          Sid: "CairnCleanupKmsDecrypt",
+          Effect: "Allow",
+          Action: "kms:Decrypt",
           Resource: { "Fn::GetAtt": [keyId, "Arn"] },
-        }),
+          Condition: {
+            StringEquals: {
+              "kms:ViaService": "dynamodb.us-west-2.amazonaws.com",
+              "kms:EncryptionContext:aws:dynamodb:tableName": {
+                Ref: assertions.Match.stringLikeRegexp("VaultTable"),
+              },
+              "kms:EncryptionContext:aws:dynamodb:subscriberId": "123456789012",
+            },
+          },
+        },
       ]),
     },
   });
@@ -104,7 +115,10 @@ test("scopes the cleanup lease to its vault partition", () => {
           Action: ["dynamodb:DeleteItem", "dynamodb:UpdateItem"],
           Condition: {
             "ForAllValues:StringLike": {
-              "dynamodb:LeadingKeys": [`VAULT#${vaultA}#CLEANUP#LOCK`],
+              "dynamodb:LeadingKeys": [
+                `VAULT#${vaultA}#CLEANUP#LOCK`,
+                `VAULT#${vaultA}#CONTENT#LOCK#*`,
+              ],
             },
           },
         }),

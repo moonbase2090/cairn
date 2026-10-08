@@ -11,6 +11,7 @@ from botocore.exceptions import ClientError
 
 
 _LEASE_SECONDS = 30 * 60
+_CONTENT_LEASE_SECONDS = 30 * 60
 
 
 def handler(_event, _context):
@@ -73,6 +74,49 @@ def _release_lease(table, lease_key: dict, lease_owner: str) -> None:
             raise
 
 
+def _content_lease_key(vault_id: str, content_hash: str) -> dict:
+    digest = content_hash.removeprefix("sha256:")
+    return {
+        "PK": f"VAULT#{vault_id}#CONTENT#LOCK#{digest}",
+        "SK": "LEASE",
+    }
+
+
+def _acquire_content_lease(table, lease_key: dict) -> str | None:
+    now = int(time.time())
+    owner = uuid.uuid4().hex
+    try:
+        table.update_item(
+            Key=lease_key,
+            UpdateExpression="SET leaseOwner = :owner, leaseExpiresAt = :expires",
+            ConditionExpression=(
+                "attribute_not_exists(leaseExpiresAt) OR leaseExpiresAt < :now"
+            ),
+            ExpressionAttributeValues={
+                ":owner": owner,
+                ":expires": now + _CONTENT_LEASE_SECONDS,
+                ":now": now,
+            },
+        )
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return None
+        raise
+    return owner
+
+
+def _release_content_lease(table, lease_key: dict, lease_owner: str) -> None:
+    try:
+        table.delete_item(
+            Key=lease_key,
+            ConditionExpression="leaseOwner = :owner",
+            ExpressionAttributeValues={":owner": lease_owner},
+        )
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+
+
 def _cleanup_vault(table, s3, vectors, bucket_name: str, vector_bucket: str,
                    vector_index: str, vault_id: str) -> dict:
     tombstone_partition = f"VAULT#{vault_id}#TOMBSTONE"
@@ -94,28 +138,36 @@ def _cleanup_vault(table, s3, vectors, bucket_name: str, vector_bucket: str,
             object_key = item.get("contentObjectKey")
             content_done = not (content_hash and object_key)
             if content_hash and object_key:
-                has_owner = False
-                for shard in range(16):
-                    request = {
-                        "KeyConditionExpression": Key("PK").eq(f"{memory_prefix}{shard:02x}"),
-                        "FilterExpression": Attr("recordType").eq("memory") & Attr("content_hash").eq(content_hash),
-                        "ConsistentRead": True,
-                    }
-                    while True:
-                        page = table.query(**request)
-                        if page.get("Items"):
-                            has_owner = True
-                            break
-                        last_key = page.get("LastEvaluatedKey")
-                        if not last_key:
-                            break
-                        request["ExclusiveStartKey"] = last_key
-                    if has_owner:
-                        break
-                if not has_owner:
-                    _delete_versions(s3, bucket_name, object_key)
-                    removed_objects += 1
-                    content_done = True
+                content_lease_key = _content_lease_key(vault_id, content_hash)
+                content_lease_owner = _acquire_content_lease(table, content_lease_key)
+                if content_lease_owner is not None:
+                    try:
+                        has_owner = False
+                        for shard in range(16):
+                            request = {
+                                "KeyConditionExpression": Key("PK").eq(f"{memory_prefix}{shard:02x}"),
+                                "FilterExpression": Attr("recordType").eq("memory") & Attr("content_hash").eq(content_hash),
+                                "ConsistentRead": True,
+                            }
+                            while True:
+                                page = table.query(**request)
+                                if page.get("Items"):
+                                    has_owner = True
+                                    break
+                                last_key = page.get("LastEvaluatedKey")
+                                if not last_key:
+                                    break
+                                request["ExclusiveStartKey"] = last_key
+                            if has_owner:
+                                break
+                        if not has_owner:
+                            _delete_versions(s3, bucket_name, object_key)
+                            removed_objects += 1
+                            content_done = True
+                    finally:
+                        _release_content_lease(
+                            table, content_lease_key, content_lease_owner,
+                        )
             key = item.get("key")
             if isinstance(key, str) and key and not item.get("vectorCleanupDone"):
                 vectors.delete_vectors(
