@@ -150,11 +150,11 @@ def _cleanup_vault(table, s3, vectors, bucket_name: str, vector_bucket: str,
                                 "ConsistentRead": True,
                             }
                             while True:
-                                page = table.query(**request)
-                                if page.get("Items"):
+                                shard_page = table.query(**request)
+                                if shard_page.get("Items"):
                                     has_owner = True
                                     break
-                                last_key = page.get("LastEvaluatedKey")
+                                last_key = shard_page.get("LastEvaluatedKey")
                                 if not last_key:
                                     break
                                 request["ExclusiveStartKey"] = last_key

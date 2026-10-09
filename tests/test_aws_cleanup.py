@@ -280,3 +280,98 @@ def test_overlapping_cleanup_invocations_share_a_lease(monkeypatch):
     assert len(s3.deleted) == 1
     assert vectors.deleted == ["mem_agent_old"]
     assert table.lease_owner is None
+
+
+class PaginatingFakeTable(FakeTable):
+    """Tombstone and memory-shard queries with LastEvaluatedKey pagination."""
+
+    def __init__(self, tombstone_pages, memory_shard_pages):
+        first = tombstone_pages[0]["Items"][0]
+        super().__init__(first, memory=None)
+        self.tombstone_pages = tombstone_pages
+        self.memory_shard_pages = memory_shard_pages
+        self.tombstones = {
+            item["SK"]: item
+            for page in tombstone_pages
+            for item in page.get("Items", [])
+        }
+
+    def query(self, **kwargs):
+        condition = kwargs["KeyConditionExpression"].get_expression()
+        key = condition["values"][0].name
+        value = condition["values"][1]
+        if key == "GSI0PK" and value == f"VAULT#{VAULT_ID}#TOMBSTONE":
+            if kwargs.get("ExclusiveStartKey"):
+                return self.tombstone_pages[1]
+            return self.tombstone_pages[0]
+        if key == "PK" and str(value).startswith(f"VAULT#{VAULT_ID}#MEMORY#"):
+            pages = self.memory_shard_pages.get(value, [{"Items": []}])
+            if kwargs.get("ExclusiveStartKey"):
+                return pages[1] if len(pages) > 1 else pages[-1]
+            return pages[0]
+        return {"Items": []}
+
+    def update_item(self, *, Key, UpdateExpression, ConditionExpression=None,
+                    ExpressionAttributeValues=None, **_kwargs):
+        if Key["PK"].endswith("#CLEANUP#LOCK") or "#CONTENT#LOCK#" in Key["PK"]:
+            return super().update_item(
+                Key=Key,
+                UpdateExpression=UpdateExpression,
+                ConditionExpression=ConditionExpression,
+                ExpressionAttributeValues=ExpressionAttributeValues,
+            )
+        tombstone = self.tombstones.get(Key["SK"])
+        if tombstone is None:
+            raise AssertionError(f"unexpected tombstone update for {Key!r}")
+        self.updates.append((Key, UpdateExpression))
+        if "vectorCleanupDone" in UpdateExpression:
+            tombstone["vectorCleanupDone"] = True
+        if "contentCleanupDone" in UpdateExpression:
+            tombstone["contentCleanupDone"] = True
+
+
+def test_cleanup_paginates_tombstones_after_paginated_memory_shard_scan(monkeypatch):
+    memory_prefix = f"VAULT#{VAULT_ID}#MEMORY#00"
+    tomb_one = {
+        "PK": f"VAULT#{VAULT_ID}#TOMBSTONE#00",
+        "SK": "TOMBSTONE#mem_agent_old_one",
+        "key": "mem_agent_old_one",
+        "content_hash": "sha256:abc123",
+        "contentObjectKey": f"{VAULT_ID}/content/abc123",
+    }
+    tomb_two = {
+        "PK": f"VAULT#{VAULT_ID}#TOMBSTONE#00",
+        "SK": "TOMBSTONE#mem_agent_old_two",
+        "key": "mem_agent_old_two",
+        "content_hash": "sha256:def456",
+        "contentObjectKey": f"{VAULT_ID}/content/def456",
+    }
+    table = PaginatingFakeTable(
+        tombstone_pages=[
+            {
+                "Items": [tomb_one],
+                "LastEvaluatedKey": {"GSI0PK": tomb_one["PK"], "GSI0SK": tomb_one["SK"]},
+            },
+            {"Items": [tomb_two]},
+        ],
+        memory_shard_pages={
+            memory_prefix: [
+                {
+                    "Items": [],
+                    "LastEvaluatedKey": {"PK": memory_prefix, "SK": "MEMORY#scan-cursor"},
+                },
+                {"Items": []},
+            ],
+        },
+    )
+
+    result, s3, vectors = _run(monkeypatch, table)
+
+    assert result == {
+        "processed": 2,
+        "removed_content_objects": 2,
+        "removed_vectors": 2,
+        "vault_id": VAULT_ID,
+    }
+    assert len(s3.deleted) == 2
+    assert set(vectors.deleted) == {"mem_agent_old_one", "mem_agent_old_two"}
