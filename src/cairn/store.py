@@ -40,6 +40,17 @@ try:
 except ImportError:  # pragma: no cover
     _HAS_VEC = False
 
+
+def _load_vector_extension(connection) -> bool:
+    if not _HAS_VEC:
+        return False
+    try:
+        connection.enable_load_extension(True)
+        sqlite_vec.load(connection)
+    except (AttributeError, sqlite3.Error):
+        return False
+    return True
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS memories(
@@ -184,14 +195,7 @@ class Vault(StorageBackend):
         self.conn.execute("PRAGMA mmap_size=268435456")
         self.conn.execute("PRAGMA cache_size=-8000")
         self.conn.execute("PRAGMA busy_timeout=5000")
-        self._vec = False
-        if _HAS_VEC:
-            try:
-                self.conn.enable_load_extension(True)
-                sqlite_vec.load(self.conn)
-                self._vec = True
-            except sqlite3.Error:
-                self._vec = False
+        self._vec = _load_vector_extension(self.conn)
         self.conn.executescript(SCHEMA)
         self.docs_root = self.db_path.parent / "docs"
         self._fts = True

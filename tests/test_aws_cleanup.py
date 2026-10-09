@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import threading
 from pathlib import Path
 
+from botocore.exceptions import ClientError
 from boto3.dynamodb.conditions import Key
 
 
@@ -20,23 +22,95 @@ class FakeTable:
         self.tombstone = tombstone
         self.memory = memory
         self.updates = []
+        self.lease_owner = None
+        self.lease_expires_at = None
+        self.content_leases = {}
+        self.lease_lock = threading.Lock()
+        self.query_entered = None
+        self.allow_query = None
+        self.block_first_query = False
+        self.on_version_delete = None
 
     def query(self, **kwargs):
         condition = kwargs["KeyConditionExpression"].get_expression()
         key = condition["values"][0].name
         value = condition["values"][1]
         if key == "GSI0PK" and value == f"VAULT#{VAULT_ID}#TOMBSTONE":
+            if self.query_entered is not None and self.block_first_query:
+                self.block_first_query = False
+                self.query_entered.set()
+                self.allow_query.wait(timeout=5)
             return {"Items": [self.tombstone]}
         if key == "PK" and self.memory and self.memory["PK"] == value:
             return {"Items": [self.memory]}
         return {"Items": []}
 
-    def update_item(self, *, Key, UpdateExpression, **_kwargs):
+    def update_item(self, *, Key, UpdateExpression, ConditionExpression=None,
+                    ExpressionAttributeValues=None, **_kwargs):
+        if Key["PK"].endswith("#CLEANUP#LOCK") or "#CONTENT#LOCK#" in Key["PK"]:
+            prefix = "SET "
+            assert UpdateExpression.startswith(prefix)
+            assignments = {
+                assignment.split("=", 1)[0].strip(): assignment.split("=", 1)[1].strip()
+                for assignment in UpdateExpression[len(prefix):].split(",")
+            }
+            assert assignments == {
+                "leaseOwner": ":owner",
+                "leaseExpiresAt": ":expires",
+            }
+            with self.lease_lock:
+                content_key = Key["PK"] if "#CONTENT#LOCK#" in Key["PK"] else None
+                lease = self.content_leases.get(content_key) if content_key else None
+                lease_expires_at = (
+                    lease[1] if lease else None
+                ) if content_key else self.lease_expires_at
+                if not self._lease_condition_holds(
+                    ConditionExpression, ExpressionAttributeValues, lease_expires_at,
+                ):
+                    raise _conditional_failure()
+                if content_key:
+                    self.content_leases[content_key] = (
+                        ExpressionAttributeValues[":owner"],
+                        ExpressionAttributeValues[":expires"],
+                    )
+                else:
+                    self.lease_owner = ExpressionAttributeValues[":owner"]
+                    self.lease_expires_at = ExpressionAttributeValues[":expires"]
+            return
         self.updates.append((Key, UpdateExpression))
         if "vectorCleanupDone" in UpdateExpression:
             self.tombstone["vectorCleanupDone"] = True
         if "contentCleanupDone" in UpdateExpression:
             self.tombstone["contentCleanupDone"] = True
+
+    def _lease_condition_holds(self, expression, values, lease_expires_at):
+        prefix = "attribute_not_exists(leaseExpiresAt) OR leaseExpiresAt "
+        assert expression.startswith(prefix)
+        operator, reference = expression[len(prefix):].split()
+        assert operator in {"<", ">"}
+        assert reference == ":now"
+        if lease_expires_at is None:
+            return True
+        if operator == "<":
+            return lease_expires_at < values[reference]
+        return lease_expires_at > values[reference]
+
+    def delete_item(self, *, Key, ConditionExpression, ExpressionAttributeValues):
+        if "#CONTENT#LOCK#" in Key["PK"]:
+            assert ConditionExpression == "leaseOwner = :owner"
+            with self.lease_lock:
+                lease = self.content_leases.get(Key["PK"])
+                if not lease or lease[0] != ExpressionAttributeValues[":owner"]:
+                    raise _conditional_failure()
+                self.content_leases.pop(Key["PK"])
+            return
+        assert Key["PK"].endswith("#CLEANUP#LOCK")
+        assert ConditionExpression == "leaseOwner = :owner"
+        with self.lease_lock:
+            if self.lease_owner != ExpressionAttributeValues[":owner"]:
+                raise _conditional_failure()
+            self.lease_owner = None
+            self.lease_expires_at = None
 
 
 class FakeDynamo:
@@ -48,8 +122,9 @@ class FakeDynamo:
 
 
 class FakeS3:
-    def __init__(self):
+    def __init__(self, table=None):
         self.deleted = []
+        self.table = table
 
     def list_object_versions(self, *, Prefix, **_kwargs):
         return {
@@ -59,6 +134,8 @@ class FakeS3:
         }
 
     def delete_objects(self, *, Delete, **_kwargs):
+        if self.table and self.table.on_version_delete:
+            self.table.on_version_delete(Delete["Objects"])
         self.deleted.extend(Delete["Objects"])
         return {}
 
@@ -82,8 +159,15 @@ def _table(memory=None):
     return FakeTable(tombstone, memory)
 
 
+def _conditional_failure():
+    return ClientError(
+        {"Error": {"Code": "ConditionalCheckFailedException", "Message": "condition failed"}},
+        "UpdateItem",
+    )
+
+
 def _run(monkeypatch, table):
-    s3 = FakeS3()
+    s3 = FakeS3(table)
     vectors = FakeVectors()
     monkeypatch.setattr(cleanup.boto3, "resource", lambda _name: FakeDynamo(table))
     monkeypatch.setattr(
@@ -114,6 +198,7 @@ def test_cleanup_removes_unreferenced_versions_and_vector_idempotently(monkeypat
     assert s3.deleted == [{"Key": OBJECT_KEY, "VersionId": "version-1"}]
     assert vectors.deleted == ["mem_agent_old"]
     assert again["processed"] == 0
+    assert table.lease_owner is None
 
 
 def test_cleanup_keeps_content_while_another_memory_owns_the_hash(monkeypatch):
@@ -132,3 +217,161 @@ def test_cleanup_keeps_content_while_another_memory_owns_the_hash(monkeypatch):
     assert vectors.deleted == ["mem_agent_old"]
     assert table.tombstone["vectorCleanupDone"] is True
     assert "contentCleanupDone" not in table.tombstone
+
+
+def test_cleanup_holds_content_hash_lease_through_version_deletion(monkeypatch):
+    table = _table()
+    observed = []
+    table.on_version_delete = lambda _key: observed.append(
+        any(owner for owner, _expires in table.content_leases.values())
+    )
+
+    result, s3, _vectors = _run(monkeypatch, table)
+
+    content_lock = f"VAULT#{VAULT_ID}#CONTENT#LOCK#abc123"
+    assert observed == [True]
+    assert result["removed_content_objects"] == 1
+    assert s3.deleted == [{"Key": OBJECT_KEY, "VersionId": "version-1"}]
+    assert content_lock not in table.content_leases
+
+
+def test_overlapping_cleanup_invocations_share_a_lease(monkeypatch):
+    table = _table()
+    table.query_entered = threading.Event()
+    table.allow_query = threading.Event()
+    table.block_first_query = True
+    s3 = FakeS3()
+    vectors = FakeVectors()
+    monkeypatch.setattr(cleanup.boto3, "resource", lambda _name: FakeDynamo(table))
+    monkeypatch.setattr(
+        cleanup.boto3, "client",
+        lambda name: s3 if name == "s3" else vectors,
+    )
+    monkeypatch.setenv("MEMORY_TABLE", "table")
+    monkeypatch.setenv("CONTENT_BUCKET", "bucket")
+    monkeypatch.setenv("VECTOR_BUCKET", "vectors")
+    monkeypatch.setenv("VECTOR_INDEX", "index")
+    monkeypatch.setenv("VAULT_ID", VAULT_ID)
+    first_result = []
+    first_errors = []
+    first_done = threading.Event()
+
+    def run_first():
+        try:
+            first_result.append(cleanup.handler({}, None))
+        except Exception as error:
+            first_errors.append(error)
+        finally:
+            first_done.set()
+
+    first = threading.Thread(target=run_first)
+
+    first.start()
+    while not table.query_entered.is_set() and not first_done.wait(timeout=0.01):
+        pass
+    assert table.query_entered.is_set(), first_errors
+    second = cleanup.handler({}, None)
+    table.allow_query.set()
+    first.join(timeout=5)
+
+    assert not first.is_alive()
+    assert first_result[0]["processed"] == 1
+    assert second == {"processed": 0, "skipped": "lease-held", "vault_id": VAULT_ID}
+    assert len(s3.deleted) == 1
+    assert vectors.deleted == ["mem_agent_old"]
+    assert table.lease_owner is None
+
+
+class PaginatingFakeTable(FakeTable):
+    """Tombstone and memory-shard queries with LastEvaluatedKey pagination."""
+
+    def __init__(self, tombstone_pages, memory_shard_pages):
+        first = tombstone_pages[0]["Items"][0]
+        super().__init__(first, memory=None)
+        self.tombstone_pages = tombstone_pages
+        self.memory_shard_pages = memory_shard_pages
+        self.tombstones = {
+            item["SK"]: item
+            for page in tombstone_pages
+            for item in page.get("Items", [])
+        }
+
+    def query(self, **kwargs):
+        condition = kwargs["KeyConditionExpression"].get_expression()
+        key = condition["values"][0].name
+        value = condition["values"][1]
+        if key == "GSI0PK" and value == f"VAULT#{VAULT_ID}#TOMBSTONE":
+            if kwargs.get("ExclusiveStartKey"):
+                return self.tombstone_pages[1]
+            return self.tombstone_pages[0]
+        if key == "PK" and str(value).startswith(f"VAULT#{VAULT_ID}#MEMORY#"):
+            pages = self.memory_shard_pages.get(value, [{"Items": []}])
+            if kwargs.get("ExclusiveStartKey"):
+                return pages[1] if len(pages) > 1 else pages[-1]
+            return pages[0]
+        return {"Items": []}
+
+    def update_item(self, *, Key, UpdateExpression, ConditionExpression=None,
+                    ExpressionAttributeValues=None, **_kwargs):
+        if Key["PK"].endswith("#CLEANUP#LOCK") or "#CONTENT#LOCK#" in Key["PK"]:
+            return super().update_item(
+                Key=Key,
+                UpdateExpression=UpdateExpression,
+                ConditionExpression=ConditionExpression,
+                ExpressionAttributeValues=ExpressionAttributeValues,
+            )
+        tombstone = self.tombstones.get(Key["SK"])
+        if tombstone is None:
+            raise AssertionError(f"unexpected tombstone update for {Key!r}")
+        self.updates.append((Key, UpdateExpression))
+        if "vectorCleanupDone" in UpdateExpression:
+            tombstone["vectorCleanupDone"] = True
+        if "contentCleanupDone" in UpdateExpression:
+            tombstone["contentCleanupDone"] = True
+
+
+def test_cleanup_paginates_tombstones_after_paginated_memory_shard_scan(monkeypatch):
+    memory_prefix = f"VAULT#{VAULT_ID}#MEMORY#00"
+    tomb_one = {
+        "PK": f"VAULT#{VAULT_ID}#TOMBSTONE#00",
+        "SK": "TOMBSTONE#mem_agent_old_one",
+        "key": "mem_agent_old_one",
+        "content_hash": "sha256:abc123",
+        "contentObjectKey": f"{VAULT_ID}/content/abc123",
+    }
+    tomb_two = {
+        "PK": f"VAULT#{VAULT_ID}#TOMBSTONE#00",
+        "SK": "TOMBSTONE#mem_agent_old_two",
+        "key": "mem_agent_old_two",
+        "content_hash": "sha256:def456",
+        "contentObjectKey": f"{VAULT_ID}/content/def456",
+    }
+    table = PaginatingFakeTable(
+        tombstone_pages=[
+            {
+                "Items": [tomb_one],
+                "LastEvaluatedKey": {"GSI0PK": tomb_one["PK"], "GSI0SK": tomb_one["SK"]},
+            },
+            {"Items": [tomb_two]},
+        ],
+        memory_shard_pages={
+            memory_prefix: [
+                {
+                    "Items": [],
+                    "LastEvaluatedKey": {"PK": memory_prefix, "SK": "MEMORY#scan-cursor"},
+                },
+                {"Items": []},
+            ],
+        },
+    )
+
+    result, s3, vectors = _run(monkeypatch, table)
+
+    assert result == {
+        "processed": 2,
+        "removed_content_objects": 2,
+        "removed_vectors": 2,
+        "vault_id": VAULT_ID,
+    }
+    assert len(s3.deleted) == 2
+    assert set(vectors.deleted) == {"mem_agent_old_one", "mem_agent_old_two"}

@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
+import time
 
 from boto3.dynamodb.conditions import Key
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
@@ -13,7 +14,7 @@ from cairn.aws_storage import AwsVault
 from cairn.aws_control import _migrate_sqlite_to_aws, _migration_preflight
 from cairn.models import content_digest
 from cairn.secret_scan import SecretAdmissionError
-from cairn.storage import StorageConfig
+from cairn.storage import ContentIntegrityError, StorageConfig
 from cairn.store import Vault
 from cairn.vault_identity import VaultIdentity
 
@@ -25,6 +26,12 @@ class FakeAwsError(Exception):
     def __init__(self, status: int):
         super().__init__("fake AWS error")
         self.response = {"ResponseMetadata": {"HTTPStatusCode": status}}
+
+
+class FakeConditionalCheckFailed(Exception):
+    def __init__(self):
+        super().__init__("fake conditional check failed")
+        self.response = {"Error": {"Code": "ConditionalCheckFailedException"}}
 
 
 class FakeDynamoTable:
@@ -71,13 +78,46 @@ class FakeDynamoTable:
         self.aws.items[(item["PK"], item["SK"])] = item
         return {}
 
-    def delete_item(self, *, Key, ReturnValues=None, **_kwargs):
+    def delete_item(self, *, Key, ReturnValues=None, ConditionExpression=None,
+                    ExpressionAttributeValues=None, **_kwargs):
         self.aws.ensure_online()
+        if ConditionExpression == "leaseOwner = :owner":
+            item = self.aws.items.get((Key["PK"], Key["SK"]))
+            if item is None or item.get("leaseOwner") != ExpressionAttributeValues[":owner"]:
+                raise FakeConditionalCheckFailed()
         item = self.aws.items.pop((Key["PK"], Key["SK"]), None)
         return {"Attributes": deepcopy(item)} if ReturnValues and item else {}
 
-    def update_item(self, *, Key, ExpressionAttributeValues, **_kwargs):
+    def update_item(self, *, Key, ExpressionAttributeValues, UpdateExpression="", **_kwargs):
         self.aws.ensure_online()
+        if "leaseOwner" in UpdateExpression:
+            assert UpdateExpression == "SET leaseOwner = :owner, leaseExpiresAt = :expires"
+            assert _kwargs["ConditionExpression"] == (
+                "attribute_not_exists(leaseExpiresAt) OR leaseExpiresAt < :now"
+            )
+            row_key = (Key["PK"], Key["SK"])
+            current = self.aws.items.get(row_key)
+            now = ExpressionAttributeValues[":now"]
+            if current and current.get("leaseExpiresAt", 0) >= now:
+                raise FakeConditionalCheckFailed()
+            self.aws.items[row_key] = {
+                **Key,
+                "leaseOwner": ExpressionAttributeValues[":owner"],
+                "leaseExpiresAt": ExpressionAttributeValues[":expires"],
+            }
+            return {}
+        if UpdateExpression == "SET leaseExpiresAt = :expires":
+            assert _kwargs["ConditionExpression"] == (
+                "leaseOwner = :owner AND leaseExpiresAt >= :now"
+            )
+            row_key = (Key["PK"], Key["SK"])
+            current = self.aws.items.get(row_key)
+            now = ExpressionAttributeValues[":now"]
+            if (not current or current.get("leaseOwner") != ExpressionAttributeValues[":owner"]
+                    or current.get("leaseExpiresAt", 0) < now):
+                raise FakeConditionalCheckFailed()
+            current["leaseExpiresAt"] = ExpressionAttributeValues[":expires"]
+            return {}
         item = self.aws.items[(Key["PK"], Key["SK"])]
         if ":yes" in ExpressionAttributeValues:
             item["vector_projected"] = True
@@ -108,7 +148,15 @@ class FakeS3:
     def __init__(self, aws):
         self.aws = aws
         self.objects: dict[str, bytes] = {}
+        self.versions: dict[str, list[tuple[str, bytes]]] = {}
         self.deleted_batches: list[list[dict]] = []
+        self.fail_deletes = False
+
+    def _versions_for(self, key: str) -> list[tuple[str, bytes]]:
+        versions = self.versions.setdefault(key, [])
+        if not versions and key in self.objects:
+            versions.append(("v1", self.objects[key]))
+        return versions
 
     def head_object(self, *, Key, **_kwargs):
         self.aws.ensure_online()
@@ -118,7 +166,11 @@ class FakeS3:
 
     def put_object(self, *, Key, Body, **_kwargs):
         self.aws.ensure_online()
-        self.objects[Key] = bytes(Body)
+        versions = self._versions_for(Key)
+        version_id = f"v{len(versions) + 1}"
+        body = bytes(Body)
+        versions.append((version_id, body))
+        self.objects[Key] = body
         return {}
 
     def get_object(self, *, Key, **_kwargs):
@@ -133,8 +185,9 @@ class FakeS3:
     def list_object_versions(self, *, Prefix, **_kwargs):
         return {
             "Versions": [
-                {"Key": key, "VersionId": "v1"}
+                {"Key": key, "VersionId": version_id}
                 for key in self.objects if key.startswith(Prefix)
+                for version_id, _body in reversed(self._versions_for(key))
             ],
             "DeleteMarkers": [],
             "IsTruncated": False,
@@ -142,8 +195,21 @@ class FakeS3:
 
     def delete_objects(self, *, Delete, **_kwargs):
         self.deleted_batches.append(deepcopy(Delete["Objects"]))
+        if getattr(self, "on_delete", None):
+            self.on_delete(Delete["Objects"])
+        if self.fail_deletes:
+            return {"Errors": [{"Key": item["Key"], "VersionId": item["VersionId"]}
+                                for item in Delete["Objects"]]}
         for item in Delete["Objects"]:
-            self.objects.pop(item["Key"], None)
+            key = item["Key"]
+            version_id = item["VersionId"]
+            versions = self._versions_for(key)
+            versions[:] = [version for version in versions if version[0] != version_id]
+            if versions:
+                self.objects[key] = versions[-1][1]
+            else:
+                self.versions.pop(key, None)
+                self.objects.pop(key, None)
         return {}
 
 
@@ -226,9 +292,30 @@ class FakeAws:
                        for name, value in spec["Key"].items()}
                 values = {name: self.deserializer.deserialize(value)
                           for name, value in spec["ExpressionAttributeValues"].items()}
-                updates[(key["PK"], key["SK"])] = {
-                    "PK": key["PK"], "SK": key["SK"], "seq": values[":next"],
-                }
+                row_key = (key["PK"], key["SK"])
+                if ":owner" in values:
+                    assert spec["UpdateExpression"] == "SET leaseExpiresAt = :expires"
+                    assert spec["ConditionExpression"] == (
+                        "leaseOwner = :owner AND leaseExpiresAt >= :now"
+                    )
+                    item = self.items.get(row_key)
+                    if (not item or item.get("leaseOwner") != values[":owner"]
+                            or item.get("leaseExpiresAt", 0) < values[":now"]):
+                        raise FakeConditionalCheckFailed()
+                    updates[row_key] = {**item, "leaseExpiresAt": values[":expires"]}
+                else:
+                    updates[row_key] = {
+                        "PK": key["PK"], "SK": key["SK"], "seq": values[":next"],
+                    }
+            elif "ConditionCheck" in action:
+                spec = action["ConditionCheck"]
+                key = {name: self.deserializer.deserialize(value)
+                       for name, value in spec["Key"].items()}
+                values = {name: self.deserializer.deserialize(value)
+                          for name, value in spec["ExpressionAttributeValues"].items()}
+                item = self.items.get((key["PK"], key["SK"]))
+                if item and item.get("leaseExpiresAt", 0) >= values[":now"]:
+                    raise FakeConditionalCheckFailed()
         for key, value in updates.items():
             if value is None:
                 self.items.pop(key, None)
@@ -259,7 +346,7 @@ def _config() -> StorageConfig:
 
 def _open(tmp_path: Path, aws: FakeAws) -> AwsVault:
     return AwsVault(
-        tmp_path, "mock-embedder", 3, _config(),
+        tmp_path, "mock-embedder", 3, _config(), create=True,
         doc_threshold=4, _session=FakeSession(aws), _key_factory=Key,
         _serializer=aws.serializer,
     )
@@ -305,8 +392,16 @@ def test_insert_commits_memory_event_cursor_and_vector_projection_atomically(tmp
     assert aws.vectors.vectors[key]["data"]["float32"] == vector.tolist()
     assert len(aws.transactions) == 1
     action_types = [next(iter(action)) for action in aws.transactions[0]]
+    assert "ConditionCheck" not in action_types
     assert action_types.count("Put") == 3  # event, dedupe marker, and memory row
     assert "Update" in action_types  # the durable event-feed counter
+    assert any(
+        "leaseOwner = :owner" in action["Update"].get("ConditionExpression", "")
+        for action in aws.transactions[0] if "Update" in action
+    )
+    assert vault._content_lease_key(_memory()["content_hash"]).get("PK") not in {
+        key[0] for key in aws.items
+    }
     assert aws.items[(f"VAULT#{VAULT_ID}#META", "SYNC_COUNTER")]["seq"] == 1
     cloud_row = next(item for item in aws.items.values() if item.get("recordType") == "memory")
     assert str(cloud_row["confidence"]) == "0.75"
@@ -347,6 +442,25 @@ def test_offline_reads_are_marked_stale_and_offline_writes_fail_closed(tmp_path)
     vault.close()
 
 
+@pytest.mark.parametrize("mark_stale", [True, False])
+def test_offline_content_fallback_rejects_a_different_cached_revision(tmp_path, mark_stale):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    vault.insert(_memory(), np.asarray([1, 0, 0], dtype=np.float32))
+    newer = dict(vault.get(_memory()["key"]))
+    assert newer
+    newer["content_hash"] = f"sha256:{content_digest('newer revision')}"
+    if mark_stale:
+        vault._stale = True
+    else:
+        aws.offline = True
+
+    with pytest.raises(ContentIntegrityError, match="does not match the requested revision"):
+        vault.read_content(newer)
+
+    vault.close()
+
+
 def test_server_token_reads_use_vault_qualified_key_and_never_expose_digest(tmp_path):
     aws = FakeAws()
     vault = _open(tmp_path, aws)
@@ -379,6 +493,22 @@ def test_repeated_cursor_updates_are_one_durable_monotonic_write(tmp_path):
     ]
     assert len(cursor_writes) == 1
     assert "#cursor" in cursor_writes[0]["ExpressionAttributeNames"]
+    vault.close()
+
+
+def test_sync_cursors_follow_contract_order_not_hashed_dynamodb_sort_key(tmp_path):
+    vault = _open(tmp_path, FakeAws())
+    vault.set_sync_cursor("peer-a", "pull", 1, 10, "token")
+    vault.set_sync_cursor("peer-d", "pull", 2, 20, "token")
+    assert vault._cursor_key("peer-d", "pull", "token")["SK"] < vault._cursor_key(
+        "peer-a", "pull", "token",
+    )["SK"]
+
+    assert [(item["peer"], item["token_id"], item["direction"])
+            for item in vault.list_sync_cursors()] == [
+        ("peer-a", "token", "pull"),
+        ("peer-d", "token", "pull"),
+    ]
     vault.close()
 
 
@@ -676,23 +806,164 @@ def test_sweep_orphan_docs_preserves_referenced_content_and_removes_orphans(tmp_
     vault = _open(tmp_path, aws)
     content_prefix = f"{VAULT_ID}/content/"
     event_prefix = f"{VAULT_ID}/events/content/"
-    referenced = content_prefix + "kept"
-    event_referenced = event_prefix + "kept"
-    orphan = content_prefix + "orphan"
-    event_orphan = event_prefix + "orphan"
+    referenced = content_prefix + content_digest("kept")
+    event_referenced = event_prefix + content_digest("event kept")
+    orphan = content_prefix + content_digest("orphan")
+    event_orphan = event_prefix + content_digest("event orphan")
     aws.s3.objects.update({key: b"body" for key in (referenced, event_referenced, orphan, event_orphan)})
-    monkeypatch.setattr(vault, "_memory_items", lambda: [{"contentObjectKey": referenced}])
     monkeypatch.setattr(
-        vault, "export_sync_events",
-        lambda *, after, limit: {
-            "events": [{"contentObjectKey": event_referenced}], "cursor": 1,
-        },
+        vault, "_content_object_references", lambda: {referenced, event_referenced},
     )
 
     removed = vault.sweep_orphan_docs()
 
     assert removed == 2
     assert set(aws.s3.objects) == {referenced, event_referenced}
+    vault.close()
+
+
+def test_content_sweep_blocks_same_hash_insert_between_owner_check_and_delete(tmp_path):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    record = _memory()
+    content_hash = record["content_hash"]
+    object_key = f"{VAULT_ID}/content/{content_hash.removeprefix('sha256:')}"
+    aws.s3.objects[object_key] = b"durable text"
+    racing_errors = []
+
+    def race_with_insert(_objects):
+        with pytest.raises(OSError, match="content is being swept"):
+            vault.insert(record, np.asarray([1, 0, 0], dtype=np.float32))
+        racing_errors.append("blocked")
+
+    aws.s3.on_delete = race_with_insert
+
+    assert vault.sweep_orphan_docs() == 1
+    assert racing_errors == ["blocked"]
+    assert vault.get(record["key"]) is None
+    assert object_key not in aws.s3.objects
+
+    vault.insert(record, np.asarray([1, 0, 0], dtype=np.float32))
+    stored = vault.get(record["key"])
+    assert stored and vault.read_content(stored) == "durable text"
+    assert object_key in aws.s3.objects
+    vault.close()
+
+
+def test_content_writer_holds_lease_until_event_transaction_commits(tmp_path, monkeypatch):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    transact = aws.transact_write_items
+    sweeps = []
+
+    def sweep_before_commit(**kwargs):
+        sweeps.append(vault.sweep_orphan_docs())
+        return transact(**kwargs)
+
+    monkeypatch.setattr(aws, "transact_write_items", sweep_before_commit)
+
+    vault.insert(_memory(), np.asarray([1, 0, 0], dtype=np.float32))
+
+    assert sweeps == [0]
+    stored = vault.get(_memory()["key"])
+    assert stored and vault.read_content(stored) == "durable text"
+    assert len(aws.s3.objects) == 2
+    assert not any("#CONTENT#LOCK#" in key[0] for key in aws.items)
+    vault.close()
+
+
+def test_content_sweep_aborts_after_writer_takes_over_expired_lease(tmp_path, monkeypatch):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    record = _memory()
+    content_hash = record["content_hash"]
+    object_key = f"{VAULT_ID}/content/{content_hash.removeprefix('sha256:')}"
+    aws.s3.objects[object_key] = b"durable text"
+    now = [int(time.time())]
+    monkeypatch.setattr("cairn.aws_storage.time.time", lambda: now[0])
+
+    def take_over_after_reference_scan():
+        now[0] += 30 * 60 + 1
+        vault.insert(record, np.asarray([1, 0, 0], dtype=np.float32))
+        return set()  # stale sweep snapshot from before the writer committed
+
+    monkeypatch.setattr(vault, "_content_object_references", take_over_after_reference_scan)
+
+    assert vault.sweep_orphan_docs() == 0
+    stored = vault.get(record["key"])
+    assert stored and vault.read_content(stored) == "durable text"
+    assert object_key in aws.s3.objects
+    vault.close()
+
+
+def test_content_sweep_deletes_only_preexisting_versions_after_writer_takes_over(
+    tmp_path, monkeypatch,
+):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    record = _memory()
+    content_hash = record["content_hash"]
+    object_key = f"{VAULT_ID}/content/{content_hash.removeprefix('sha256:')}"
+    aws.s3.objects[object_key] = b"durable text"
+    now = [int(time.time())]
+    monkeypatch.setattr("cairn.aws_storage.time.time", lambda: now[0])
+
+    def take_over_after_lease_renewal(_objects):
+        now[0] += 30 * 60 + 1
+        vault.insert(record, np.asarray([1, 0, 0], dtype=np.float32))
+
+    aws.s3.on_delete = take_over_after_lease_renewal
+
+    assert vault.sweep_orphan_docs() == 0
+    stored = vault.get(record["key"])
+    assert stored and vault.read_content(stored) == "durable text"
+    assert aws.s3.versions[object_key] == [("v2", b"durable text")]
+    assert aws.s3.deleted_batches == [[{"Key": object_key, "VersionId": "v1"}]]
+    vault.close()
+
+
+def test_content_sweep_reports_s3_per_version_delete_errors(tmp_path, monkeypatch):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    key = f"{VAULT_ID}/content/{content_digest('orphan')}"
+    aws.s3.objects[key] = b"orphan"
+    aws.s3.fail_deletes = True
+    monkeypatch.setattr(vault, "_content_object_references", lambda: set())
+
+    with pytest.raises(OSError, match="could not delete all object versions"):
+        vault.sweep_orphan_docs()
+
+    assert key in aws.s3.objects
+    vault.close()
+
+
+def test_content_sweep_reads_event_references_across_shard_pages(tmp_path):
+    aws = FakeAws()
+    vault = _open(tmp_path, aws)
+    target_key = f"{VAULT_ID}/events/content/{content_digest('still referenced')}"
+    aws.s3.objects[target_key] = b"still referenced"
+    shard_zero = f"VAULT#{VAULT_ID}#EVENTS#00"
+    shard_one = f"VAULT#{VAULT_ID}#EVENTS#01"
+    for seq in range(1, 2002):
+        item = {
+            "PK": shard_zero,
+            "SK": f"SEQ#{seq:020d}",
+            "recordType": "event",
+            "seq": seq,
+        }
+        if seq == 2001:
+            item["contentObjectKey"] = target_key
+        aws.items[(item["PK"], item["SK"])] = item
+    high_seq = {
+        "PK": shard_one,
+        "SK": f"SEQ#{3000:020d}",
+        "recordType": "event",
+        "seq": 3000,
+    }
+    aws.items[(high_seq["PK"], high_seq["SK"])] = high_seq
+
+    assert vault.sweep_orphan_docs() == 0
+    assert target_key in aws.s3.objects
     vault.close()
 
 

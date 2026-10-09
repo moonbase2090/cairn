@@ -5,7 +5,7 @@ DynamoDB row and event transaction succeeds; writes fail while AWS is offline.
 """
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 import hashlib
 import json
@@ -36,6 +36,11 @@ _EVENT_SHARDS = 16
 _DYNAMODB_ACTION_LIMIT = 100
 _DYNAMODB_TRANSACTION_BYTES = 4 * 1024 * 1024
 _EMBEDDING_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
+_CONTENT_LEASE_SECONDS = 30 * 60
+
+
+class _ContentLeaseLostError(RuntimeError):
+    pass
 
 
 def _sha(text: str) -> str:
@@ -44,6 +49,18 @@ def _sha(text: str) -> str:
 
 def _shard(text: str, count: int = _EVENT_SHARDS) -> str:
     return f"{int(_sha(text)[:8], 16) % count:02x}"
+
+
+def _is_content_object_key(key: str, vault_id: str) -> bool:
+    prefixes = (
+        f"{vault_id}/content/",
+        f"{vault_id}/events/content/",
+    )
+    prefix = next((value for value in prefixes if key.startswith(value)), None)
+    if prefix is None:
+        return False
+    digest = key[len(prefix):]
+    return len(digest) == 64 and all(char in "0123456789abcdef" for char in digest)
 
 
 def _dynamo_value(value):
@@ -56,6 +73,19 @@ def _dynamo_value(value):
         return [_dynamo_value(item) for item in value]
     if isinstance(value, np.generic):
         return _dynamo_value(value.item())
+    return value
+
+
+def _python_value(value):
+    """Convert DynamoDB resource numbers to SQLite-compatible Python values."""
+    if isinstance(value, Decimal):
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
+    if isinstance(value, dict):
+        return {key: _python_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_python_value(item) for item in value]
     return value
 
 
@@ -106,7 +136,6 @@ class AwsVault(StorageBackend):
         _key_factory=None,
         _serializer=None,
     ) -> None:
-        del create  # Cloud resources are created only by the reviewed CDK control plane.
         if config.backend != "aws":
             raise ValueError("AwsVault requires backend = 'aws'")
         if not config.vault_id:
@@ -119,6 +148,7 @@ class AwsVault(StorageBackend):
         self._vector_error: str | None = None
         self._tx_depth = 0
         self._pending_cursors: list[dict] = []
+        self._pending_doc_sweep = False
 
         if _session is None:
             try:
@@ -155,7 +185,7 @@ class AwsVault(StorageBackend):
         from .store import Vault
 
         self._cache = Vault(cache_dir / "vault.db", embed_name, dims,
-                            create=True, doc_threshold=doc_threshold)
+                            create=create, doc_threshold=doc_threshold)
         self._set_cache_identity()
         self._check_local_identity()
         self._load_cloud_snapshot()
@@ -233,6 +263,90 @@ class AwsVault(StorageBackend):
         digest = content_hash.removeprefix("sha256:")
         return f"{self._identity.vault_id}/events/content/{digest}"
 
+    def _content_lease_key(self, content_hash: str) -> dict[str, str]:
+        digest = content_hash.removeprefix("sha256:")
+        return {
+            "PK": f"VAULT#{self._identity.vault_id}#CONTENT#LOCK#{digest}",
+            "SK": "LEASE",
+        }
+
+    def _event_content_hashes(self, events: list[dict]) -> list[str]:
+        return sorted({
+            snapshot.get("content_hash")
+            for event in events
+            if isinstance((snapshot := event.get("snapshot")), dict)
+            and isinstance(snapshot.get("content"), str)
+            and isinstance(snapshot.get("content_hash"), str)
+            and snapshot.get("content_hash")
+        })
+
+    def _acquire_content_lease(self, content_hash: str) -> str | None:
+        key = self._content_lease_key(content_hash)
+        owner = uuid.uuid4().hex
+        now = int(time.time())
+        try:
+            self._table.update_item(
+                Key=key,
+                UpdateExpression="SET leaseOwner = :owner, leaseExpiresAt = :expires",
+                ConditionExpression=(
+                    "attribute_not_exists(leaseExpiresAt) OR leaseExpiresAt < :now"
+                ),
+                ExpressionAttributeValues={
+                    ":owner": owner,
+                    ":expires": now + _CONTENT_LEASE_SECONDS,
+                    ":now": now,
+                },
+            )
+        except Exception as error:
+            if getattr(error, "response", {}).get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return None
+            raise
+        return owner
+
+    def _release_content_lease(self, content_hash: str, owner: str) -> None:
+        try:
+            self._table.delete_item(
+                Key=self._content_lease_key(content_hash),
+                ConditionExpression="leaseOwner = :owner",
+                ExpressionAttributeValues={":owner": owner},
+            )
+        except Exception as error:
+            if getattr(error, "response", {}).get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
+
+    def _renew_content_lease(self, content_hash: str, owner: str) -> bool:
+        now = int(time.time())
+        try:
+            self._table.update_item(
+                Key=self._content_lease_key(content_hash),
+                UpdateExpression="SET leaseExpiresAt = :expires",
+                ConditionExpression="leaseOwner = :owner AND leaseExpiresAt >= :now",
+                ExpressionAttributeValues={
+                    ":owner": owner,
+                    ":expires": now + _CONTENT_LEASE_SECONDS,
+                    ":now": now,
+                },
+            )
+        except Exception as error:
+            if getattr(error, "response", {}).get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return False
+            raise
+        return True
+
+    def _content_lease_commit_actions(self, leases: dict[str, str]) -> list[dict]:
+        now = int(time.time())
+        return [{"Update": {
+            "TableName": self._config.table,
+            "Key": self._serialize(self._content_lease_key(content_hash)),
+            "UpdateExpression": "SET leaseExpiresAt = :expires",
+            "ConditionExpression": "leaseOwner = :owner AND leaseExpiresAt >= :now",
+            "ExpressionAttributeValues": self._serialize({
+                ":owner": owner,
+                ":expires": now + _CONTENT_LEASE_SECONDS,
+                ":now": now,
+            }),
+        }} for content_hash, owner in sorted(leases.items())]
+
     def _query_pages(self, **kwargs) -> Iterator[dict]:
         request = dict(kwargs)
         while True:
@@ -264,6 +378,8 @@ class AwsVault(StorageBackend):
     def _load_cloud_snapshot(self) -> None:
         items = self._memory_items()
         with self._cache.transaction():
+            if self._cache._vec_ok:
+                self._cache.conn.execute("DELETE FROM mem_vec")
             self._cache.conn.execute("DELETE FROM memories")
             self._cache.conn.execute("DELETE FROM sync_events")
             self._cache.conn.execute("DELETE FROM sync_tombstones")
@@ -329,6 +445,7 @@ class AwsVault(StorageBackend):
             self._ensure_online_for_write()
             start = int(self._cache.export_sync_events().get("cursor", 0))
             self._pending_cursors = []
+            self._pending_doc_sweep = False
         self._tx_depth += 1
         try:
             with self._cache.transaction():
@@ -339,10 +456,13 @@ class AwsVault(StorageBackend):
                     self._commit_remote_events(
                         feed["events"], self._pending_cursors, conflicts,
                     )
+            if outer and self._pending_doc_sweep:
+                self._cache.sweep_orphan_docs()
         finally:
             self._tx_depth -= 1
             if outer:
                 self._pending_cursors = []
+                self._pending_doc_sweep = False
 
     def _serialize(self, values: dict) -> dict:
         return {
@@ -360,18 +480,12 @@ class AwsVault(StorageBackend):
 
     def _put_content_object(self, key: str, content: str) -> None:
         body = content.encode("utf-8")
-        try:
-            self._s3.head_object(Bucket=self._config.content_bucket, Key=key)
-        except Exception as error:
-            status = getattr(error, "response", {}).get("ResponseMetadata", {}).get("HTTPStatusCode")
-            if status != 404:
-                raise OSError("AWS content storage could not be checked") from None
-            self._s3.put_object(
-                Bucket=self._config.content_bucket,
-                Key=key,
-                Body=body,
-                ContentType="text/plain; charset=utf-8",
-            )
+        self._s3.put_object(
+            Bucket=self._config.content_bucket,
+            Key=key,
+            Body=body,
+            ContentType="text/plain; charset=utf-8",
+        )
 
     def _get_content_object(self, key: str, content_hash: str) -> str:
         try:
@@ -399,7 +513,7 @@ class AwsVault(StorageBackend):
         return np.asarray(found[0]["data"]["float32"], dtype=np.float32)
 
     def _decode_row(self, item: dict) -> Mapping:
-        values = {field: item.get(field) for field in MEMORY_FIELDS}
+        values = {field: _python_value(item.get(field)) for field in MEMORY_FIELDS}
         values["content_ref"] = item.get("contentObjectKey") if values.get("content") is None else None
         values["contentObjectKey"] = item.get("contentObjectKey")
         return MappingProxyType(values)
@@ -515,7 +629,6 @@ class AwsVault(StorageBackend):
                 content = snapshot.get("content")
                 content_hash = snapshot.get("content_hash")
                 if isinstance(content, str) and isinstance(content_hash, str):
-                    self._content_object(content_hash, content)
                     content_object_key = self._event_content_key(content_hash)
                     self._put_content_object(content_object_key, content)
                 if content_object_key:
@@ -728,37 +841,49 @@ class AwsVault(StorageBackend):
             event for event in events
             if not self._event_marker_exists(str(event.get("event_id", "")))
         ]
-        cursors_by_peer: dict[tuple[str, str, str], dict] = {}
-        for cursor in cursors or []:
-            identity = (cursor["peer"], cursor["direction"], cursor["token_id"])
-            current = cursors_by_peer.get(identity)
-            if current is None or int(cursor["cursor"]) >= int(current["cursor"]):
-                cursors_by_peer[identity] = cursor
-        cursors = list(cursors_by_peer.values())
-        latest = self._remote_event_rows(events)
-        counter = self._get_counter() if events else 0
-        actions = self._remote_event_actions(events, counter)
-        state_actions, vector_updates = self._remote_state_actions(latest)
-        actions.extend(state_actions)
-        actions.extend(self._remote_cursor_actions(cursors))
-        actions.extend(self._remote_conflict_actions(conflicts))
-        if events:
-            actions.append({"Update": {
-                "TableName": self._config.table,
-                "Key": self._serialize(self._event_counter_key()),
-                "UpdateExpression": "SET #seq = :next",
-                "ConditionExpression": "attribute_not_exists(#seq) OR #seq = :previous",
-                "ExpressionAttributeNames": {"#seq": "seq"},
-                "ExpressionAttributeValues": self._serialize({":next": counter + len(events), ":previous": counter}),
-            }})
-        if not actions:
-            return
-        self._check_remote_transaction_limits(actions)
-        self._ddb.transact_write_items(
-            TransactItems=actions,
-            ClientRequestToken=uuid.uuid4().hex,
-        )
-        self._apply_remote_vector_updates(vector_updates)
+        content_leases: dict[str, str] = {}
+        try:
+            for content_hash in self._event_content_hashes(events):
+                owner = self._acquire_content_lease(content_hash)
+                if owner is None:
+                    raise OSError("AWS content is being swept; retry the write")
+                content_leases[content_hash] = owner
+
+            cursors_by_peer: dict[tuple[str, str, str], dict] = {}
+            for cursor in cursors or []:
+                identity = (cursor["peer"], cursor["direction"], cursor["token_id"])
+                current = cursors_by_peer.get(identity)
+                if current is None or int(cursor["cursor"]) >= int(current["cursor"]):
+                    cursors_by_peer[identity] = cursor
+            cursors = list(cursors_by_peer.values())
+            latest = self._remote_event_rows(events)
+            counter = self._get_counter() if events else 0
+            actions = self._remote_event_actions(events, counter)
+            actions.extend(self._content_lease_commit_actions(content_leases))
+            state_actions, vector_updates = self._remote_state_actions(latest)
+            actions.extend(state_actions)
+            actions.extend(self._remote_cursor_actions(cursors))
+            actions.extend(self._remote_conflict_actions(conflicts))
+            if events:
+                actions.append({"Update": {
+                    "TableName": self._config.table,
+                    "Key": self._serialize(self._event_counter_key()),
+                    "UpdateExpression": "SET #seq = :next",
+                    "ConditionExpression": "attribute_not_exists(#seq) OR #seq = :previous",
+                    "ExpressionAttributeNames": {"#seq": "seq"},
+                    "ExpressionAttributeValues": self._serialize({":next": counter + len(events), ":previous": counter}),
+                }})
+            if not actions:
+                return
+            self._check_remote_transaction_limits(actions)
+            self._ddb.transact_write_items(
+                TransactItems=actions,
+                ClientRequestToken=uuid.uuid4().hex,
+            )
+            self._apply_remote_vector_updates(vector_updates)
+        finally:
+            for content_hash, owner in content_leases.items():
+                self._release_content_lease(content_hash, owner)
 
     def insert(self, rec: dict, vector: np.ndarray) -> int:
         from .secret_scan import scan_content
@@ -801,11 +926,15 @@ class AwsVault(StorageBackend):
 
     def delete_by_keys(self, keys: list[str], reason: str = "deleted") -> int:
         with self.transaction():
-            return self._cache.delete_by_keys(keys, reason)
+            deleted = self._cache.delete_by_keys(keys, reason)
+            self._pending_doc_sweep = self._pending_doc_sweep or deleted > 0
+            return deleted
 
     def delete_by_canonical(self, canonical_id: str, reason: str = "purged") -> int:
         with self.transaction():
-            return self._cache.delete_by_canonical(canonical_id, reason)
+            deleted = self._cache.delete_by_canonical(canonical_id, reason)
+            self._pending_doc_sweep = self._pending_doc_sweep or deleted > 0
+            return deleted
 
     def count(self) -> int:
         self._refresh_cloud_events()
@@ -900,37 +1029,40 @@ class AwsVault(StorageBackend):
         return {"rebuilt": rebuilt, "vec_in_sync": True}
 
     def read_content(self, row: Mapping) -> str:
-        if self._stale:
-            return self._cache.read_content(row)
         content = row.get("content")
         content_hash = str(row.get("content_hash") or "")
         if isinstance(content, str):
             if f"sha256:{content_digest(content)}" != content_hash:
                 raise ContentIntegrityError("stored content failed its integrity check")
             return content
+        memory_key = row.get("key")
+        if not isinstance(memory_key, str):
+            raise ContentIntegrityError("stored content document is missing")
+        if self._stale:
+            return self._read_cached_content(memory_key, content_hash)
+        try:
+            current = self._table.get_item(
+                Key=self._memory_key(memory_key), ConsistentRead=True,
+            ).get("Item")
+            self._stale = False
+        except Exception:
+            self._stale = True
+            return self._read_cached_content(memory_key, content_hash)
+        if not current or current.get("recordType") != "memory":
+            raise ContentIntegrityError("stored content document is missing")
         key = row.get("contentObjectKey") or self._content_key(content_hash)
         if not content_hash or not isinstance(key, str):
             raise ContentIntegrityError("stored content document is missing")
         return self._get_content_object(key, content_hash)
 
+    def _read_cached_content(self, memory_key: str, expected_hash: str) -> str:
+        cached = self._cache.get(memory_key)
+        if cached is None or not expected_hash or cached["content_hash"] != expected_hash:
+            raise ContentIntegrityError("cached content does not match the requested revision")
+        return self._cache.read_content(cached)
+
     def sweep_orphan_docs(self) -> int:
-        referenced = {
-            item.get("contentObjectKey") for item in self._memory_items()
-            if item.get("contentObjectKey")
-        }
-        cursor = 0
-        while True:
-            pack = self.export_sync_events(after=cursor, limit=1000)
-            if not pack["events"]:
-                break
-            for event in pack["events"]:
-                content_key = event.get("contentObjectKey")
-                if content_key:
-                    referenced.add(content_key)
-            cursor = int(pack["cursor"])
-            if len(pack["events"]) < 1000:
-                break
-        removed = 0
+        candidates = []
         for prefix in (
             f"{self._identity.vault_id}/content/",
             f"{self._identity.vault_id}/events/content/",
@@ -942,38 +1074,111 @@ class AwsVault(StorageBackend):
                     Prefix=prefix,
                     **({"ContinuationToken": token} if token else {}),
                 )
-                for item in page.get("Contents", []):
-                    if item["Key"] not in referenced:
-                        self._delete_object_versions(item["Key"])
-                        removed += 1
+                candidates.extend(
+                    item["Key"] for item in page.get("Contents", [])
+                    if _is_content_object_key(item.get("Key", ""), self._identity.vault_id)
+                )
                 token = page.get("NextContinuationToken")
                 if not token:
                     break
+        removed = 0
+        for start in range(0, len(candidates), 100):
+            batch = candidates[start:start + 100]
+            versions = {key: self._list_object_versions(key) for key in batch}
+            hashes = sorted({f"sha256:{key.rsplit('/', 1)[-1]}" for key in batch})
+            leases: dict[str, str] = {}
+            try:
+                for content_hash in hashes:
+                    owner = self._acquire_content_lease(content_hash)
+                    if owner is not None:
+                        leases[content_hash] = owner
+                if not leases:
+                    continue
+                referenced = self._content_object_references()
+                for key in batch:
+                    content_hash = f"sha256:{key.rsplit('/', 1)[-1]}"
+                    if content_hash in leases and key not in referenced:
+                        owner = leases[content_hash]
+                        try:
+                            deleted = self._delete_object_versions(
+                                key,
+                                versions=versions[key],
+                                before_delete=lambda digest=content_hash, lease_owner=owner:
+                                    self._renew_content_lease(digest, lease_owner),
+                            )
+                        except _ContentLeaseLostError:
+                            continue
+                        removed += int(deleted)
+            finally:
+                for content_hash, owner in leases.items():
+                    self._release_content_lease(content_hash, owner)
         return removed
 
-    def _delete_object_versions(self, key: str) -> None:
+    def _content_object_references(self) -> set[str]:
+        referenced = {
+            item["contentObjectKey"] for item in self._memory_items()
+            if item.get("contentObjectKey")
+        }
+        for shard in range(_EVENT_SHARDS):
+            partition = f"VAULT#{self._identity.vault_id}#EVENTS#{shard:02x}"
+            for page in self._query_pages(
+                KeyConditionExpression=self._key("PK").eq(partition),
+                ConsistentRead=True,
+                Limit=1000,
+            ):
+                for item in page.get("Items", []):
+                    if item.get("recordType") != "event":
+                        continue
+                    content_key = item.get("contentObjectKey")
+                    if content_key:
+                        referenced.add(content_key)
+        return referenced
+
+    def _list_object_versions(self, key: str) -> list[dict[str, str]]:
         markers: dict[str, str] = {}
+        versions: list[dict[str, str]] = []
         while True:
             page = self._s3.list_object_versions(
                 Bucket=self._config.content_bucket,
                 Prefix=key,
                 **markers,
             )
-            versions = [
+            versions.extend(
                 {"Key": version["Key"], "VersionId": version["VersionId"]}
                 for version in (*page.get("Versions", []), *page.get("DeleteMarkers", []))
                 if version.get("Key") == key
-            ]
-            if versions:
-                self._s3.delete_objects(
-                    Bucket=self._config.content_bucket,
-                    Delete={"Objects": versions, "Quiet": True},
-                )
+            )
             if not page.get("IsTruncated"):
-                return
+                return versions
             markers = {"KeyMarker": page["NextKeyMarker"]}
             if page.get("NextVersionIdMarker"):
                 markers["VersionIdMarker"] = page["NextVersionIdMarker"]
+
+    def _delete_object_versions(
+        self,
+        key: str,
+        versions: list[dict[str, str]] | None = None,
+        before_delete: Callable[[], bool] | None = None,
+    ) -> bool:
+        snapshot = self._list_object_versions(key) if versions is None else versions
+        for start in range(0, len(snapshot), 1000):
+            batch = snapshot[start:start + 1000]
+            if before_delete is not None and not before_delete():
+                raise _ContentLeaseLostError("content cleanup lease expired or changed owner")
+            response = self._s3.delete_objects(
+                Bucket=self._config.content_bucket,
+                Delete={"Objects": batch, "Quiet": True},
+            )
+            if response.get("Errors"):
+                raise OSError("AWS content cleanup could not delete all object versions")
+        try:
+            self._s3.head_object(Bucket=self._config.content_bucket, Key=key)
+        except Exception as error:
+            status = getattr(error, "response", {}).get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if status == 404:
+                return True
+            raise OSError("AWS content storage could not be checked after cleanup") from None
+        return False
 
     def doc_stats(self) -> dict:
         self._refresh_cloud_events()
@@ -1131,13 +1336,20 @@ class AwsVault(StorageBackend):
             KeyConditionExpression=self._key("PK").eq(f"VAULT#{self._identity.vault_id}#CURSORS"),
         ):
             items.extend(page.get("Items", []))
-        return [{
+        cursors = [{
+            "vault_id": self._identity.vault_id,
             "peer": item.get("peer", ""),
             "direction": item.get("direction", ""),
             "token_id": item.get("token_id", ""),
             "cursor": int(item.get("cursor", 0)),
             "updated_at": int(item.get("updated_at", 0)),
         } for item in items if item.get("recordType") == "sync-cursor"]
+        return sorted(
+            cursors,
+            key=lambda cursor: (
+                cursor["vault_id"], cursor["peer"], cursor["token_id"], cursor["direction"],
+            ),
+        )
 
     def set_sync_cursor(self, peer: str, direction: str, cursor: int, now: int,
                         token_id: str = "") -> None:

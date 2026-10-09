@@ -1,4 +1,5 @@
 import {
+  ArnFormat,
   CfnOutput,
   Duration,
   RemovalPolicy,
@@ -119,6 +120,20 @@ export class CairnVaultStack extends Stack {
     super(scope, id, props);
 
     const slug = resourceSlug(props.vaultId);
+    const vectorBucketName = `${slug}-vectors`;
+    const vectorIndexName = `${slug}-index`;
+    const vectorBucketArn = this.formatArn({
+      service: "s3vectors",
+      resource: "bucket",
+      resourceName: vectorBucketName,
+      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+    });
+    const vectorIndexArn = this.formatArn({
+      service: "s3vectors",
+      resource: "bucket",
+      resourceName: `${vectorBucketName}/index/${vectorIndexName}`,
+      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+    });
     const vaultPartition = `VAULT#${props.vaultId}`;
     const vaultPrefix = `${props.vaultId}/`;
     const key = new kms.Key(this, "VaultKey", {
@@ -178,7 +193,7 @@ export class CairnVaultStack extends Stack {
     });
 
     const vectorBucket = new s3vectors.CfnVectorBucket(this, "VectorBucket", {
-      vectorBucketName: `${slug}-vectors`,
+      vectorBucketName,
       encryptionConfiguration: {
         sseType: "aws:kms",
         kmsKeyArn: key.keyArn,
@@ -188,9 +203,24 @@ export class CairnVaultStack extends Stack {
         { key: "cairn:vault-name", value: props.vaultName.slice(0, 128) },
       ],
     });
+    key.addToResourcePolicy(new iam.PolicyStatement({
+      sid: "AllowS3VectorsIndexMaintenance",
+      principals: [new iam.ServicePrincipal("indexing.s3vectors.amazonaws.com")],
+      actions: ["kms:Decrypt"],
+      resources: ["*"],
+      conditions: {
+        ArnEquals: {
+          "aws:SourceArn": [vectorBucketArn, vectorIndexArn],
+        },
+        StringEquals: { "aws:SourceAccount": this.account },
+        "ForAnyValue:StringEquals": {
+          "kms:EncryptionContextKeys": ["aws:s3vectors:arn", "aws:s3vectors:resource-id"],
+        },
+      },
+    }));
     const vectorIndex = new s3vectors.CfnIndex(this, "VectorIndex", {
       vectorBucketArn: vectorBucket.attrVectorBucketArn,
-      indexName: `${slug}-index`,
+      indexName: vectorIndexName,
       dataType: "float32",
       dimension: props.dimensions,
       distanceMetric: "cosine",
@@ -203,7 +233,6 @@ export class CairnVaultStack extends Stack {
       handler: "cleanup.handler",
       code: lambda_.Code.fromAsset(join(__dirname, "../lambda")),
       timeout: Duration.minutes(15),
-      reservedConcurrentExecutions: 1,
       environment: {
         MEMORY_TABLE: memories.tableName,
         CONTENT_BUCKET: content.bucketName,
@@ -213,13 +242,52 @@ export class CairnVaultStack extends Stack {
       },
     });
     cleanup.addToRolePolicy(new iam.PolicyStatement({
+      sid: "CairnCleanupKmsDecrypt",
+      actions: ["kms:Decrypt"],
+      resources: [key.keyArn],
+      conditions: {
+        StringEquals: {
+          "kms:ViaService": `dynamodb.${this.region}.amazonaws.com`,
+          "kms:EncryptionContext:aws:dynamodb:tableName": memories.tableName,
+          "kms:EncryptionContext:aws:dynamodb:subscriberId": this.account,
+        },
+      },
+    }));
+    cleanup.addToRolePolicy(new iam.PolicyStatement({
+      sid: "CairnCleanupVectorKmsDecrypt",
+      actions: ["kms:Decrypt"],
+      resources: [key.keyArn],
+      conditions: {
+        StringEquals: {
+          "kms:ViaService": `s3vectors.${this.region}.amazonaws.com`,
+        },
+        "ForAnyValue:StringEquals": {
+          "kms:EncryptionContextKeys": ["aws:s3vectors:arn", "aws:s3vectors:resource-id"],
+        },
+      },
+    }));
+    cleanup.addToRolePolicy(new iam.PolicyStatement({
       sid: "CairnCleanupTombstones",
       actions: ["dynamodb:Query", "dynamodb:UpdateItem"],
       resources: [memories.tableArn, `${memories.tableArn}/index/ByVault`],
       conditions: {
         "ForAllValues:StringLike": {
           "dynamodb:LeadingKeys": [
-            `${vaultPartition}#TOMBSTONE`, `${vaultPartition}#MEMORY#*`,
+            `${vaultPartition}#TOMBSTONE`, `${vaultPartition}#TOMBSTONE#*`,
+            `${vaultPartition}#MEMORY#*`,
+          ],
+        },
+      },
+    }));
+    cleanup.addToRolePolicy(new iam.PolicyStatement({
+      sid: "CairnCleanupLease",
+      actions: ["dynamodb:DeleteItem", "dynamodb:UpdateItem"],
+      resources: [memories.tableArn],
+      conditions: {
+        "ForAllValues:StringLike": {
+          "dynamodb:LeadingKeys": [
+            `${vaultPartition}#CLEANUP#LOCK`,
+            `${vaultPartition}#CONTENT#LOCK#*`,
           ],
         },
       },
