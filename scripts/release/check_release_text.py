@@ -196,10 +196,16 @@ def scan_blob(
         try:
             with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
                 for index, member in enumerate(archive.getmembers(), start=1):
-                    if not member.isfile():
-                        continue
                     label = safe_member_label(display, index)
                     scan_text(member.name, f"{label}-name", patterns, findings)
+                    scan_text(member.linkname, f"{label}-link", patterns, findings)
+                    scan_text(member.uname, f"{label}-user", patterns, findings)
+                    scan_text(member.gname, f"{label}-group", patterns, findings)
+                    for key, value in member.pax_headers.items():
+                        scan_text(key, f"{label}-pax-key", patterns, findings)
+                        scan_text(value, f"{label}-pax-value", patterns, findings)
+                    if not member.isfile():
+                        continue
                     stream = archive.extractfile(member)
                     if stream is not None:
                         scan_blob(stream.read(), label, patterns, findings, depth + 1)
