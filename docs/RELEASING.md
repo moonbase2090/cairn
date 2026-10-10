@@ -19,6 +19,25 @@ release for the tag and creates the release if it does not exist.
 - `workflow_dispatch` builds the same archives as workflow artifacts without
   publishing, and does not require signing secrets.
 
+## Version cadence and approval
+
+Use the current `develop` version in `pyproject.toml` as the baseline. Choose
+the smallest justified increment and never reset to an older version or skip
+ahead:
+
+- Fixes, documentation shipped as a release, and installer changes use a
+  PATCH bump (`0.11.0` → `0.11.1` → `0.11.2`).
+- A MINOR bump is only for a real user-facing feature or a breaking change
+  while Cairn is on `0.x`.
+- A breaking change uses a MINOR bump while the base version is `0.x`, and a
+  MAJOR bump from `1.x` onward.
+- Get Grok's written approval before proposing any MINOR or MAJOR bump, and
+  link that approval in the PR.
+
+The required bump for each PR title is enforced by the semver workflow. Grok's
+approval is a manual release-policy gate. See [BRANCHING.md](../BRANCHING.md)
+for the title-to-bump mapping.
+
 ## macOS signing and notarization
 
 `scripts/release/sign_macos.sh` runs inside `package.py` on the macOS runners.

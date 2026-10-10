@@ -23,8 +23,12 @@ Every PR title must be `<type>[!]: <description>`, optional `(scope)`:
 
 - `feat:` — new feature → **MINOR** bump
 - `fix:` — bug fix → **PATCH** bump
-- `!` suffix (e.g. `feat!:`) — breaking change → **MAJOR** bump
+- `!` suffix (e.g. `feat!:`) — breaking change → **MINOR** while the base version is `0.x`; **MAJOR** from `1.x`
 - anything else (`docs:`, `chore:`, `refactor:`, …) → **PATCH** bump
+
+Release cadence and the required Grok approval for non-patch bumps are documented
+in [docs/RELEASING.md](docs/RELEASING.md). The semver check applies the `!`
+rule using the base version on the PR target branch.
 
 ## Version bumps: semver, single step
 
@@ -33,8 +37,9 @@ Every PR title must be `<type>[!]: <description>`, optional `(scope)`:
 - If `src/**` or `pyproject.toml` changed, the version **must** increase
   by exactly the level the title requires. No skipping (`0.3.2 → 0.5.0`
   fails), no silent changes, no `MAJOR` without `!`.
-- Docs/CI-only PRs may leave the version untouched; if they move it, it
-  must still be a valid increase.
+- Internal docs/CI-only PRs may leave the version untouched. When documentation
+  is being shipped as a release, use a PATCH bump. Any version change must be
+  based on the current target-branch version and advance by one allowed step.
 
 Local `githooks/commit-msg` strips `Co-authored-by` trailers; the version
 rules above live in CI so they apply no matter where a commit was written.

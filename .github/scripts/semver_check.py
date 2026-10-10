@@ -2,7 +2,8 @@
 
 Rules:
   - PR title must be `<type>[!]: <desc>` or `<type>(scope)[!]: <desc>`.
-  - `!`                       -> requires a MAJOR bump
+  - `!` on a 0.x base         -> requires a MINOR bump
+  - `!` on a 1.x+ base        -> requires a MAJOR bump
   - `feat`                    -> requires a MINOR bump
   - anything else             -> requires a PATCH bump
   - If `src/**` or `pyproject.toml` changed, `pyproject.toml` version MUST
@@ -61,14 +62,21 @@ def main():
         print(f"FAIL: PR title is not a conventional commit: {title!r}")
         print("      expected `<type>[!]: <desc>, e.g. `feat: add galaxy zoom`")
         return 1
-    required = "major" if m.group(3) else ("minor" if m.group(1) == "feat" else "patch")
-    print(f"title OK: {title!r} -> requires {required} bump")
-
     old = version_at(base)
     new = version_at("WORKTREE")
     if old is None or new is None:
         print(f"FAIL: could not read version (base={old}, head={new})")
         return 1
+
+    breaking = bool(m.group(3))
+    base_major = int(old.split(".", 1)[0])
+    if breaking:
+        required = "minor" if base_major == 0 else "major"
+    elif m.group(1) == "feat":
+        required = "minor"
+    else:
+        required = "patch"
+    print(f"title OK: {title!r} -> requires {required} bump")
 
     changed = sh("git", "diff", "--name-only", f"{base}...HEAD").split()
     src_touched = any(p == "pyproject.toml" or p.startswith("src/") for p in changed)
