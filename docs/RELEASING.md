@@ -29,8 +29,9 @@ ahead:
   PATCH bump (`0.11.0` → `0.11.1` → `0.11.2`).
 - A MINOR bump is only for a real user-facing feature or a breaking change
   while Cairn is on `0.x`.
-- A breaking change uses a MINOR bump while the base version is `0.x`, and a
-  MAJOR bump from `1.x` onward.
+- A breaking change uses a MINOR bump while the base version is `0.x`. The
+  initial stable release is exactly `1.0.0`; breaking changes from `1.x` use a
+  MAJOR bump.
 - Get Grok's written approval before proposing any MINOR or MAJOR bump, and
   link that approval in the PR.
 

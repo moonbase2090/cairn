@@ -23,7 +23,7 @@ Every PR title must be `<type>[!]: <description>`, optional `(scope)`:
 
 - `feat:` — new feature → **MINOR** bump
 - `fix:` — bug fix → **PATCH** bump
-- `!` suffix (e.g. `feat!:`) — breaking change → **MINOR** while the base version is `0.x`; **MAJOR** from `1.x`
+- `!` suffix (e.g. `feat!:`) — breaking change → **MINOR** while the base version is `0.x`; **MAJOR** for the first stable `1.0.0` release and from `1.x` onward
 - anything else (`docs:`, `chore:`, `refactor:`, …) → **PATCH** bump
 
 Release cadence and the required Grok approval for non-patch bumps are documented

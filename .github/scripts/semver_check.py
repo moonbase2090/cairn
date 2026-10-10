@@ -71,7 +71,8 @@ def main():
     breaking = bool(m.group(3))
     base_major = int(old.split(".", 1)[0])
     if breaking:
-        required = "minor" if base_major == 0 else "major"
+        initial_stable = base_major == 0 and new == "1.0.0"
+        required = "major" if base_major > 0 or initial_stable else "minor"
     elif m.group(1) == "feat":
         required = "minor"
     else:
