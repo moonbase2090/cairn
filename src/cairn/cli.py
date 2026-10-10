@@ -524,7 +524,12 @@ def resolve_init_embedder(spec: str):
     except ImportError:
         if spec != "fastembed":
             raise
-        notice = 'fastembed not installed — using hash (run `pip install -e ".[embed]"` to upgrade later)'
+        notice = (
+            "fastembed not installed — this new vault will use hash. To create a "
+            "fastembed vault, rerun the Cairn installer with "
+            "`CAIRN_INSTALL_EMBED=fastembed`, then initialize with "
+            "`--embed-spec fastembed`."
+        )
         return get_embedder("hash"), "hash", notice
 
 

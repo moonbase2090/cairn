@@ -3,7 +3,9 @@
 - HashEmbedder: deterministic feature hash (token + character trigram).
   Zero deps beyond numpy, zero downloads. Exact matches score 1.0.
   Name is hash-v2. A hash-v1 vault does not open: the spaces differ.
-- FastEmbedder: `pip install cairn[embed]`, ONNX BGE model, still keyless/local.
+- FastEmbedder: install the optional `fastembed` package with
+  `CAIRN_INSTALL_EMBED=fastembed` in the Cairn shell installer; source checkouts
+  can use `pip install -e '.[embed]'`. ONNX BGE model, still keyless/local.
   CLI/MCP prefer `cairn-embedd` (one ONNX process) and fall back in-process.
 - OllamaEmbedder: local Ollama server (`ollama pull mxbai-embed-large`), keyless.
 
@@ -74,8 +76,10 @@ class FastEmbedder(Embedder):
             from fastembed import TextEmbedding  # lazy — optional dep
         except ImportError:
             raise ImportError(
-                'fastembed is not installed — run `pip install -e ".[embed]"` '
-                "or init with `--embed-spec hash`"
+                "fastembed is not installed — run the Cairn installer with "
+                "`CAIRN_INSTALL_EMBED=fastembed`; for a source checkout, "
+                '`pip install -e ".[embed]"` also works. This vault was initialized '
+                "with fastembed, so keep that embedder selected."
             ) from None
 
         self._model = TextEmbedding(model)

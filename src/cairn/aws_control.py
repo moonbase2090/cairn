@@ -576,7 +576,8 @@ def apply_plan(
                 import boto3  # noqa: F401
             except ImportError as error:
                 raise ValueError(
-                    "AWS migration needs the optional SDK; install cairn with `pip install 'cairn[aws]'`"
+                    "AWS migration needs boto3 and botocore; rerun the Cairn installer "
+                    "with `CAIRN_INSTALL_AWS=1` (source checkout: `pip install -e '.[aws]'`)"
                 ) from error
     identity = _aws_identity(plan.profile, plan.region)
     if identity["account"] != plan.account:
