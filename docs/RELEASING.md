@@ -8,7 +8,11 @@ which packages cairn with `scripts/release/package.py` on:
 | `ubuntu-22.04`   | `x86_64-unknown-linux-gnu` | `.tar.gz` |
 | `macos-14`       | `aarch64-apple-darwin`     | `.tar.gz` |
 | `macos-15-intel` | `x86_64-apple-darwin`      | `.tar.gz` |
-| `windows-2022`   | `x86_64-pc-windows-msvc`   | `.zip`    |
+| `Windows`        | `x86_64`                   | `.zip`    |
+
+Release text and artifacts must not reference private infrastructure, hostnames,
+personal paths, or internal tooling. The release workflow checks source text,
+release metadata, tag messages, and packaged artifacts before publishing.
 
 The `publish` job uploads every archive plus one `SHA256SUMS` to the GitHub
 release for the tag and creates the release if it does not exist.
