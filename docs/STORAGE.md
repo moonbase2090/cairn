@@ -17,6 +17,14 @@ SQLite vaults can also replicate WAL changes to local folders or S3-compatible
 storage. See [Back up a SQLite vault](BACKUPS.md) for destination setup and
 point-in-time restore.
 
+The AWS backend is opt-in. SQLite does not install or import AWS SDK packages.
+Install or upgrade Cairn with `CAIRN_INSTALL_AWS=1` to add boto3 and botocore to
+the Cairn tool environment. AWS setup also needs the AWS CLI, Node.js, and npm;
+Cairn installs its pinned CDK dependencies under `aws/infra` when it first
+synthesizes or deploys. `cairn_aws_storage` with `action: "check"` reports the
+system tool versions without making AWS calls. Planning checks credentials and
+synthesizes locally; applying a reviewed plan deploys the stack.
+
 ## Choosing a backend
 
 Set `[storage] backend` in a `config.toml`:

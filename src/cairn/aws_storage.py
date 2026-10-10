@@ -155,7 +155,8 @@ class AwsVault(StorageBackend):
                 import boto3
             except ImportError as error:
                 raise ImportError(
-                    "AWS storage requires the optional dependency; install Cairn with `pip install 'cairn[aws]'`"
+                    "AWS storage needs boto3 and botocore; rerun the Cairn installer "
+                    "with `CAIRN_INSTALL_AWS=1` (source checkout: `pip install -e '.[aws]'`)"
                 ) from error
             _session = boto3.session.Session(
                 profile_name=config.profile,
@@ -173,7 +174,8 @@ class AwsVault(StorageBackend):
                 from boto3.dynamodb.types import TypeSerializer
             except ImportError as error:
                 raise ImportError(
-                    "AWS storage requires the optional dependency; install Cairn with `pip install 'cairn[aws]'`"
+                    "AWS storage needs boto3 and botocore; rerun the Cairn installer "
+                    "with `CAIRN_INSTALL_AWS=1` (source checkout: `pip install -e '.[aws]'`)"
                 ) from error
             _key_factory = _key_factory or Key
             _serializer = _serializer or TypeSerializer()

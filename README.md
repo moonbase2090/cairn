@@ -9,6 +9,12 @@ One SQLite file by default; a self-hosted sync server is optional. The agent *is
 # Install the latest release on Linux or macOS
 curl -fsSL https://cairncli.com/install.sh | sh
 
+# Optional: include fastembed support for a vault configured to use it
+curl -fsSL https://cairncli.com/install.sh | CAIRN_INSTALL_EMBED=fastembed sh
+
+# Optional: include the AWS SDK for AWS storage or migration
+curl -fsSL https://cairncli.com/install.sh | CAIRN_INSTALL_AWS=1 sh
+
 # Or install with Homebrew on macOS
 brew tap moonbase2090/tap
 brew install cairn
@@ -115,7 +121,7 @@ See skills/cairn/SKILL.md for the full guide.
 | Embedder | Setup | Dims | Related-pair sim | Notes |
 |---|---|---|---|---|
 | `hash` (default) | nothing | 384 | coarse | offline feature hash, `hash-v2`. A `hash-v1` vault does not open |
-| `fastembed` | `pip install -e ".[embed]"`, `init --embed-spec fastembed` | 384 | **0.80** | local ONNX BGE-small. CLI/MCP share one process via `cairn-embedd` (idle-exit 15m, `CAIRN_EMBEDD=0` forces in-process) |
+| `fastembed` | `CAIRN_INSTALL_EMBED=fastembed` with the shell installer; then `init --embed-spec fastembed` for a new vault | 384 | **0.80** | local ONNX BGE-small. Existing vaults keep their configured embedder. CLI/MCP share one process via `cairn-embedd` (idle-exit 15m, `CAIRN_EMBEDD=0` forces in-process) |
 | `ollama[:model]` | `ollama pull mxbai-embed-large`, `--embed ollama` | 1024 | **0.75** | best separation (unrelated pairs score 0.31 vs 0.42/0.0) |
 
 Measured 2026-09-18 on `Q2 revenue grew…` / `how did Q2 revenue do?`; near-dup
@@ -167,6 +173,25 @@ large documents shared in the database. To use PostgreSQL, set
 `[storage] backend = "postgres"` and `url` in the vault's `config.toml` or
 `~/.cairn/config.toml`. See [docs/STORAGE.md](docs/STORAGE.md). For SQLite
 backup settings and restore commands, see [docs/BACKUPS.md](docs/BACKUPS.md).
+
+### AWS storage prerequisites
+
+SQLite remains the default and does not install AWS packages. To include the
+AWS SDK in Cairn's isolated tool environment, install or upgrade with
+`CAIRN_INSTALL_AWS=1` as shown above. If the vault also uses `fastembed`, set
+both flags in the installer pipeline:
+
+```sh
+curl -fsSL https://cairncli.com/install.sh | CAIRN_INSTALL_AWS=1 CAIRN_INSTALL_EMBED=fastembed sh
+```
+
+AWS setup also requires the AWS CLI, Node.js, and npm. Configure an AWS CLI
+profile or another supported credential source and a region. Cairn installs
+the pinned CDK npm dependencies locally when needed; `cairn_aws_storage` with
+`action: "check"` reports the system tools without installing them or contacting
+AWS. Planning verifies the AWS identity and synthesizes the CDK app; applying
+a reviewed plan deploys resources. The installer only installs Cairn and its
+selected Python packages.
 
 ## License
 
