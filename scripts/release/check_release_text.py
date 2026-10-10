@@ -172,37 +172,40 @@ def scan_blob(
     findings: set[str],
     depth: int = 0,
 ) -> None:
-    if depth < 4:
-        if data.startswith(ZIP_SIGNATURES):
-            try:
-                with zipfile.ZipFile(io.BytesIO(data)) as archive:
-                    for index, member in enumerate(archive.infolist(), start=1):
-                        if member.is_dir():
-                            continue
-                        label = safe_member_label(display, index)
-                        scan_text(member.filename, f"{label}-name", patterns, findings)
-                        scan_blob(archive.read(member), label, patterns, findings, depth + 1)
-                    return
-            except Exception as error:
-                raise ScanError from error
+    looks_like_zip = data.startswith(ZIP_SIGNATURES)
+    looks_like_tar = (
+        len(data) > 262 and data[257:262] == TAR_SIGNATURE
+    ) or data.startswith(COMPRESSED_TAR_SIGNATURES)
+    if depth >= 16 and (looks_like_zip or looks_like_tar):
+        raise ScanError
 
-        looks_like_tar = (
-            len(data) > 262 and data[257:262] == TAR_SIGNATURE
-        ) or data.startswith(COMPRESSED_TAR_SIGNATURES)
-        if looks_like_tar:
-            try:
-                with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
-                    for index, member in enumerate(archive.getmembers(), start=1):
-                        if not member.isfile():
-                            continue
-                        label = safe_member_label(display, index)
-                        scan_text(member.name, f"{label}-name", patterns, findings)
-                        stream = archive.extractfile(member)
-                        if stream is not None:
-                            scan_blob(stream.read(), label, patterns, findings, depth + 1)
-                    return
-            except Exception as error:
-                raise ScanError from error
+    if looks_like_zip:
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                for index, member in enumerate(archive.infolist(), start=1):
+                    if member.is_dir():
+                        continue
+                    label = safe_member_label(display, index)
+                    scan_text(member.filename, f"{label}-name", patterns, findings)
+                    scan_blob(archive.read(member), label, patterns, findings, depth + 1)
+                return
+        except Exception as error:
+            raise ScanError from error
+
+    if looks_like_tar:
+        try:
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
+                for index, member in enumerate(archive.getmembers(), start=1):
+                    if not member.isfile():
+                        continue
+                    label = safe_member_label(display, index)
+                    scan_text(member.name, f"{label}-name", patterns, findings)
+                    stream = archive.extractfile(member)
+                    if stream is not None:
+                        scan_blob(stream.read(), label, patterns, findings, depth + 1)
+                return
+        except Exception as error:
+            raise ScanError from error
 
     if b"\x00" not in data:
         try:
