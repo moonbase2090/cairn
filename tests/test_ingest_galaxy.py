@@ -83,12 +83,39 @@ def test_galaxy_http_serves_page(tmp_path):
     srv = start_background(client, host="127.0.0.1", port=0)
     try:
         host, port = srv.server_address[:2]
-        with urlopen(f"http://{host}:{port}/", timeout=5) as resp:
+        with urlopen(f"http://{host}:{port}/{srv.access_token}/", timeout=5) as resp:
             text = resp.read().decode()
         assert resp.status == 200
         assert '<canvas id="space"' in text and "claude-g" in text and "manifolds" in text
         with urlopen(f"http://{host}:{port}/health", timeout=5) as health:
             assert b"ok" in health.read()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_galaxy_http_denies_unauthenticated_memory_access(tmp_path):
+    from urllib.error import HTTPError
+    from urllib.request import urlopen
+
+    from cairn.galaxy import start_background
+
+    client = make_client(tmp_path / "vault.db", "private-galaxy")
+    stored = client.store_memory(
+        "galaxy access fixture with private memory text", team_id="t", task_id="k",
+    )
+    srv = start_background(client, host="127.0.0.1", port=0)
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        for path in ("/", f"/memory?key={stored.key}", "/search?q=fixture"):
+            try:
+                with urlopen(base + path, timeout=5) as response:
+                    status = response.status
+                    body = response.read().decode()
+            except HTTPError as error:
+                status, body = error.code, error.read().decode()
+            assert status in (401, 404)
+            assert "private memory text" not in body
     finally:
         srv.shutdown()
         srv.server_close()
@@ -208,12 +235,14 @@ def test_galaxy_reuses_running_server(tmp_path, monkeypatch, capsys):
     srv = start_background(bg, host="127.0.0.1", port=0)
     try:
         port = srv.server_address[1]
+        (tmp_path / ".cairn" / ".galaxy-access").write_text(srv.access_token)
+        (tmp_path / ".cairn" / ".galaxy-access").chmod(0o600)
         opened = []
         monkeypatch.setattr(webbrowser, "open", opened.append)
         rc = main(["galaxy", "--port", str(port)])
         out, _ = capsys.readouterr()
         assert rc == 0
-        assert opened == [f"http://127.0.0.1:{port}/"]
+        assert opened == [f"http://127.0.0.1:{port}/{srv.access_token}/"]
         assert "already running" in out
     finally:
         srv.shutdown()
@@ -233,6 +262,8 @@ def test_galaxy_reuse_honors_no_open(tmp_path, monkeypatch, capsys):
     bg = make_client(tmp_path / ".cairn" / "vault.db", "reuse-test")
     srv = start_background(bg, host="127.0.0.1", port=0)
     try:
+        (tmp_path / ".cairn" / ".galaxy-access").write_text(srv.access_token)
+        (tmp_path / ".cairn" / ".galaxy-access").chmod(0o600)
         opened = []
         monkeypatch.setattr(webbrowser, "open", opened.append)
         assert main(["galaxy", "--port", str(srv.server_address[1]), "--no-open"]) == 0
@@ -276,7 +307,7 @@ def test_galaxy_search_endpoint(tmp_path):
     client.store_memory("unrelated note about manifolds", team_id="t", task_id="k")
     srv = start_background(client, host="127.0.0.1", port=0)
     try:
-        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        base = f"http://127.0.0.1:{srv.server_address[1]}/{srv.access_token}"
 
         def get(path):
             import json
@@ -320,7 +351,7 @@ def test_galaxy_memory_endpoint(tmp_path):
     try:
         import json
 
-        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        base = f"http://127.0.0.1:{srv.server_address[1]}/{srv.access_token}"
         with urlopen(base + "/memory?key=" + quote(v1.key), timeout=5) as r:
             body = json.loads(r.read().decode())
         assert r.status == 200
