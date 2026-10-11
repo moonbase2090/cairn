@@ -6,7 +6,9 @@ unchanged chunks return `unchanged` via the exact-hash path.
 """
 from __future__ import annotations
 
+import os
 import re
+import stat
 from pathlib import Path
 
 from cairn.models import content_digest
@@ -69,15 +71,23 @@ def ingest_dir(client, team: str, path: str | Path, memory_type: str = "document
         raise ValueError(f"not a directory: {path}")
     files = sorted(
         p for p in root.rglob("*")
-        if p.is_file() and p.suffix.lower() in SUFFIXES and not any(part.startswith(".") for part in p.parts)
+        if not p.is_symlink() and p.is_file() and p.suffix.lower() in SUFFIXES
+        and not any(part.startswith(".") for part in p.parts)
     )
     created = unchanged = flagged = 0
     flagged_keys: list[dict] = []
     for fp in files:
         try:
-            if fp.stat().st_size > MAX_FILE_BYTES:
+            fd = os.open(fp, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(fd, "rb") as stream:
+                file_stat = os.fstat(stream.fileno())
+                if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size > MAX_FILE_BYTES:
+                    continue
+                raw = stream.read(MAX_FILE_BYTES + 1)
+            if len(raw) > MAX_FILE_BYTES:
                 continue
-            text = fp.read_text(encoding="utf-8", errors="replace")
+            text = raw.decode("utf-8", errors="replace")
         except OSError:
             continue
         if not text.strip():

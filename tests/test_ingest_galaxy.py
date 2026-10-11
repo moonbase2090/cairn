@@ -1,4 +1,6 @@
 """Ingest + galaxy tests — offline, tmp dirs."""
+import pytest
+
 from cairn.client import CairnClient
 from cairn.embed import HashEmbedder
 from cairn.galaxy import galaxy, galaxy_html, to_points
@@ -53,6 +55,25 @@ def test_ingest_idempotent(tmp_path):
     assert second["created"] == 0 and second["unchanged"] == 3
     hits = client.retrieve_memory("install steps", filters={"task_id": "guide"})
     assert hits and "Install steps" in (hits[0].content or "")
+
+
+def test_ingest_skips_file_symlinks(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("external file body must not enter the vault")
+    link = docs / "linked.md"
+    try:
+        link.symlink_to(outside)
+    except OSError as error:
+        pytest.skip(f"file symlinks unavailable: {error}")
+
+    client = make_client(tmp_path / "vault.db")
+    result = ingest_dir(client, "acme", docs)
+
+    assert result["files"] == 0
+    assert result["created"] == 0
+    assert client.vault.count() == 0
 
 
 def test_galaxy_renders_vault(tmp_path):
