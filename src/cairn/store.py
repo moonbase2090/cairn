@@ -9,7 +9,9 @@ from __future__ import annotations
 import logging
 import base64
 import json
+import os
 import sqlite3
+import stat
 import time
 import uuid
 from contextlib import contextmanager
@@ -243,6 +245,7 @@ class Vault(StorageBackend):
         except ValueError:
             self._doc_threshold = DEFAULT_DOC_THRESHOLD
         self._txn = False
+        self._txn_doc_hashes: set[str] = set()
         self._vec_ok = self._vec_index_ok()
 
     @property
@@ -265,27 +268,76 @@ class Vault(StorageBackend):
     # (original bytes; filename is content_hash of the normalized text).
     # Rows keep content=NULL + content_ref=hash; small memories stay inline.
     def doc_path(self, content_hash: str) -> Path:
-        h = content_hash.split(":", 1)[-1]  # bare hex: no scheme, no colons on disk
-        return self.docs_root / h[:2] / h[2:4] / (h + ".md")
+        if not isinstance(content_hash, str):
+            raise ValueError("invalid content hash")
+        h = content_hash.removeprefix("sha256:")
+        if len(h) != 64 or any(char not in "0123456789abcdef" for char in h):
+            raise ValueError("invalid content hash")
+        path = self.docs_root / h[:2] / h[2:4] / (h + ".md")
+        try:
+            path.parent.resolve().relative_to(self.docs_root.resolve())
+        except ValueError as error:
+            raise ValueError("document path escapes the vault docs directory") from error
+        return path
 
-    def write_doc(self, content_hash: str, content: str) -> None:
-        p = self.doc_path(content_hash)
-        if p.exists():
-            return  # dedupe: same hash, same bytes
+    def write_doc(self, content_hash: str, content: str) -> bool:
+        from .models import content_digest
+
+        path = self.doc_path(content_hash)
+        digest = path.stem
+        if digest != content_digest(content):
+            raise ValueError("content hash does not match document content")
+        p = path
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
+        try:
+            p.parent.resolve().relative_to(self.docs_root.resolve())
+        except ValueError as error:
+            raise ValueError("document path escapes the vault docs directory") from error
+        if p.exists() and not p.is_symlink():
+            try:
+                fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    os.close(fd)
+                    raise OSError("document is not a regular file")
+                with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                    existing = stream.read()
+            except OSError as error:
+                raise ContentIntegrityError("existing document is not a regular file") from error
+            if content_digest(existing) != digest:
+                raise ContentIntegrityError("existing document does not match its content hash")
+            return False  # dedupe: same hash, same normalized text
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(p, flags, 0o600)
+        except FileExistsError as error:
+            raise ContentIntegrityError("document path already exists but is not a regular file") from error
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(content)
+        except Exception:
+            p.unlink(missing_ok=True)
+            raise
+        return True
 
     def read_content(self, row) -> str:
         """Resolve a memory row to full text (inline or docs/). Verifies hash."""
         if row["content"] is not None:
             return row["content"]
         ref = row["content_ref"]
-        p = self.doc_path(ref)
         try:
-            text = p.read_text(encoding="utf-8")
+            p = self.doc_path(ref)
+        except ValueError as error:
+            raise ContentIntegrityError("invalid document reference") from error
+        try:
+            fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                raise OSError("document is not a regular file")
+            with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                text = stream.read()
         except OSError:
             raise ContentIntegrityError(
-                f"document missing for {row['key']}: expected {p} — "
+                f"document missing or invalid for {row['key']} — "
                 "restore it from a peer pack (`cairn export`/`import`) or purge the memory")
         from .models import content_digest  # local import: models has no store dep
 
@@ -306,6 +358,8 @@ class Vault(StorageBackend):
         try:
             self.doc_path(content_hash).unlink()
             return True
+        except ValueError:
+            return False
         except FileNotFoundError:
             return False
         except OSError:
@@ -671,14 +725,22 @@ class Vault(StorageBackend):
             yield
             return
         self._txn = True
+        self._txn_doc_hashes = set()
         try:
             yield
             self.conn.commit()
         except Exception:
             self.conn.rollback()
+            for content_hash in self._txn_doc_hashes:
+                try:
+                    self.delete_doc_if_orphan(content_hash)
+                except Exception:
+                    log.warning("failed to remove a document from a rolled-back transaction",
+                                exc_info=True)
             raise
         finally:
             self._txn = False
+            self._txn_doc_hashes.clear()
 
     # -- writes ------------------------------------------------------------
     def insert(self, rec: dict, vector: np.ndarray) -> int:
@@ -695,13 +757,17 @@ class Vault(StorageBackend):
             rec.update({"state_revision": revision, "state_origin": origin,
                         "state_event_id": local_event["event_id"]})
         text = rec["content"]
-        digest = rec.get("content_hash")
-        if digest is None:
-            from .models import content_digest
+        from .models import content_digest
 
-            digest = content_digest(text)
+        digest = rec.get("content_hash")
+        expected_digest = content_digest(text)
+        if digest is None:
+            digest = f"sha256:{expected_digest}"
+        elif digest not in {f"sha256:{expected_digest}", expected_digest}:
+            raise ValueError("content hash does not match document content")
+        else:
+            digest = f"sha256:{expected_digest}"
         if len(text.encode("utf-8")) > self._doc_threshold:
-            self.write_doc(digest, text)
             content, ref = None, digest
         else:
             content, ref = text, None
@@ -721,7 +787,12 @@ class Vault(StorageBackend):
             else:
                 vals.append(rec[c])
         cols = [c for c in COLUMNS if c != "rowid"]
+        created_doc = False
         try:
+            if ref is not None:
+                created_doc = self.write_doc(digest, text)
+                if created_doc and self._txn:
+                    self._txn_doc_hashes.add(digest)
             cur = self.conn.execute(
                 f"INSERT INTO memories({','.join(cols)}) VALUES({','.join('?' for _ in cols)})",
                 vals,
@@ -755,6 +826,8 @@ class Vault(StorageBackend):
         except Exception:
             if not self._txn:
                 self.conn.rollback()
+                if created_doc:
+                    self.delete_doc_if_orphan(digest)
             raise
 
     def set_status(self, key: str, status: str, now: int, archived_at: int | None = None,
