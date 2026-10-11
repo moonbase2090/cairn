@@ -37,7 +37,7 @@ CI on #66: build + scorecard green; semver check red intentionally (no version b
 
 ## Performance (200 synthetic memories, hash offline embed)
 
-Measured after reboot on 2026-10-09 with `CAIRN_EMBEDD=0`. AWS rows used `hash-v2` at **8** dimensions to match the deployed index. VectorVault used Bedrock Titan embeddings (`vv --agent-id cairn-1`, task `cairn-live-exp`, archived after the run).
+Measured after reboot on 2026-10-09 with `CAIRN_EMBEDD=0`. Cloud rows used `hash-v2` at **8** dimensions to match the deployed index. A separate hosted embedding run used temporary metadata and was archived after the run.
 
 | Backend | Store p50 | Store p95 | Retrieve p50 | Retrieve p95 |
 | --- | ---: | ---: | ---: | ---: |

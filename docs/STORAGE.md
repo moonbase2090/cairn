@@ -45,7 +45,7 @@ pip install 'cairn[postgres]'
 ```toml
 [storage]
 backend = "postgres"
-url = "postgresql://cairn:password@db.example/cairn"
+url = "<database-connection-string>"
 ```
 
 Enable pgvector on the PostgreSQL server before you initialize the vault.
