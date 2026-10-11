@@ -891,7 +891,8 @@ def _write_galaxy_token(client, token: str) -> None:
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
         raise OSError("galaxy token path is not a regular file")
-    os.fchmod(fd, 0o600)
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
         stream.write(token)
 
