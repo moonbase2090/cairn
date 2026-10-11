@@ -7,6 +7,7 @@ import ipaddress
 import io
 import os
 import re
+import struct
 import sys
 import tarfile
 import zipfile
@@ -31,6 +32,8 @@ UTF16_STRINGS = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
 ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 TAR_SIGNATURE = b"ustar"
 COMPRESSED_TAR_SIGNATURES = (b"\x1f\x8b", b"BZh", b"\xfd7zXZ\x00")
+ZIP_LOCAL_HEADER = struct.Struct("<IHHHHHIIIHH")
+ZIP_LOCAL_SIGNATURE = 0x04034B50
 GENERIC_PATTERNS = (
     re.compile(r"DESKTOP-[A-Z0-9]+", re.IGNORECASE),
     re.compile(r"\.local\b", re.IGNORECASE),
@@ -165,6 +168,24 @@ def safe_member_label(display: str, index: int) -> str:
     return f"{display}!member-{index}"
 
 
+def zip_local_extra(data: bytes, member: zipfile.ZipInfo, central_start: int) -> bytes:
+    offset = member.header_offset
+    if offset < 0 or offset + ZIP_LOCAL_HEADER.size > central_start:
+        raise ScanError
+    try:
+        fields = ZIP_LOCAL_HEADER.unpack_from(data, offset)
+    except struct.error as error:
+        raise ScanError from error
+    if fields[0] != ZIP_LOCAL_SIGNATURE:
+        raise ScanError
+    filename_size, extra_size = fields[-2:]
+    extra_start = offset + ZIP_LOCAL_HEADER.size + filename_size
+    extra_end = extra_start + extra_size
+    if extra_end > central_start:
+        raise ScanError
+    return data[extra_start:extra_end]
+
+
 def scan_blob(
     data: bytes,
     display: str,
@@ -188,6 +209,9 @@ def scan_blob(
                     scan_text(member.filename, f"{label}-name", patterns, findings)
                     scan_binary(member.comment, f"{label}-comment", patterns, findings)
                     scan_binary(member.extra, f"{label}-extra", patterns, findings)
+                    local_extra = zip_local_extra(data, member, archive.start_dir)
+                    if local_extra != member.extra:
+                        scan_binary(local_extra, f"{label}-local-extra", patterns, findings)
                     if member.is_dir():
                         continue
                     scan_blob(archive.read(member), label, patterns, findings, depth + 1)
