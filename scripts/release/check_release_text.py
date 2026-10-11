@@ -182,11 +182,13 @@ def scan_blob(
     if looks_like_zip:
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                scan_binary(archive.comment, f"{display}-comment", patterns, findings)
                 for index, member in enumerate(archive.infolist(), start=1):
-                    if member.is_dir():
-                        continue
                     label = safe_member_label(display, index)
                     scan_text(member.filename, f"{label}-name", patterns, findings)
+                    scan_binary(member.comment, f"{label}-comment", patterns, findings)
+                    if member.is_dir():
+                        continue
                     scan_blob(archive.read(member), label, patterns, findings, depth + 1)
                 return
         except Exception as error:
