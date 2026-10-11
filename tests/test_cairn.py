@@ -162,6 +162,22 @@ def test_export_import_roundtrip(tmp_path):
     assert c2.import_pack({**pack, "memories": [legacy_row]}) == {"added": 1, "skipped": 0}
 
 
+def test_portable_import_marks_claimed_agent_content_external(tmp_path):
+    source, _, _ = make_client(tmp_path / "source")
+    stored = source.store_memory("A portable pack can claim any origin.", team_id="team-a", task_id="pack")
+    pack = source.export()
+    pack["memories"][0]["agent_id"] = "trusted-lead"
+    pack["memories"][0]["origin"] = "agent"
+    pack["memories"][0]["team_id"] = "other-team"
+
+    destination, _, _ = make_client(tmp_path / "destination")
+    assert destination.import_pack(pack) == {"added": 1, "skipped": 0}
+    imported = destination.get_memory(stored.key)
+
+    assert imported is not None
+    assert imported.origin == "external"
+
+
 def test_vault_uses_wal_and_mmap(tmp_path):
     emb = HashEmbedder()
     vault = Vault(tmp_path / "vault.db", emb.name, emb.dims, create=True)

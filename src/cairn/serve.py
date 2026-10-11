@@ -307,6 +307,19 @@ def _client_context(base_url: str, cafile: str | None):
     return None
 
 
+class _RejectRedirects(urlrequest.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_peer_request(request, base_url: str, timeout: int, cafile: str | None):
+    context = _client_context(base_url, cafile)
+    handlers = [_RejectRedirects()]
+    if context is not None:
+        handlers.append(urlrequest.HTTPSHandler(context=context))
+    return urlrequest.build_opener(*handlers).open(request, timeout=timeout)
+
+
 def pull_from(base_url: str, token: str = "", since: int | None = None,
               cafile: str | None = None, after: int | None = None,
               peer: str | None = None) -> dict:
@@ -317,14 +330,14 @@ def pull_from(base_url: str, token: str = "", since: int | None = None,
     if peer:
         headers["X-Cairn-Peer"] = peer
     req = urlrequest.Request(url, headers=headers)
-    with urlrequest.urlopen(req, timeout=30, context=_client_context(base_url, cafile)) as resp:
+    with _open_peer_request(req, base_url, 30, cafile) as resp:
         return json.load(resp)
 
 
 def health_from(base_url: str, cafile: str | None = None, token: str = "") -> dict:
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     req = urlrequest.Request(base_url.rstrip("/") + "/health", headers=headers)
-    with urlrequest.urlopen(req, timeout=10, context=_client_context(base_url, cafile)) as resp:
+    with _open_peer_request(req, base_url, 10, cafile) as resp:
         return json.load(resp)
 
 
@@ -355,7 +368,7 @@ def push_to(base_url: str, pack: dict, token: str = "", cafile: str | None = Non
         data=data,
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
     )
-    with urlrequest.urlopen(req, timeout=60, context=_client_context(base_url, cafile)) as resp:
+    with _open_peer_request(req, base_url, 60, cafile) as resp:
         return json.load(resp)
 
 
@@ -368,5 +381,5 @@ def resolve_conflict_to(base_url: str, base_key: str, winner_key: str,
         base_url.rstrip("/") + "/conflicts/resolve", data=data,
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
     )
-    with urlrequest.urlopen(req, timeout=30, context=_client_context(base_url, cafile)) as resp:
+    with _open_peer_request(req, base_url, 30, cafile) as resp:
         return json.load(resp)

@@ -9,10 +9,12 @@ dive, hyperspace tour) in the same dependency-free file.
 from __future__ import annotations
 
 import json
+import hmac
+import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import numpy as np
 
@@ -165,8 +167,22 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def do_GET(self):
+    def _route_path(self) -> str | None:
         path = urlparse(self.path).path
+        if path == "/health":
+            return path
+        if not path.startswith("/") or path.startswith("//"):
+            return None
+        token, separator, route = path[1:].partition("/")
+        if not hmac.compare_digest(token, self.server.access_token):
+            return None
+        return "/" + route if separator else "/"
+
+    def do_GET(self):
+        path = self._route_path()
+        if path is None:
+            self.send_error(404)
+            return
         if path in ("/", "/index.html", "/galaxy.html"):
             client = self.server.client_factory()
             try:
@@ -288,24 +304,29 @@ def _audit_for(vault_dir, key: str, canonical_id: str, limit: int = 200) -> list
     return out[-limit:]
 
 
-def bind(client, host: str = "127.0.0.1", port: int = 8780, limit: int = 2000):
+def bind(client, host: str = "127.0.0.1", port: int = 8780, limit: int = 2000,
+         access_token: str | None = None):
     """Bind a galaxy HTTP server. Caller serve_forever() or start a thread."""
+    access_token = access_token or secrets.token_urlsafe(32)
     srv = ThreadingHTTPServer((host, port), _Handler)
     srv.client_factory = _factory_for(client)
     srv.limit = limit
+    srv.access_token = access_token
     return srv
 
 
-def start_background(client, host: str = "127.0.0.1", port: int = 0, limit: int = 2000):
+def start_background(client, host: str = "127.0.0.1", port: int = 0, limit: int = 2000,
+                     access_token: str | None = None):
     """Serve the galaxy in a daemon thread. Returns the server (has .server_address)."""
-    srv = bind(client, host, port, limit)
+    srv = bind(client, host, port, limit, access_token)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     return srv
 
 
-def serve_forever(client, host: str = "127.0.0.1", port: int = 8780, limit: int = 2000) -> None:
-    srv = bind(client, host, port, limit)
+def serve_forever(client, host: str = "127.0.0.1", port: int = 8780, limit: int = 2000,
+                  access_token: str | None = None) -> None:
+    srv = bind(client, host, port, limit, access_token)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -314,9 +335,9 @@ def serve_forever(client, host: str = "127.0.0.1", port: int = 8780, limit: int 
         srv.server_close()
 
 
-def galaxy_url(host: str, port: int) -> str:
+def galaxy_url(host: str, port: int, access_token: str) -> str:
     shown = "127.0.0.1" if host in ("0.0.0.0", "::") else host
-    return f"http://{shown}:{port}/"
+    return f"http://{shown}:{port}/{quote(access_token, safe='')}/"
 
 
 def galaxy_alive(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -326,7 +347,8 @@ def galaxy_alive(host: str, port: int, timeout: float = 1.0) -> bool:
     from urllib.request import urlopen
 
     try:
-        with urlopen(galaxy_url(host, port) + "health", timeout=timeout) as resp:
+        shown = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+        with urlopen(f"http://{shown}:{port}/health", timeout=timeout) as resp:
             return resp.status == 200 and json.loads(resp.read().decode()).get("ok") is True
     except (URLError, TimeoutError, json.JSONDecodeError, OSError):
         return False

@@ -415,6 +415,7 @@ class CairnClient:
                     continue
                 rec = dict(m)
                 vec = _decode_embedding(rec.pop("embedding"))
+                rec["origin"] = Origin.EXTERNAL.value
                 rec["state_revision"] = 0
                 rec.pop("state_origin", None)
                 rec.pop("state_event_id", None)

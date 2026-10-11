@@ -111,6 +111,38 @@ def test_export_import_roundtrip_preserves_big_docs(tmp_path):
     assert sorted(m.content for m in got) == sorted(["small", BIG])
 
 
+def test_import_rejects_forged_document_path_without_writing_outside_vault(tmp_path):
+    source = make_client(tmp_path / "source.db", threshold=10)
+    source.store_memory("large portable memory body", team_id="t", task_id="k")
+    pack = source.export()
+
+    outside = tmp_path / "outside" / "PLANTED"
+    pack["memories"][0]["content_hash"] = str(outside)
+
+    destination = make_client(tmp_path / "destination.db", threshold=10)
+    with pytest.raises(ValueError, match="content hash"):
+        destination.import_pack(pack)
+
+    assert not outside.with_suffix(".md").exists()
+    assert not outside.parent.exists()
+    assert destination.vault.count() == 0
+
+
+def test_rejected_multi_record_import_leaves_no_spilled_documents(tmp_path):
+    source = make_client(tmp_path / "source" / "vault.db", threshold=10)
+    source.store_memory("first large imported memory", team_id="t", task_id="one")
+    source.store_memory("second large imported memory", team_id="t", task_id="two")
+    pack = source.export()
+    pack["memories"][1]["status"] = None
+
+    destination = make_client(tmp_path / "destination" / "vault.db", threshold=10)
+    with pytest.raises(sqlite3.IntegrityError):
+        destination.import_pack(pack)
+
+    assert destination.vault.count() == 0
+    assert destination.stats()["docs"] == {"files": 0, "bytes": 0}
+
+
 def test_old_pack_without_content_ref_imports(tmp_path):
     c = make_client(tmp_path / "v.db")
     c.store_memory(BIG, team_id="t", task_id="k")

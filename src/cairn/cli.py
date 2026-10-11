@@ -28,6 +28,7 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 import sys
 import tomllib
 from dataclasses import asdict
@@ -465,7 +466,14 @@ AGENTS_BEGIN = "<!-- cairn:begin -->"
 AGENTS_END = "<!-- cairn:end -->"
 
 
+def _validate_identity_token(label: str, value: str) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+        raise ValueError(f"{label} must be a single token containing only letters, numbers, '.', '_' or '-'")
+
+
 def agents_section(project: str, team: str, agent: str) -> str:
+    _validate_identity_token("team", team)
+    _validate_identity_token("agent id", agent)
     return f"""{AGENTS_BEGIN}
 ## Shared memory (cairn)
 
@@ -574,6 +582,8 @@ def _cmd_init(args, flag_agent_id) -> int:
         agent = seat
     spec = args.embed_spec or "fastembed"
     try:
+        _validate_identity_token("team", team)
+        _validate_identity_token("agent id", agent)
         config = storage_config(vdir)
         if config.backend == "sqlite" and (vdir / "vault.db").exists():
             emit({"initialized": str(vdir / "vault.db"), "note": "already exists"}, args.json)
@@ -856,8 +866,52 @@ def _open_browser(url: str) -> None:
     webbrowser.open(url)
 
 
-def _galaxy_reuse(args, html_info) -> int:
-    url = galaxy_url(args.host, args.port)
+def _galaxy_token_path(client) -> Path:
+    return Path(client.vault.vault_dir) / ".galaxy-access"
+
+
+def _read_galaxy_token(client) -> str | None:
+    path = _galaxy_token_path(client)
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            token = stream.read().strip()
+    except OSError:
+        return None
+    return token or None
+
+
+def _write_galaxy_token(client, token: str) -> None:
+    path = _galaxy_token_path(client)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise OSError("galaxy token path is not a regular file")
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write(token)
+
+
+def _remove_galaxy_token(client, token: str) -> None:
+    path = _galaxy_token_path(client)
+    if _read_galaxy_token(client) == token:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def _galaxy_reuse(args, html_info, client) -> int:
+    token = _read_galaxy_token(client)
+    if token is None:
+        print("error: running galaxy has no readable access token; stop it and restart", file=sys.stderr)
+        return 1
+    url = galaxy_url(args.host, args.port, token)
     html_info.update({"url": url, "host": args.host, "port": args.port, "reused": True})
     emit(html_info, args.json)
     if not args.json:
@@ -878,8 +932,14 @@ def _galaxy_serve(args, client, html_info) -> int:
             file=sys.stderr,
         )
         return 1
+    try:
+        _write_galaxy_token(client, srv.access_token)
+    except OSError as error:
+        srv.server_close()
+        print(f"error: cannot protect galaxy access token: {error}", file=sys.stderr)
+        return 1
     host, port = srv.server_address[:2]
-    url = galaxy_url(str(host), int(port))
+    url = galaxy_url(str(host), int(port), srv.access_token)
     html_info["url"] = url
     html_info["host"] = host
     html_info["port"] = port
@@ -894,6 +954,7 @@ def _galaxy_serve(args, client, html_info) -> int:
         pass
     finally:
         srv.server_close()
+        _remove_galaxy_token(client, srv.access_token)
     return 0
 
 
@@ -906,7 +967,7 @@ def _cmd_galaxy(args, client) -> int:
         return 0
     html_info = render_galaxy(client, args.out, args.limit)
     if args.port and galaxy_alive(args.host, args.port):
-        return _galaxy_reuse(args, html_info)
+        return _galaxy_reuse(args, html_info, client)
     return _galaxy_serve(args, client, html_info)
 
 
@@ -972,6 +1033,8 @@ def _bootstrap_project(vdir, flag_agent_id, client):
         proj = {}
     team = proj.get("team") or "main"
     agent = flag_agent_id or proj.get("agent_id") or client.agent_id
+    _validate_identity_token("team", team)
+    _validate_identity_token("agent id", agent)
     if flag_agent_id:
         proj.update({
             "agent_id": agent,
