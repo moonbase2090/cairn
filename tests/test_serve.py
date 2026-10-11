@@ -3,8 +3,10 @@ import hashlib
 import json
 import shutil
 import subprocess
+import threading
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import pytest
@@ -53,6 +55,66 @@ def test_push_pull_roundtrip(tmp_path):
         assert c2.retrieve_memory("sync fact", filters={"task_id": "k"})
     finally:
         srv.shutdown()
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+def test_sync_does_not_forward_bearer_to_redirect_target(operation):
+    received_authorization = []
+
+    class SinkHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _respond(self):
+            received_authorization.append(self.headers.get("Authorization"))
+            body = b"{}"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = _respond
+        do_POST = _respond
+
+    sink = ThreadingHTTPServer(("127.0.0.1", 0), SinkHandler)
+    sink_thread = threading.Thread(target=sink.serve_forever, daemon=True)
+    sink_thread.start()
+    target = f"http://127.0.0.1:{sink.server_address[1]}/capture"
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _redirect(self):
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.end_headers()
+
+        do_GET = _redirect
+        do_POST = _redirect
+
+    redirector = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    redirect_thread = threading.Thread(target=redirector.serve_forever, daemon=True)
+    redirect_thread.start()
+    base = f"http://127.0.0.1:{redirector.server_address[1]}"
+    try:
+        rejected = None
+        try:
+            if operation == "pull":
+                pull_from(base, token="sync-token-fixture")
+            else:
+                push_to(base, {"memories": []}, token="sync-token-fixture")
+        except urllib.error.HTTPError as error:
+            rejected = error
+        assert received_authorization == []
+        assert rejected is not None and rejected.code == 302
+    finally:
+        redirector.shutdown()
+        redirector.server_close()
+        redirect_thread.join(timeout=2)
+        sink.shutdown()
+        sink.server_close()
+        sink_thread.join(timeout=2)
 
 
 def test_server_rejects_push_that_skips_the_saved_peer_cursor(tmp_path):
