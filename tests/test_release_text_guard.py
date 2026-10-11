@@ -79,3 +79,30 @@ def test_release_guard_rejects_zip_directory_names_and_comments(tmp_path: Path) 
         "release-artifact.zip-comment:1",
     ]
     assert result.stderr == ""
+
+
+def test_release_guard_rejects_private_path_in_zip_extra_field(tmp_path: Path) -> None:
+    archive_path = tmp_path / "release-artifact.zip"
+    private_path = b"/Users/fixture/private/path"
+    extra_field = b"\xfe\xca" + len(private_path).to_bytes(2, "little") + private_path
+    member = zipfile.ZipInfo("release-notes.txt")
+    member.extra = extra_field
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(member, "Public release notes")
+
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path / "empty-home")
+    Path(env["HOME"]).mkdir()
+    env.pop("RELEASE_DENYLIST", None)
+    scanner = Path(__file__).resolve().parents[1] / "scripts" / "check-release-text.sh"
+    result = subprocess.run(
+        [str(scanner), str(archive_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout.splitlines() == ["release-artifact.zip!member-1-extra:1"]
+    assert result.stderr == ""

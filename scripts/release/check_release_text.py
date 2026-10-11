@@ -187,6 +187,7 @@ def scan_blob(
                     label = safe_member_label(display, index)
                     scan_text(member.filename, f"{label}-name", patterns, findings)
                     scan_binary(member.comment, f"{label}-comment", patterns, findings)
+                    scan_binary(member.extra, f"{label}-extra", patterns, findings)
                     if member.is_dir():
                         continue
                     scan_blob(archive.read(member), label, patterns, findings, depth + 1)
