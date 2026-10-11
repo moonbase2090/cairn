@@ -466,7 +466,14 @@ AGENTS_BEGIN = "<!-- cairn:begin -->"
 AGENTS_END = "<!-- cairn:end -->"
 
 
+def _validate_identity_token(label: str, value: str) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+        raise ValueError(f"{label} must be a single token containing only letters, numbers, '.', '_' or '-'")
+
+
 def agents_section(project: str, team: str, agent: str) -> str:
+    _validate_identity_token("team", team)
+    _validate_identity_token("agent id", agent)
     return f"""{AGENTS_BEGIN}
 ## Shared memory (cairn)
 
@@ -575,6 +582,8 @@ def _cmd_init(args, flag_agent_id) -> int:
         agent = seat
     spec = args.embed_spec or "fastembed"
     try:
+        _validate_identity_token("team", team)
+        _validate_identity_token("agent id", agent)
         config = storage_config(vdir)
         if config.backend == "sqlite" and (vdir / "vault.db").exists():
             emit({"initialized": str(vdir / "vault.db"), "note": "already exists"}, args.json)
@@ -1023,6 +1032,8 @@ def _bootstrap_project(vdir, flag_agent_id, client):
         proj = {}
     team = proj.get("team") or "main"
     agent = flag_agent_id or proj.get("agent_id") or client.agent_id
+    _validate_identity_token("team", team)
+    _validate_identity_token("agent id", agent)
     if flag_agent_id:
         proj.update({
             "agent_id": agent,
