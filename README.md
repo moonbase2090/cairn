@@ -146,5 +146,4 @@ backup settings and restore commands, see [docs/BACKUPS.md](docs/BACKUPS.md).
 
 ## License
 
-MPL-2.0 — see [LICENSE](LICENSE). File-level copyleft: improve cairn's files,
-share the improvements; tools that *use* cairn stay yours.
+MIT — see [LICENSE](LICENSE).

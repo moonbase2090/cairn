@@ -195,7 +195,7 @@ def build(repo: Path, out: Path, target: str) -> Path:
                 write_unix_wrapper(bindir / name, name)
         (root / "VERSION").write_text(version + "\n")
         (root / "TARGET").write_text(target + "\n")
-        shutil.copy2(repo / "LICENSE", root / "MPL-2.0.txt")
+        shutil.copy2(repo / "LICENSE", root / "MIT.txt")
         (root / "INSTALL.txt").write_text(
             f"cairn {version} for {target}.\n"
             "Unix: ./install.sh [--prefix /absolute/path]\n"
