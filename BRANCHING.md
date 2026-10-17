@@ -41,5 +41,7 @@ rule using the base version on the PR target branch.
   is being shipped as a release, use a PATCH bump. Any version change must be
   based on the current target-branch version and advance by one allowed step.
 
-Local `githooks/commit-msg` strips `Co-authored-by` trailers; the version
-rules above live in CI so they apply no matter where a commit was written.
+Local `githooks/commit-msg` strips `Co-authored-by` trailers. Run
+`scripts/install-hooks.sh` once per clone to enable it and the staged-Python
+format check in `githooks/pre-commit`. The version rules above live in CI so
+they apply no matter where a commit was written.

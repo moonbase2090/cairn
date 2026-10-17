@@ -1,6 +1,7 @@
 ## Pull requests
 
 All PRs follow REVIEW_POLICY.md (leaf vs trunk, proof in every PR, independent review, feature gating).
+Run `scripts/install-hooks.sh` once per clone to enable the local Git hooks.
 
 ## Tests
 
