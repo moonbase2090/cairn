@@ -1,4 +1,5 @@
 """BM25 keyword search (FTS5) tests — offline, tmp dirs."""
+
 import json
 
 from cairn.cli import main
@@ -13,10 +14,17 @@ def make_client(db_path, agent="bm25-bot"):
 
 
 def seed(client):
-    client.store_memory("the cairn-embedd daemon listens on a unix socket", team_id="t", task_id="k")
-    client.store_memory("socket permissions: the socket path must be 0700 in the runtime dir",
-                        team_id="t", task_id="k")
-    client.store_memory("unrelated note about coolant manifolds", team_id="t", task_id="k")
+    client.store_memory(
+        "the cairn-embedd daemon listens on a unix socket", team_id="t", task_id="k"
+    )
+    client.store_memory(
+        "socket permissions: the socket path must be 0700 in the runtime dir",
+        team_id="t",
+        task_id="k",
+    )
+    client.store_memory(
+        "unrelated note about coolant manifolds", team_id="t", task_id="k"
+    )
 
 
 def test_search_finds_literal_terms_best_first(tmp_path):
@@ -24,7 +32,9 @@ def test_search_finds_literal_terms_best_first(tmp_path):
     seed(client)
     # AND semantics: only the doc with both terms
     hits = client.list_memories({"search": "unix socket"})
-    assert [h.content for h in hits] == ["the cairn-embedd daemon listens on a unix socket"]
+    assert [h.content for h in hits] == [
+        "the cairn-embedd daemon listens on a unix socket"
+    ]
     # higher term frequency outranks ("socket" x2 beats "socket" x1)
     hits = client.list_memories({"search": "socket"})
     assert [h.content for h in hits] == [
@@ -50,9 +60,13 @@ def test_search_respects_status_and_expiry(tmp_path):
     assert client.list_memories({"search": "manifolds"}) == []
     assert len(client.list_memories({"search": "manifolds", "status": "archived"})) == 1
     # expired rows never surface
-    exp = client.store_memory("expiring note about zebra migration", team_id="t", task_id="k")
+    exp = client.store_memory(
+        "expiring note about zebra migration", team_id="t", task_id="k"
+    )
     assert len(client.list_memories({"search": "zebra"})) == 1
-    client.vault.conn.execute("UPDATE memories SET expires_at=1 WHERE key=?", (exp.key,))
+    client.vault.conn.execute(
+        "UPDATE memories SET expires_at=1 WHERE key=?", (exp.key,)
+    )
     client.vault.conn.commit()
     assert client.list_memories({"search": "zebra"}) == []
 
@@ -89,7 +103,10 @@ def test_cli_list_search(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("CAIRN_AGENT", "cli-test")
     assert main(["init", "--yes", "--embed-spec", "hash"]) == 0
     capsys.readouterr()
-    assert main(["store", "the token lives in the keychain", "--team", "t", "--task", "k"]) == 0
+    assert (
+        main(["store", "the token lives in the keychain", "--team", "t", "--task", "k"])
+        == 0
+    )
     capsys.readouterr()
     assert main(["list", "--search", "keychain", "--json"]) == 0
     out, _ = capsys.readouterr()

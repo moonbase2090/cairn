@@ -72,7 +72,10 @@ def configured_patterns() -> list[re.Pattern[str]]:
             try:
                 patterns.append(re.compile(expression))
             except re.error:
-                print(f"invalid {source} release denylist pattern on line {number}", file=sys.stderr)
+                print(
+                    f"invalid {source} release denylist pattern on line {number}",
+                    file=sys.stderr,
+                )
                 raise SystemExit(2)
     return patterns
 
@@ -84,7 +87,11 @@ def is_private_ip(text: str) -> bool:
                 address = ipaddress.ip_address(match.group(0))
             except ValueError:
                 continue
-            if any(address in network for network in PRIVATE_NETWORKS if network.version == address.version):
+            if any(
+                address in network
+                for network in PRIVATE_NETWORKS
+                if network.version == address.version
+            ):
                 return True
     return False
 
@@ -94,7 +101,10 @@ def line_matches(text: str, patterns: list[re.Pattern[str]]) -> bool:
         return True
     if is_private_ip(text):
         return True
-    return any(match.group(0).casefold() != ALLOWED_EMAIL.casefold() for match in EMAIL.finditer(text))
+    return any(
+        match.group(0).casefold() != ALLOWED_EMAIL.casefold()
+        for match in EMAIL.finditer(text)
+    )
 
 
 def display_path(path: Path, root: Path) -> str:
@@ -211,10 +221,14 @@ def scan_blob(
                     scan_binary(member.extra, f"{label}-extra", patterns, findings)
                     local_extra = zip_local_extra(data, member, archive.start_dir)
                     if local_extra != member.extra:
-                        scan_binary(local_extra, f"{label}-local-extra", patterns, findings)
+                        scan_binary(
+                            local_extra, f"{label}-local-extra", patterns, findings
+                        )
                     if member.is_dir():
                         continue
-                    scan_blob(archive.read(member), label, patterns, findings, depth + 1)
+                    scan_blob(
+                        archive.read(member), label, patterns, findings, depth + 1
+                    )
                 return
         except Exception as error:
             raise ScanError from error

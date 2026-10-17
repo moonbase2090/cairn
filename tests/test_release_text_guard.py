@@ -9,8 +9,15 @@ from pathlib import Path
 
 import pytest
 
-SCANNER_PATH = Path(__file__).resolve().parents[1] / "scripts" / "release" / "check_release_text.py"
-SCANNER_SPEC = importlib.util.spec_from_file_location("check_release_text", SCANNER_PATH)
+SCANNER_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "release"
+    / "check_release_text.py"
+)
+SCANNER_SPEC = importlib.util.spec_from_file_location(
+    "check_release_text", SCANNER_PATH
+)
 assert SCANNER_SPEC is not None and SCANNER_SPEC.loader is not None
 scanner = importlib.util.module_from_spec(SCANNER_SPEC)
 SCANNER_SPEC.loader.exec_module(scanner)
@@ -131,15 +138,18 @@ def test_release_guard_rejects_private_path_in_zip_extra_field(tmp_path: Path) -
     assert result.stderr == ""
 
 
-def test_release_guard_rejects_private_path_in_zip_local_header_extra(tmp_path: Path) -> None:
+def test_release_guard_rejects_private_path_in_zip_local_header_extra(
+    tmp_path: Path,
+) -> None:
     archive_path = local_extra_archive(tmp_path)
 
     archive_bytes = archive_path.read_bytes()
     extra_field_size = int.from_bytes(archive_bytes[28:30], "little")
     local_name_size = int.from_bytes(archive_bytes[26:28], "little")
     local_extra_start = 30 + local_name_size
-    assert b"/Users/fixture/private/local-header-path" in (
-        archive_bytes[local_extra_start:local_extra_start + extra_field_size]
+    assert (
+        b"/Users/fixture/private/local-header-path"
+        in (archive_bytes[local_extra_start : local_extra_start + extra_field_size])
     )
     with zipfile.ZipFile(archive_path) as archive:
         info = archive.infolist()[0]
@@ -164,7 +174,9 @@ def test_release_guard_rejects_private_path_in_zip_local_header_extra(tmp_path: 
     assert result.stderr == ""
 
 
-def test_configured_patterns_detects_local_and_environment_rules(tmp_path: Path, monkeypatch) -> None:
+def test_configured_patterns_detects_local_and_environment_rules(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     denylist = tmp_path / ".config" / "moonbase" / "release-denylist.txt"
     denylist.parent.mkdir(parents=True)
@@ -178,7 +190,9 @@ def test_configured_patterns_detects_local_and_environment_rules(tmp_path: Path,
 
 
 def test_configured_patterns_rejects_invalid_pattern_without_echoing_it(
-    tmp_path: Path, monkeypatch, capsys,
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("RELEASE_DENYLIST", "[")
@@ -187,7 +201,9 @@ def test_configured_patterns_rejects_invalid_pattern_without_echoing_it(
         scanner.configured_patterns()
     assert error.value.code == 2
 
-    assert "invalid secret release denylist pattern on line 1" in capsys.readouterr().err
+    assert (
+        "invalid secret release denylist pattern on line 1" in capsys.readouterr().err
+    )
 
 
 def test_private_ip_and_line_matching_cover_private_and_public_values() -> None:
@@ -239,7 +255,9 @@ def test_scan_blob_finds_tar_metadata_and_nested_text() -> None:
         archive.addfile(document, io.BytesIO(b"contact at someone@example.invalid"))
 
     findings: set[str] = set()
-    scanner.scan_blob(archive_bytes.getvalue(), "nested.tar.gz", scanner.GENERIC_PATTERNS, findings)
+    scanner.scan_blob(
+        archive_bytes.getvalue(), "nested.tar.gz", scanner.GENERIC_PATTERNS, findings
+    )
 
     assert findings == {
         "nested.tar.gz!member-1-link:1",
@@ -248,7 +266,9 @@ def test_scan_blob_finds_tar_metadata_and_nested_text() -> None:
     }
 
 
-def test_scan_blob_finds_zip_comments_directory_names_and_local_extra(tmp_path: Path) -> None:
+def test_scan_blob_finds_zip_comments_directory_names_and_local_extra(
+    tmp_path: Path,
+) -> None:
     archive_path = local_extra_archive(tmp_path)
     archive_bytes = io.BytesIO()
     with zipfile.ZipFile(archive_bytes, "w") as archive:
@@ -264,7 +284,9 @@ def test_scan_blob_finds_zip_comments_directory_names_and_local_extra(tmp_path: 
         archive.writestr(member, "Public release notes")
 
     findings: set[str] = set()
-    scanner.scan_blob(archive_bytes.getvalue(), "metadata.zip", scanner.GENERIC_PATTERNS, findings)
+    scanner.scan_blob(
+        archive_bytes.getvalue(), "metadata.zip", scanner.GENERIC_PATTERNS, findings
+    )
     assert findings == {
         "metadata.zip-comment:1",
         "metadata.zip!member-1-comment:1",
@@ -273,23 +295,44 @@ def test_scan_blob_finds_zip_comments_directory_names_and_local_extra(tmp_path: 
     }
 
     local_findings: set[str] = set()
-    scanner.scan_blob(archive_path.read_bytes(), "local-extra.zip", scanner.GENERIC_PATTERNS, local_findings)
+    scanner.scan_blob(
+        archive_path.read_bytes(),
+        "local-extra.zip",
+        scanner.GENERIC_PATTERNS,
+        local_findings,
+    )
     assert local_findings == {"local-extra.zip!member-1-local-extra:1"}
 
 
 def test_scan_blob_handles_utf8_binary_and_fail_closed_archives() -> None:
     findings: set[str] = set()
-    scanner.scan_blob(b"release at /Users/fixture/private", "notes.txt", scanner.GENERIC_PATTERNS, findings)
-    scanner.scan_blob(b"\x00\xff/Users/fixture/binary", "notes.bin", scanner.GENERIC_PATTERNS, findings)
+    scanner.scan_blob(
+        b"release at /Users/fixture/private",
+        "notes.txt",
+        scanner.GENERIC_PATTERNS,
+        findings,
+    )
+    scanner.scan_blob(
+        b"\x00\xff/Users/fixture/binary",
+        "notes.bin",
+        scanner.GENERIC_PATTERNS,
+        findings,
+    )
     assert findings == {"notes.txt:1", "notes.bin:1"}
 
     with pytest.raises(scanner.ScanError):
-        scanner.scan_blob(b"PK\x03\x04broken", "broken.zip", scanner.GENERIC_PATTERNS, set())
+        scanner.scan_blob(
+            b"PK\x03\x04broken", "broken.zip", scanner.GENERIC_PATTERNS, set()
+        )
     with pytest.raises(scanner.ScanError):
-        scanner.scan_blob(b"PK\x03\x04", "too-deep.zip", scanner.GENERIC_PATTERNS, set(), depth=16)
+        scanner.scan_blob(
+            b"PK\x03\x04", "too-deep.zip", scanner.GENERIC_PATTERNS, set(), depth=16
+        )
 
 
-def test_main_reports_findings_usage_and_missing_inputs(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_main_reports_findings_usage_and_missing_inputs(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
     root = tmp_path / "repo"
     root.mkdir()
     (root / "README.md").write_text("Contact person@example.invalid")
