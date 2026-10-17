@@ -1,4 +1,5 @@
 """MCP entry points for sync state, curator tokens, and conflicts."""
+
 import json
 import socket
 
@@ -12,15 +13,24 @@ def test_mcp_exposes_sync_token_and_conflict_tools(tmp_path):
     embedder = HashEmbedder()
     client = CairnClient(
         Vault(tmp_path / "vault.db", embedder.name, embedder.dims, create=True),
-        "agent-a", embedder,
+        "agent-a",
+        embedder,
     )
 
     names = {tool["name"] for tool in TOOL_DEFS}
     assert {"cairn_sync", "cairn_serve", "cairn_token", "cairn_conflicts"} <= names
 
-    created = json.loads(call_tool(client, "cairn_token", {
-        "action": "create", "agent": "agent-b", "curator": True,
-    }))
+    created = json.loads(
+        call_tool(
+            client,
+            "cairn_token",
+            {
+                "action": "create",
+                "agent": "agent-b",
+                "curator": True,
+            },
+        )
+    )
     assert created["curator"] is True
     assert created["token"].startswith("cairn_")
     listed = json.loads(call_tool(client, "cairn_token", {"action": "list"}))
@@ -35,15 +45,23 @@ def test_mcp_can_start_check_and_stop_sync_server(tmp_path):
     embedder = HashEmbedder()
     client = CairnClient(
         Vault(tmp_path / "vault.db", embedder.name, embedder.dims, create=True),
-        "agent-a", embedder,
+        "agent-a",
+        embedder,
     )
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     try:
-        started = json.loads(call_tool(client, "cairn_serve", {
-            "action": "start", "port": port,
-        }))
+        started = json.loads(
+            call_tool(
+                client,
+                "cairn_serve",
+                {
+                    "action": "start",
+                    "port": port,
+                },
+            )
+        )
         assert started["running"] is True
         status = json.loads(call_tool(client, "cairn_serve", {"action": "status"}))
         assert status["running"] is True

@@ -15,14 +15,17 @@ def source_skill() -> Path:
 def test_skill_mentions_every_top_level_command() -> None:
     parser = build_parser()
     subparsers = next(
-        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+        action
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
     )
     skill = source_skill().read_text()
     missing = [
-        command for command in subparsers.choices
-        if f"cairn {command}" not in skill
+        command for command in subparsers.choices if f"cairn {command}" not in skill
     ]
-    assert not missing, f"Document these top-level cairn commands in the skill: {missing}"
+    assert not missing, (
+        f"Document these top-level cairn commands in the skill: {missing}"
+    )
 
 
 def test_packaged_skill_matches_source() -> None:
@@ -44,10 +47,15 @@ def test_install_and_check_selected_agent(tmp_path: Path) -> None:
     ).read_bytes() == source_skill().read_bytes()
 
     current = skill_install.install_skill(tmp_path, "codex")
-    assert [result.status for result in current] == ["already current", "already current"]
+    assert [result.status for result in current] == [
+        "already current",
+        "already current",
+    ]
 
 
-def test_conflicting_file_blocks_all_selected_writes_unless_forced(tmp_path: Path) -> None:
+def test_conflicting_file_blocks_all_selected_writes_unless_forced(
+    tmp_path: Path,
+) -> None:
     codex_dir = tmp_path / ".codex" / "skills" / "cairn"
     codex_dir.mkdir(parents=True)
     skill_file = codex_dir / "SKILL.md"
@@ -62,9 +70,7 @@ def test_conflicting_file_blocks_all_selected_writes_unless_forced(tmp_path: Pat
     else:
         raise AssertionError("a different skill file must be preserved")
     assert skill_file.read_text() == "local edit\n"
-    assert not (
-        tmp_path / ".agents" / "skills" / "cairn" / "SKILL.md"
-    ).exists()
+    assert not (tmp_path / ".agents" / "skills" / "cairn" / "SKILL.md").exists()
 
     forced = skill_install.install_skill(tmp_path, "codex", force=True)
     assert [result.status for result in forced] == ["replaced", "installed"]
@@ -94,7 +100,9 @@ def test_detected_installs_only_agents_with_config_directories_or_commands(
     assert not muse_detected
 
 
-def test_skills_install_is_gated_and_json_is_supported(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_skills_install_is_gated_and_json_is_supported(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("CAIRN_EXPERIMENTAL_SKILLS", raising=False)
     assert main(["skills", "install", "--agent", "codex"]) == 2
@@ -107,7 +115,9 @@ def test_skills_install_is_gated_and_json_is_supported(tmp_path: Path, monkeypat
     assert not (tmp_path / ".agents" / "skills" / "cairn" / "SKILL.md").exists()
 
 
-def test_muse_list_accepts_the_managed_user_skill_path(tmp_path: Path, monkeypatch) -> None:
+def test_muse_list_accepts_the_managed_user_skill_path(
+    tmp_path: Path, monkeypatch
+) -> None:
     def fake_run(command, **kwargs):
         assert command == ["muse", "skills", "list", "--source", "user", "--json"]
         assert kwargs["env"]["HOME"] == str(tmp_path)
@@ -120,6 +130,5 @@ def test_muse_list_accepts_the_managed_user_skill_path(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(skill_install.subprocess, "run", fake_run)
     assert (
-        skill_install.muse_skill_path(tmp_path)
-        == "$CONFIG_DIR/skills/cairn/SKILL.md"
+        skill_install.muse_skill_path(tmp_path) == "$CONFIG_DIR/skills/cairn/SKILL.md"
     )

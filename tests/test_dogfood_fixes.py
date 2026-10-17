@@ -1,4 +1,5 @@
 """Dogfood-fix tests — from the grok-cairn-fresh 0.2.0 session report."""
+
 import json
 
 import pytest
@@ -38,8 +39,13 @@ def test_cli_store_empty_is_exit_2(tmp_path, monkeypatch, capsys):
 def test_restore_superseded_retires_rival(tmp_path):
     client = make_client(tmp_path / "vault.db")
     v1 = client.store_memory("original claim here today", team_id="t", task_id="k")
-    v2 = client.store_memory("corrected claim here today now", team_id="t", task_id="k",
-                             supersedes_key=v1.key, mode="new")
+    v2 = client.store_memory(
+        "corrected claim here today now",
+        team_id="t",
+        task_id="k",
+        supersedes_key=v1.key,
+        mode="new",
+    )
     out = client.restore_memory(v1.key)
     assert out == {"key": v1.key, "status": "active", "retired": [v2.key]}
     assert client.get_memory(v1.key).status == "active"
@@ -58,9 +64,16 @@ def test_restore_archived_just_reactivates(tmp_path):
 
 def test_retrieve_min_sim_floor(tmp_path):
     client = make_client(tmp_path / "vault.db")
-    client.store_memory("coolant manifold pressure nominal levels", team_id="t", task_id="k")
-    assert client.retrieve_memory("totally unrelated zebra query")  # legacy: always top-k
-    assert client.retrieve_memory("totally unrelated zebra query", min_similarity=0.9) == []
+    client.store_memory(
+        "coolant manifold pressure nominal levels", team_id="t", task_id="k"
+    )
+    assert client.retrieve_memory(
+        "totally unrelated zebra query"
+    )  # legacy: always top-k
+    assert (
+        client.retrieve_memory("totally unrelated zebra query", min_similarity=0.9)
+        == []
+    )
     hits = client.retrieve_memory("coolant manifold pressure", min_similarity=0.2)
     assert hits
 
@@ -79,7 +92,10 @@ def test_human_log_renders_audit_rows(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("CAIRN_DIR", str(tmp_path / ".cairn"))
     monkeypatch.setenv("CAIRN_AGENT", "log-check")
     assert run(["init", "--yes", "--embed-spec", "hash"], capsys)[0] == 0
-    assert run(["store", "logged memory one two", "--team", "t", "--task", "k"], capsys)[0] == 0
+    assert (
+        run(["store", "logged memory one two", "--team", "t", "--task", "k"], capsys)[0]
+        == 0
+    )
     pack = json.loads(run(["export", "--json"], capsys)[1])
     (tmp_path / "pack.json").write_text(json.dumps(pack))
     assert run(["import", str(tmp_path / "pack.json")], capsys)[0] == 0

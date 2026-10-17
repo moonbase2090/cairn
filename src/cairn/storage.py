@@ -12,6 +12,7 @@ when the text was stored as a document; read_content() always returns it. The va
 (project.json, embedder hint, audit log) stays on local disk whatever the
 backend; agent identity lives there, and each memory row records its agent_id.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
@@ -28,15 +29,40 @@ from .vault_identity import VaultIdentity
 DEFAULT_BACKEND = "sqlite"
 
 MEMORY_FIELDS = (
-    "key", "canonical_id", "content", "content_summary", "memory_type", "status",
-    "origin", "task_id", "agent_id", "team_id", "version", "created_at", "updated_at",
-    "expires_at", "archived_at", "supersedes", "parent_key", "provenance",
-    "confidence", "content_hash",
-    "state_revision", "state_origin", "state_event_id",
+    "key",
+    "canonical_id",
+    "content",
+    "content_summary",
+    "memory_type",
+    "status",
+    "origin",
+    "task_id",
+    "agent_id",
+    "team_id",
+    "version",
+    "created_at",
+    "updated_at",
+    "expires_at",
+    "archived_at",
+    "supersedes",
+    "parent_key",
+    "provenance",
+    "confidence",
+    "content_hash",
+    "state_revision",
+    "state_origin",
+    "state_event_id",
 )
 
 # Exact-match columns a MemoryQuery or search filter may name.
-FILTER_COLUMNS = ("task_id", "canonical_id", "memory_type", "status", "team_id", "agent_id")
+FILTER_COLUMNS = (
+    "task_id",
+    "canonical_id",
+    "memory_type",
+    "status",
+    "team_id",
+    "agent_id",
+)
 
 Row = Mapping
 
@@ -114,19 +140,28 @@ class StorageBackend:
     def get(self, key: str) -> Row | None:
         raise NotImplementedError
 
-    def by_hash(self, content_hash: str, task_id: str, status: str = "active") -> list[Row]:
+    def by_hash(
+        self, content_hash: str, task_id: str, status: str = "active"
+    ) -> list[Row]:
         raise NotImplementedError
 
-    def find(self, query: MemoryQuery, limit: int = 100,
-             with_embedding: bool = False) -> list[Row]:
+    def find(
+        self, query: MemoryQuery, limit: int = 100, with_embedding: bool = False
+    ) -> list[Row]:
         raise NotImplementedError
 
     def iter_memories(self, batch_size: int = 100) -> Iterator[Row]:
         """Yield every memory in bounded pages for maintenance scans."""
         raise NotImplementedError
 
-    def set_status(self, key: str, status: str, now: int, archived_at: int | None = None,
-                   event_metadata: dict | None = None) -> int:
+    def set_status(
+        self,
+        key: str,
+        status: str,
+        now: int,
+        archived_at: int | None = None,
+        event_metadata: dict | None = None,
+    ) -> int:
         """Set status, updated_at, and archived_at; returns rows changed."""
         raise NotImplementedError
 
@@ -143,13 +178,24 @@ class StorageBackend:
         raise NotImplementedError
 
     # -- search ------------------------------------------------------------------
-    def fts_search(self, text: str, limit: int = 100, status: str = "active",
-                   extra: dict | None = None) -> list[Row]:
+    def fts_search(
+        self,
+        text: str,
+        limit: int = 100,
+        status: str = "active",
+        extra: dict | None = None,
+    ) -> list[Row]:
         """Keyword search over content, best match first. User text is literal."""
         raise NotImplementedError
 
-    def knn(self, query: np.ndarray, k: int, status: str = "active",
-            filters: dict | None = None, now: int | None = None) -> list[tuple[Row, float]]:
+    def knn(
+        self,
+        query: np.ndarray,
+        k: int,
+        status: str = "active",
+        filters: dict | None = None,
+        now: int | None = None,
+    ) -> list[tuple[Row, float]]:
         """[(row, cosine_distance)] closest first; filters and expiry apply before the cut."""
         raise NotImplementedError
 
@@ -177,8 +223,14 @@ class StorageBackend:
         raise NotImplementedError
 
     # -- server credentials ------------------------------------------------------
-    def create_server_token(self, token_id: str, token_hash: str, agent_id: str,
-                            created_at: int, curator: bool = False) -> None:
+    def create_server_token(
+        self,
+        token_id: str,
+        token_hash: str,
+        agent_id: str,
+        created_at: int,
+        curator: bool = False,
+    ) -> None:
         """Store a token digest and its permitted agent identity."""
         raise NotImplementedError
 
@@ -221,8 +273,9 @@ class StorageBackend:
     def list_sync_cursors(self) -> list[dict]:
         raise NotImplementedError
 
-    def set_sync_cursor(self, peer: str, direction: str, cursor: int, now: int,
-                        token_id: str = "") -> None:
+    def set_sync_cursor(
+        self, peer: str, direction: str, cursor: int, now: int, token_id: str = ""
+    ) -> None:
         raise NotImplementedError
 
     def list_competing_corrections(self) -> list[dict]:
@@ -234,8 +287,9 @@ class StorageBackend:
     def list_sync_conflicts(self, include_resolved: bool = False) -> list[dict]:
         raise NotImplementedError
 
-    def resolve_sync_conflict(self, base_key: str, winner_key: str,
-                              resolved_by: str, now: int) -> None:
+    def resolve_sync_conflict(
+        self, base_key: str, winner_key: str, resolved_by: str, now: int
+    ) -> None:
         raise NotImplementedError
 
 
@@ -268,75 +322,136 @@ class StorageConfig:
         if self.backend == "postgres" and (self.url is None or not self.url.strip()):
             raise ValueError("[storage] url is required when backend = 'postgres'")
         if self.backend != "postgres" and self.url is not None:
-            raise ValueError("[storage] url is only supported when backend = 'postgres'")
+            raise ValueError(
+                "[storage] url is only supported when backend = 'postgres'"
+            )
         aws_fields = (
-            self.region, self.profile, self.vault_id, self.vault_name, self.table, self.cache_table,
-            self.content_bucket, self.vector_bucket, self.vector_index,
-            self.vector_index_arn, self.sync_endpoint,
+            self.region,
+            self.profile,
+            self.vault_id,
+            self.vault_name,
+            self.table,
+            self.cache_table,
+            self.content_bucket,
+            self.vector_bucket,
+            self.vector_index,
+            self.vector_index_arn,
+            self.sync_endpoint,
         )
         if self.backend == "aws":
             missing = [
-                name for name, value in (
-                    ("region", self.region), ("vault_id", self.vault_id),
+                name
+                for name, value in (
+                    ("region", self.region),
+                    ("vault_id", self.vault_id),
                     ("vault_name", self.vault_name),
-                    ("table", self.table), ("cache_table", self.cache_table),
+                    ("table", self.table),
+                    ("cache_table", self.cache_table),
                     ("content_bucket", self.content_bucket),
                     ("vector_bucket", self.vector_bucket),
                     ("vector_index", self.vector_index),
                     ("vector_index_arn", self.vector_index_arn),
-                ) if not isinstance(value, str) or not value.strip()
+                )
+                if not isinstance(value, str) or not value.strip()
             ]
             if missing:
                 raise ValueError("[storage] AWS backend requires " + ", ".join(missing))
             if not re.fullmatch(r"[a-z]{2}(?:-[a-z]+)+-\d", self.region or ""):
                 raise ValueError("[storage] region must be an AWS region name")
             if not re.fullmatch(r"[0-9a-f]{32}", self.vault_id or ""):
-                raise ValueError("[storage] vault_id must be a 32-character logical vault ID")
+                raise ValueError(
+                    "[storage] vault_id must be a 32-character logical vault ID"
+                )
             from .vault_identity import safe_vault_name
 
             if safe_vault_name(self.vault_name) != self.vault_name:
                 raise ValueError("[storage] vault_name must be a safe display name")
             if self.profile is not None and not re.fullmatch(
-                r"[A-Za-z0-9_+=,.@-]{1,64}", self.profile,
+                r"[A-Za-z0-9_+=,.@-]{1,64}",
+                self.profile,
             ):
                 raise ValueError("[storage] profile contains unsupported characters")
             if self.sync_endpoint is not None:
                 endpoint = urlsplit(self.sync_endpoint)
-                if (endpoint.scheme != "https" or not endpoint.netloc
-                        or endpoint.username or endpoint.password
-                        or endpoint.query or endpoint.fragment
-                        or endpoint.path not in {"", "/"}):
-                    raise ValueError("[storage] sync_endpoint must be an HTTPS API base URL")
+                if (
+                    endpoint.scheme != "https"
+                    or not endpoint.netloc
+                    or endpoint.username
+                    or endpoint.password
+                    or endpoint.query
+                    or endpoint.fragment
+                    or endpoint.path not in {"", "/"}
+                ):
+                    raise ValueError(
+                        "[storage] sync_endpoint must be an HTTPS API base URL"
+                    )
         elif any(value is not None for value in aws_fields):
             raise ValueError("AWS resource settings require backend = 'aws'")
 
 
-def _open_sqlite(vault_dir: Path, embed_name: str, dims: int, config: StorageConfig,
-                 create: bool = False, doc_threshold: int | None = None) -> StorageBackend:
+def _open_sqlite(
+    vault_dir: Path,
+    embed_name: str,
+    dims: int,
+    config: StorageConfig,
+    create: bool = False,
+    doc_threshold: int | None = None,
+) -> StorageBackend:
     from .store import Vault
 
-    return Vault(Path(vault_dir) / "vault.db", embed_name, dims, create=create,
-                 doc_threshold=doc_threshold)
+    return Vault(
+        Path(vault_dir) / "vault.db",
+        embed_name,
+        dims,
+        create=create,
+        doc_threshold=doc_threshold,
+    )
 
 
-def _open_postgres(vault_dir: Path, embed_name: str, dims: int, config: StorageConfig,
-                   create: bool = False, doc_threshold: int | None = None) -> StorageBackend:
+def _open_postgres(
+    vault_dir: Path,
+    embed_name: str,
+    dims: int,
+    config: StorageConfig,
+    create: bool = False,
+    doc_threshold: int | None = None,
+) -> StorageBackend:
     from .postgres import PostgresVault
 
-    return PostgresVault(Path(vault_dir), embed_name, dims, config.url,
-                         create=create, doc_threshold=doc_threshold)
+    return PostgresVault(
+        Path(vault_dir),
+        embed_name,
+        dims,
+        config.url,
+        create=create,
+        doc_threshold=doc_threshold,
+    )
 
 
-def _open_aws(vault_dir: Path, embed_name: str, dims: int, config: StorageConfig,
-              create: bool = False, doc_threshold: int | None = None) -> StorageBackend:
+def _open_aws(
+    vault_dir: Path,
+    embed_name: str,
+    dims: int,
+    config: StorageConfig,
+    create: bool = False,
+    doc_threshold: int | None = None,
+) -> StorageBackend:
     from .aws_storage import AwsVault
 
-    return AwsVault(Path(vault_dir), embed_name, dims, config,
-                    create=create, doc_threshold=doc_threshold)
+    return AwsVault(
+        Path(vault_dir),
+        embed_name,
+        dims,
+        config,
+        create=create,
+        doc_threshold=doc_threshold,
+    )
 
 
 BACKENDS: dict[str, Opener] = {
-    "sqlite": _open_sqlite, "postgres": _open_postgres, "aws": _open_aws,
+    "sqlite": _open_sqlite,
+    "postgres": _open_postgres,
+    "aws": _open_aws,
 }
 
 
@@ -344,10 +459,17 @@ def backend_names() -> Iterator[str]:
     return iter(sorted(BACKENDS))
 
 
-def open_backend(vault_dir: Path, embed_name: str, dims: int, *,
-                 config: StorageConfig | None = None, backend: str | None = None,
-                 url: str | None = None, create: bool = False,
-                 doc_threshold: int | None = None) -> StorageBackend:
+def open_backend(
+    vault_dir: Path,
+    embed_name: str,
+    dims: int,
+    *,
+    config: StorageConfig | None = None,
+    backend: str | None = None,
+    url: str | None = None,
+    create: bool = False,
+    doc_threshold: int | None = None,
+) -> StorageBackend:
     """Open (or with create=True, initialise) a vault on the named backend."""
     if config is None:
         config = StorageConfig(
@@ -362,5 +484,11 @@ def open_backend(vault_dir: Path, embed_name: str, dims: int, *,
         raise UnknownBackendError(
             f"unknown storage backend {config.backend!r}; available: {', '.join(backend_names())}"
         ) from None
-    return opener(Path(vault_dir), embed_name, dims, config,
-                  create=create, doc_threshold=doc_threshold)
+    return opener(
+        Path(vault_dir),
+        embed_name,
+        dims,
+        config,
+        create=create,
+        doc_threshold=doc_threshold,
+    )

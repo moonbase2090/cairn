@@ -1,4 +1,5 @@
 """Scheduled, idempotent cleanup for tombstoned AWS vault rows."""
+
 from __future__ import annotations
 
 import os
@@ -33,8 +34,13 @@ def handler(_event, _context):
 
     try:
         return _cleanup_vault(
-            table, boto3.client("s3"), boto3.client("s3vectors"),
-            bucket_name, vector_bucket, vector_index, vault_id,
+            table,
+            boto3.client("s3"),
+            boto3.client("s3vectors"),
+            bucket_name,
+            vector_bucket,
+            vector_index,
+            vault_id,
         )
     finally:
         _release_lease(table, lease_key, lease_owner)
@@ -56,7 +62,10 @@ def _acquire_lease(table, lease_key: dict, lease_owner: str) -> bool:
             },
         )
     except ClientError as error:
-        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+        if (
+            error.response.get("Error", {}).get("Code")
+            == "ConditionalCheckFailedException"
+        ):
             return False
         raise
     return True
@@ -70,7 +79,10 @@ def _release_lease(table, lease_key: dict, lease_owner: str) -> None:
             ExpressionAttributeValues={":owner": lease_owner},
         )
     except ClientError as error:
-        if error.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+        if (
+            error.response.get("Error", {}).get("Code")
+            != "ConditionalCheckFailedException"
+        ):
             raise
 
 
@@ -99,7 +111,10 @@ def _acquire_content_lease(table, lease_key: dict) -> str | None:
             },
         )
     except ClientError as error:
-        if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+        if (
+            error.response.get("Error", {}).get("Code")
+            == "ConditionalCheckFailedException"
+        ):
             return None
         raise
     return owner
@@ -113,12 +128,22 @@ def _release_content_lease(table, lease_key: dict, lease_owner: str) -> None:
             ExpressionAttributeValues={":owner": lease_owner},
         )
     except ClientError as error:
-        if error.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+        if (
+            error.response.get("Error", {}).get("Code")
+            != "ConditionalCheckFailedException"
+        ):
             raise
 
 
-def _cleanup_vault(table, s3, vectors, bucket_name: str, vector_bucket: str,
-                   vector_index: str, vault_id: str) -> dict:
+def _cleanup_vault(
+    table,
+    s3,
+    vectors,
+    bucket_name: str,
+    vector_bucket: str,
+    vector_index: str,
+    vault_id: str,
+) -> dict:
     tombstone_partition = f"VAULT#{vault_id}#TOMBSTONE"
     memory_prefix = f"VAULT#{vault_id}#MEMORY#"
     removed_objects = 0
@@ -145,8 +170,11 @@ def _cleanup_vault(table, s3, vectors, bucket_name: str, vector_bucket: str,
                         has_owner = False
                         for shard in range(16):
                             request = {
-                                "KeyConditionExpression": Key("PK").eq(f"{memory_prefix}{shard:02x}"),
-                                "FilterExpression": Attr("recordType").eq("memory") & Attr("content_hash").eq(content_hash),
+                                "KeyConditionExpression": Key("PK").eq(
+                                    f"{memory_prefix}{shard:02x}"
+                                ),
+                                "FilterExpression": Attr("recordType").eq("memory")
+                                & Attr("content_hash").eq(content_hash),
                                 "ConsistentRead": True,
                             }
                             while True:
@@ -166,7 +194,9 @@ def _cleanup_vault(table, s3, vectors, bucket_name: str, vector_bucket: str,
                             content_done = True
                     finally:
                         _release_content_lease(
-                            table, content_lease_key, content_lease_owner,
+                            table,
+                            content_lease_key,
+                            content_lease_owner,
                         )
             key = item.get("key")
             if isinstance(key, str) and key and not item.get("vectorCleanupDone"):
@@ -203,7 +233,9 @@ def _delete_versions(s3, bucket_name: str, object_key: str) -> None:
     markers = {}
     while True:
         page = s3.list_object_versions(
-            Bucket=bucket_name, Prefix=object_key, **markers,
+            Bucket=bucket_name,
+            Prefix=object_key,
+            **markers,
         )
         objects = [
             {"Key": version["Key"], "VersionId": version["VersionId"]}
@@ -212,7 +244,8 @@ def _delete_versions(s3, bucket_name: str, object_key: str) -> None:
         ]
         if objects:
             result = s3.delete_objects(
-                Bucket=bucket_name, Delete={"Objects": objects, "Quiet": True},
+                Bucket=bucket_name,
+                Delete={"Objects": objects, "Quiet": True},
             )
             if result.get("Errors"):
                 raise RuntimeError("vault content version cleanup failed")

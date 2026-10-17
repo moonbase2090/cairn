@@ -1,4 +1,5 @@
 """Embedder hint: spec + optional dims so FastEmbed can skip the probe embed."""
+
 import io
 import json
 

@@ -2,6 +2,7 @@
 
 Filterable vs content split, deterministic keys, append-only versioning.
 """
+
 from __future__ import annotations
 
 import hashlib

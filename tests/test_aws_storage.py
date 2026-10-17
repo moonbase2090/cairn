@@ -44,8 +44,15 @@ class FakeDynamoTable:
         item = self.aws.items.get((Key["PK"], Key["SK"]))
         return {"Item": deepcopy(item)} if item is not None else {}
 
-    def query(self, *, KeyConditionExpression, IndexName=None, Limit=None,
-              ExclusiveStartKey=None, **_kwargs):
+    def query(
+        self,
+        *,
+        KeyConditionExpression,
+        IndexName=None,
+        Limit=None,
+        ExclusiveStartKey=None,
+        **_kwargs,
+    ):
         self.aws.ensure_online()
         conditions = _key_conditions(KeyConditionExpression)
         partition_name, partition_value = next(
@@ -53,11 +60,16 @@ class FakeDynamoTable:
         )
         if IndexName:
             partition_name = {
-                "ByVault": "GSI0PK", "ByTokenId": "GSI4PK", "ByEventId": "GSI5PK",
+                "ByVault": "GSI0PK",
+                "ByTokenId": "GSI4PK",
+                "ByEventId": "GSI5PK",
             }[IndexName]
         items = sorted(
-            (deepcopy(item) for item in self.aws.items.values()
-             if item.get(partition_name) == partition_value),
+            (
+                deepcopy(item)
+                for item in self.aws.items.values()
+                if item.get(partition_name) == partition_value
+            ),
             key=lambda item: item.get("SK", ""),
         )
         for name, operator, value in conditions:
@@ -67,9 +79,13 @@ class FakeDynamoTable:
             items = [item for item in items if item["SK"] > ExclusiveStartKey["SK"]]
         if Limit and len(items) > Limit:
             page = items[:Limit]
-            return {"Items": page, "LastEvaluatedKey": {
-                "PK": page[-1]["PK"], "SK": page[-1]["SK"],
-            }}
+            return {
+                "Items": page,
+                "LastEvaluatedKey": {
+                    "PK": page[-1]["PK"],
+                    "SK": page[-1]["SK"],
+                },
+            }
         return {"Items": items}
 
     def put_item(self, *, Item, **_kwargs):
@@ -78,20 +94,34 @@ class FakeDynamoTable:
         self.aws.items[(item["PK"], item["SK"])] = item
         return {}
 
-    def delete_item(self, *, Key, ReturnValues=None, ConditionExpression=None,
-                    ExpressionAttributeValues=None, **_kwargs):
+    def delete_item(
+        self,
+        *,
+        Key,
+        ReturnValues=None,
+        ConditionExpression=None,
+        ExpressionAttributeValues=None,
+        **_kwargs,
+    ):
         self.aws.ensure_online()
         if ConditionExpression == "leaseOwner = :owner":
             item = self.aws.items.get((Key["PK"], Key["SK"]))
-            if item is None or item.get("leaseOwner") != ExpressionAttributeValues[":owner"]:
+            if (
+                item is None
+                or item.get("leaseOwner") != ExpressionAttributeValues[":owner"]
+            ):
                 raise FakeConditionalCheckFailed()
         item = self.aws.items.pop((Key["PK"], Key["SK"]), None)
         return {"Attributes": deepcopy(item)} if ReturnValues and item else {}
 
-    def update_item(self, *, Key, ExpressionAttributeValues, UpdateExpression="", **_kwargs):
+    def update_item(
+        self, *, Key, ExpressionAttributeValues, UpdateExpression="", **_kwargs
+    ):
         self.aws.ensure_online()
         if "leaseOwner" in UpdateExpression:
-            assert UpdateExpression == "SET leaseOwner = :owner, leaseExpiresAt = :expires"
+            assert (
+                UpdateExpression == "SET leaseOwner = :owner, leaseExpiresAt = :expires"
+            )
             assert _kwargs["ConditionExpression"] == (
                 "attribute_not_exists(leaseExpiresAt) OR leaseExpiresAt < :now"
             )
@@ -113,8 +143,11 @@ class FakeDynamoTable:
             row_key = (Key["PK"], Key["SK"])
             current = self.aws.items.get(row_key)
             now = ExpressionAttributeValues[":now"]
-            if (not current or current.get("leaseOwner") != ExpressionAttributeValues[":owner"]
-                    or current.get("leaseExpiresAt", 0) < now):
+            if (
+                not current
+                or current.get("leaseOwner") != ExpressionAttributeValues[":owner"]
+                or current.get("leaseExpiresAt", 0) < now
+            ):
                 raise FakeConditionalCheckFailed()
             current["leaseExpiresAt"] = ExpressionAttributeValues[":expires"]
             return {}
@@ -180,13 +213,16 @@ class FakeS3:
         return {"Body": BytesIO(self.objects[Key])}
 
     def list_objects_v2(self, *, Prefix, **_kwargs):
-        return {"Contents": [{"Key": key} for key in self.objects if key.startswith(Prefix)]}
+        return {
+            "Contents": [{"Key": key} for key in self.objects if key.startswith(Prefix)]
+        }
 
     def list_object_versions(self, *, Prefix, **_kwargs):
         return {
             "Versions": [
                 {"Key": key, "VersionId": version_id}
-                for key in self.objects if key.startswith(Prefix)
+                for key in self.objects
+                if key.startswith(Prefix)
                 for version_id, _body in reversed(self._versions_for(key))
             ],
             "DeleteMarkers": [],
@@ -198,8 +234,12 @@ class FakeS3:
         if getattr(self, "on_delete", None):
             self.on_delete(Delete["Objects"])
         if self.fail_deletes:
-            return {"Errors": [{"Key": item["Key"], "VersionId": item["VersionId"]}
-                                for item in Delete["Objects"]]}
+            return {
+                "Errors": [
+                    {"Key": item["Key"], "VersionId": item["VersionId"]}
+                    for item in Delete["Objects"]
+                ]
+            }
         for item in Delete["Objects"]:
             key = item["Key"]
             version_id = item["VersionId"]
@@ -232,10 +272,13 @@ class FakeVectors:
         return {}
 
     def get_vectors(self, *, keys, **_kwargs):
-        return {"vectors": [
-            {"key": key, "data": self.vectors[key]["data"]}
-            for key in keys if key in self.vectors
-        ]}
+        return {
+            "vectors": [
+                {"key": key, "data": self.vectors[key]["data"]}
+                for key in keys
+                if key in self.vectors
+            ]
+        }
 
     def query_vectors(self, **kwargs):
         self.query_calls.append(kwargs)
@@ -278,20 +321,28 @@ class FakeAws:
         for action in TransactItems:
             if "Put" in action:
                 spec = action["Put"]
-                values = {name: self.deserializer.deserialize(value)
-                          for name, value in spec["Item"].items()}
+                values = {
+                    name: self.deserializer.deserialize(value)
+                    for name, value in spec["Item"].items()
+                }
                 updates[(values["PK"], values["SK"])] = values
             elif "Delete" in action:
                 spec = action["Delete"]
-                key = {name: self.deserializer.deserialize(value)
-                       for name, value in spec["Key"].items()}
+                key = {
+                    name: self.deserializer.deserialize(value)
+                    for name, value in spec["Key"].items()
+                }
                 updates[(key["PK"], key["SK"])] = None
             elif "Update" in action:
                 spec = action["Update"]
-                key = {name: self.deserializer.deserialize(value)
-                       for name, value in spec["Key"].items()}
-                values = {name: self.deserializer.deserialize(value)
-                          for name, value in spec["ExpressionAttributeValues"].items()}
+                key = {
+                    name: self.deserializer.deserialize(value)
+                    for name, value in spec["Key"].items()
+                }
+                values = {
+                    name: self.deserializer.deserialize(value)
+                    for name, value in spec["ExpressionAttributeValues"].items()
+                }
                 row_key = (key["PK"], key["SK"])
                 if ":owner" in values:
                     assert spec["UpdateExpression"] == "SET leaseExpiresAt = :expires"
@@ -299,20 +350,29 @@ class FakeAws:
                         "leaseOwner = :owner AND leaseExpiresAt >= :now"
                     )
                     item = self.items.get(row_key)
-                    if (not item or item.get("leaseOwner") != values[":owner"]
-                            or item.get("leaseExpiresAt", 0) < values[":now"]):
+                    if (
+                        not item
+                        or item.get("leaseOwner") != values[":owner"]
+                        or item.get("leaseExpiresAt", 0) < values[":now"]
+                    ):
                         raise FakeConditionalCheckFailed()
                     updates[row_key] = {**item, "leaseExpiresAt": values[":expires"]}
                 else:
                     updates[row_key] = {
-                        "PK": key["PK"], "SK": key["SK"], "seq": values[":next"],
+                        "PK": key["PK"],
+                        "SK": key["SK"],
+                        "seq": values[":next"],
                     }
             elif "ConditionCheck" in action:
                 spec = action["ConditionCheck"]
-                key = {name: self.deserializer.deserialize(value)
-                       for name, value in spec["Key"].items()}
-                values = {name: self.deserializer.deserialize(value)
-                          for name, value in spec["ExpressionAttributeValues"].items()}
+                key = {
+                    name: self.deserializer.deserialize(value)
+                    for name, value in spec["Key"].items()
+                }
+                values = {
+                    name: self.deserializer.deserialize(value)
+                    for name, value in spec["ExpressionAttributeValues"].items()
+                }
                 item = self.items.get((key["PK"], key["SK"]))
                 if item and item.get("leaseExpiresAt", 0) >= values[":now"]:
                     raise FakeConditionalCheckFailed()
@@ -337,17 +397,29 @@ class FakeSession:
 
 def _config() -> StorageConfig:
     return StorageConfig(
-        backend="aws", region="us-west-2", vault_id=VAULT_ID, vault_name="work-vault",
-        table="cairn-memory", cache_table="cairn-cache",
-        content_bucket="cairn-content", vector_bucket="cairn-vectors",
-        vector_index="cairn-index", vector_index_arn="arn:aws:s3vectors:us-west-2:123456789012:index/mock",
+        backend="aws",
+        region="us-west-2",
+        vault_id=VAULT_ID,
+        vault_name="work-vault",
+        table="cairn-memory",
+        cache_table="cairn-cache",
+        content_bucket="cairn-content",
+        vector_bucket="cairn-vectors",
+        vector_index="cairn-index",
+        vector_index_arn="arn:aws:s3vectors:us-west-2:123456789012:index/mock",
     )
 
 
 def _open(tmp_path: Path, aws: FakeAws) -> AwsVault:
     return AwsVault(
-        tmp_path, "mock-embedder", 3, _config(), create=True,
-        doc_threshold=4, _session=FakeSession(aws), _key_factory=Key,
+        tmp_path,
+        "mock-embedder",
+        3,
+        _config(),
+        create=True,
+        doc_threshold=4,
+        _session=FakeSession(aws),
+        _key_factory=Key,
         _serializer=aws.serializer,
     )
 
@@ -397,13 +469,16 @@ def test_insert_commits_memory_event_cursor_and_vector_projection_atomically(tmp
     assert "Update" in action_types  # the durable event-feed counter
     assert any(
         "leaseOwner = :owner" in action["Update"].get("ConditionExpression", "")
-        for action in aws.transactions[0] if "Update" in action
+        for action in aws.transactions[0]
+        if "Update" in action
     )
     assert vault._content_lease_key(_memory()["content_hash"]).get("PK") not in {
         key[0] for key in aws.items
     }
     assert aws.items[(f"VAULT#{VAULT_ID}#META", "SYNC_COUNTER")]["seq"] == 1
-    cloud_row = next(item for item in aws.items.values() if item.get("recordType") == "memory")
+    cloud_row = next(
+        item for item in aws.items.values() if item.get("recordType") == "memory"
+    )
     assert str(cloud_row["confidence"]) == "0.75"
     event = vault.export_sync_events()
     assert len(event["events"]) == 1
@@ -443,7 +518,9 @@ def test_offline_reads_are_marked_stale_and_offline_writes_fail_closed(tmp_path)
 
 
 @pytest.mark.parametrize("mark_stale", [True, False])
-def test_offline_content_fallback_rejects_a_different_cached_revision(tmp_path, mark_stale):
+def test_offline_content_fallback_rejects_a_different_cached_revision(
+    tmp_path, mark_stale
+):
     aws = FakeAws()
     vault = _open(tmp_path, aws)
     vault.insert(_memory(), np.asarray([1, 0, 0], dtype=np.float32))
@@ -455,7 +532,9 @@ def test_offline_content_fallback_rejects_a_different_cached_revision(tmp_path, 
     else:
         aws.offline = True
 
-    with pytest.raises(ContentIntegrityError, match="does not match the requested revision"):
+    with pytest.raises(
+        ContentIntegrityError, match="does not match the requested revision"
+    ):
         vault.read_content(newer)
 
     vault.close()
@@ -469,7 +548,12 @@ def test_server_token_reads_use_vault_qualified_key_and_never_expose_digest(tmp_
 
     found = vault.get_server_token(digest)
     listed = vault.list_server_tokens()
-    assert found == {"token_id": "tok-1", "agent_id": "agent-1", "curator": True, "created_at": 10}
+    assert found == {
+        "token_id": "tok-1",
+        "agent_id": "agent-1",
+        "curator": True,
+        "created_at": 10,
+    }
     assert listed == [found]
     assert "token_hash" not in found
     assert vault.delete_server_token("tok-1") == 1
@@ -488,8 +572,10 @@ def test_repeated_cursor_updates_are_one_durable_monotonic_write(tmp_path):
     assert vault.get_sync_cursor("peer", "pull", "token") == 8
     actions = aws.transactions[-1]
     cursor_writes = [
-        action["Put"] for action in actions
-        if action.get("Put", {}).get("Item", {}).get("recordType", {}).get("S") == "sync-cursor"
+        action["Put"]
+        for action in actions
+        if action.get("Put", {}).get("Item", {}).get("recordType", {}).get("S")
+        == "sync-cursor"
     ]
     assert len(cursor_writes) == 1
     assert "#cursor" in cursor_writes[0]["ExpressionAttributeNames"]
@@ -500,12 +586,19 @@ def test_sync_cursors_follow_contract_order_not_hashed_dynamodb_sort_key(tmp_pat
     vault = _open(tmp_path, FakeAws())
     vault.set_sync_cursor("peer-a", "pull", 1, 10, "token")
     vault.set_sync_cursor("peer-d", "pull", 2, 20, "token")
-    assert vault._cursor_key("peer-d", "pull", "token")["SK"] < vault._cursor_key(
-        "peer-a", "pull", "token",
-    )["SK"]
+    assert (
+        vault._cursor_key("peer-d", "pull", "token")["SK"]
+        < vault._cursor_key(
+            "peer-a",
+            "pull",
+            "token",
+        )["SK"]
+    )
 
-    assert [(item["peer"], item["token_id"], item["direction"])
-            for item in vault.list_sync_cursors()] == [
+    assert [
+        (item["peer"], item["token_id"], item["direction"])
+        for item in vault.list_sync_cursors()
+    ] == [
         ("peer-a", "token", "pull"),
         ("peer-d", "token", "pull"),
     ]
@@ -517,7 +610,9 @@ def test_secret_is_rejected_before_cloud_or_local_persistence(tmp_path):
     vault = _open(tmp_path, aws)
     secret = "token=ghp_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZabcd"
     record = _memory("safe text")
-    record.update({"content": secret, "content_summary": secret[:200], "content_hash": None})
+    record.update(
+        {"content": secret, "content_summary": secret[:200], "content_hash": None}
+    )
 
     with pytest.raises(SecretAdmissionError) as error:
         vault.insert(record, np.asarray([1, 0, 0], dtype=np.float32))
@@ -528,8 +623,12 @@ def test_secret_is_rejected_before_cloud_or_local_persistence(tmp_path):
     vault.close()
 
 
-def test_sqlite_migration_scans_and_verifies_memories_events_tokens_and_cursors(tmp_path):
-    source = Vault(tmp_path / "vault.db", "mock-embedder", 3, create=True, doc_threshold=4)
+def test_sqlite_migration_scans_and_verifies_memories_events_tokens_and_cursors(
+    tmp_path,
+):
+    source = Vault(
+        tmp_path / "vault.db", "mock-embedder", 3, create=True, doc_threshold=4
+    )
     source._set_meta("vault_id", VAULT_ID)
     source._set_meta("vault_name", "work-vault")
     source._set_meta("vault_identity_migration", "1")
@@ -543,13 +642,26 @@ def test_sqlite_migration_scans_and_verifies_memories_events_tokens_and_cursors(
     destination = _open(tmp_path, aws)
     result = _migrate_sqlite_to_aws(source, destination)
 
-    assert result == {"memories": 1, "events": 1, "cursors": 1, "tokens": 1, "conflicts": 0}
-    assert destination.get(_memory()["key"])["content_hash"] == _memory()["content_hash"]
+    assert result == {
+        "memories": 1,
+        "events": 1,
+        "cursors": 1,
+        "tokens": 1,
+        "conflicts": 0,
+    }
+    assert (
+        destination.get(_memory()["key"])["content_hash"] == _memory()["content_hash"]
+    )
     assert destination.get_sync_cursor("peer", "pull", "token") == 7
     assert destination.get_server_token("a" * 64)["agent_id"] == "agent"
-    assert destination.list_server_tokens() == [{
-        "token_id": "tok-1", "agent_id": "agent", "curator": True, "created_at": 50,
-    }]
+    assert destination.list_server_tokens() == [
+        {
+            "token_id": "tok-1",
+            "agent_id": "agent",
+            "curator": True,
+            "created_at": 50,
+        }
+    ]
     destination.close()
     source.close()
 
@@ -568,8 +680,14 @@ def test_migration_preflight_reports_only_secret_categories(tmp_path):
 
 
 def test_sqlite_migration_rejects_backend_and_identity_mismatches():
-    source = type("Source", (), {"name": "aws", "vault_identity": VaultIdentity(VAULT_ID, "work-vault")})()
-    destination = type("Destination", (), {"name": "aws", "vault_identity": source.vault_identity})()
+    source = type(
+        "Source",
+        (),
+        {"name": "aws", "vault_identity": VaultIdentity(VAULT_ID, "work-vault")},
+    )()
+    destination = type(
+        "Destination", (), {"name": "aws", "vault_identity": source.vault_identity}
+    )()
     with pytest.raises(ValueError, match="SQLite source and AWS destination"):
         _migrate_sqlite_to_aws(source, destination)
 
@@ -586,31 +704,56 @@ def test_migration_skips_a_memory_that_already_exists_in_aws():
         def fetchall(self):
             return []
 
-    source = type("Source", (), {
-        "name": "sqlite", "vault_identity": VaultIdentity(VAULT_ID, "work-vault"),
-        "conn": type("Connection", (), {"execute": lambda *_args: QueryResult()})(),
-        "export_sync_events": lambda _self, *, after, limit: {"events": [], "cursor": after},
-        "iter_memories": lambda _self: [row],
-        "list_sync_cursors": lambda _self: [],
-        "list_sync_conflicts": lambda _self, *, include_resolved: [],
-    })()
-    destination = type("Destination", (), {
-        "name": "aws", "vault_identity": source.vault_identity,
-        "apply_sync_event": lambda *_args: None,
-        "get": lambda _self, key: row if key == row["key"] else None,
-        "_memory_items": lambda _self: [{"key": row["key"], "content_hash": row["content_hash"]}],
-        "vec_status": lambda _self: {"vec_in_sync": True},
-    })()
+    source = type(
+        "Source",
+        (),
+        {
+            "name": "sqlite",
+            "vault_identity": VaultIdentity(VAULT_ID, "work-vault"),
+            "conn": type("Connection", (), {"execute": lambda *_args: QueryResult()})(),
+            "export_sync_events": lambda _self, *, after, limit: {
+                "events": [],
+                "cursor": after,
+            },
+            "iter_memories": lambda _self: [row],
+            "list_sync_cursors": lambda _self: [],
+            "list_sync_conflicts": lambda _self, *, include_resolved: [],
+        },
+    )()
+    destination = type(
+        "Destination",
+        (),
+        {
+            "name": "aws",
+            "vault_identity": source.vault_identity,
+            "apply_sync_event": lambda *_args: None,
+            "get": lambda _self, key: row if key == row["key"] else None,
+            "_memory_items": lambda _self: [
+                {"key": row["key"], "content_hash": row["content_hash"]}
+            ],
+            "vec_status": lambda _self: {"vec_in_sync": True},
+        },
+    )()
 
     result = _migrate_sqlite_to_aws(source, destination)
 
-    assert result == {"memories": 1, "events": 0, "cursors": 0, "tokens": 0, "conflicts": 0}
+    assert result == {
+        "memories": 1,
+        "events": 0,
+        "cursors": 0,
+        "tokens": 0,
+        "conflicts": 0,
+    }
 
 
 def test_migration_copies_a_memory_and_its_local_embedding_when_event_copy_did_not(
     monkeypatch,
 ):
-    row = _memory() | {"state_revision": 1, "state_origin": "local", "state_event_id": ""}
+    row = _memory() | {
+        "state_revision": 1,
+        "state_origin": "local",
+        "state_event_id": "",
+    }
     embedding = np.asarray([0.25, 0.5, 0.75], dtype=np.float32).tobytes()
 
     class QueryResult:
@@ -620,30 +763,48 @@ def test_migration_copies_a_memory_and_its_local_embedding_when_event_copy_did_n
         def fetchall(self):
             return []
 
-    source = type("Source", (), {
-        "name": "sqlite", "vault_identity": VaultIdentity(VAULT_ID, "work-vault"),
-        "conn": type("Connection", (), {"execute": lambda *_args: QueryResult()})(),
-        "export_sync_events": lambda _self, *, after, limit: {"events": [], "cursor": after},
-        "iter_memories": lambda _self: [row],
-        "read_content": lambda _self, _row: "durable text",
-        "list_sync_cursors": lambda _self: [],
-        "list_sync_conflicts": lambda _self, *, include_resolved: [],
-    })()
+    source = type(
+        "Source",
+        (),
+        {
+            "name": "sqlite",
+            "vault_identity": VaultIdentity(VAULT_ID, "work-vault"),
+            "conn": type("Connection", (), {"execute": lambda *_args: QueryResult()})(),
+            "export_sync_events": lambda _self, *, after, limit: {
+                "events": [],
+                "cursor": after,
+            },
+            "iter_memories": lambda _self: [row],
+            "read_content": lambda _self, _row: "durable text",
+            "list_sync_cursors": lambda _self: [],
+            "list_sync_conflicts": lambda _self, *, include_resolved: [],
+        },
+    )()
     inserted = []
-    destination = type("Destination", (), {
-        "name": "aws", "vault_identity": source.vault_identity,
-        "apply_sync_event": lambda *_args: None,
-        "get": lambda *_args: None,
-        "insert": lambda _self, record, vector: inserted.append((record, vector.copy())),
-        "set_sync_cursor": lambda *_args: None,
-        "get_server_token": lambda *_args: None,
-        "create_server_token": lambda *_args: None,
-        "_table": type("Table", (), {"put_item": lambda *_args, **_kwargs: None})(),
-        "_memory_items": lambda _self: [{
-            "key": row["key"], "content_hash": row["content_hash"],
-        }],
-        "vec_status": lambda _self: {"vec_in_sync": True},
-    })()
+    destination = type(
+        "Destination",
+        (),
+        {
+            "name": "aws",
+            "vault_identity": source.vault_identity,
+            "apply_sync_event": lambda *_args: None,
+            "get": lambda *_args: None,
+            "insert": lambda _self, record, vector: inserted.append(
+                (record, vector.copy())
+            ),
+            "set_sync_cursor": lambda *_args: None,
+            "get_server_token": lambda *_args: None,
+            "create_server_token": lambda *_args: None,
+            "_table": type("Table", (), {"put_item": lambda *_args, **_kwargs: None})(),
+            "_memory_items": lambda _self: [
+                {
+                    "key": row["key"],
+                    "content_hash": row["content_hash"],
+                }
+            ],
+            "vec_status": lambda _self: {"vec_in_sync": True},
+        },
+    )()
 
     result = _migrate_sqlite_to_aws(source, destination)
 
@@ -660,13 +821,19 @@ def test_remote_tombstone_commit_updates_dedupe_feed_and_vector_state(tmp_path):
     key = "mem_agent-a_removed_1"
     aws.vectors.vectors[key] = {"key": key, "data": {"float32": [1, 0, 0]}}
     event = {
-        "event_id": "peer:2", "kind": "tombstone", "key": key,
-        "state_revision": 2, "state_origin": "peer", "state_event_id": "peer:2",
+        "event_id": "peer:2",
+        "kind": "tombstone",
+        "key": key,
+        "state_revision": 2,
+        "state_origin": "peer",
+        "state_event_id": "peer:2",
     }
 
     vault._commit_remote_events([event])
 
-    tombstone = next(item for item in aws.items.values() if item.get("recordType") == "tombstone")
+    tombstone = next(
+        item for item in aws.items.values() if item.get("recordType") == "tombstone"
+    )
     assert tombstone["key"] == key
     assert tombstone["state_revision"] == 2
     assert key not in aws.vectors.vectors
@@ -704,11 +871,15 @@ def test_remote_commit_deduplicates_cursors_and_conflicts_idempotently(tmp_path)
     "events,message",
     [
         ([{"event_id": "missing-key"}], "missing its memory key"),
-        ([{"event_id": "missing-row", "key": "mem_missing_1", "kind": "snapshot"}],
-         "references a missing memory row"),
+        (
+            [{"event_id": "missing-row", "key": "mem_missing_1", "kind": "snapshot"}],
+            "references a missing memory row",
+        ),
     ],
 )
-def test_remote_commit_rejects_events_that_cannot_be_materialized(tmp_path, events, message):
+def test_remote_commit_rejects_events_that_cannot_be_materialized(
+    tmp_path, events, message
+):
     vault = _open(tmp_path, FakeAws())
 
     with pytest.raises(ValueError, match=message):
@@ -721,67 +892,93 @@ def test_remote_commit_rejects_events_that_cannot_be_materialized(tmp_path, even
 def test_remote_transaction_limits_cover_action_item_and_total_size_guards(tmp_path):
     vault = _open(tmp_path, FakeAws())
     with pytest.raises(ValueError, match="action limit"):
-        vault._check_remote_transaction_limits([
-            {"Put": {"Item": {"v": {"S": "x"}}}} for _ in range(101)
-        ])
+        vault._check_remote_transaction_limits(
+            [{"Put": {"Item": {"v": {"S": "x"}}}} for _ in range(101)]
+        )
     with pytest.raises(ValueError, match="item-size limit"):
-        vault._check_remote_transaction_limits([
-            {"Put": {"Item": {"v": {"S": "x" * (400 * 1024)}}}},
-        ])
+        vault._check_remote_transaction_limits(
+            [
+                {"Put": {"Item": {"v": {"S": "x" * (400 * 1024)}}}},
+            ]
+        )
     with pytest.raises(ValueError, match="DynamoDB size limit"):
-        vault._check_remote_transaction_limits([
-            {"Put": {"Item": {"v": {"S": "x" * 390_000}}}} for _ in range(11)
-        ])
+        vault._check_remote_transaction_limits(
+            [{"Put": {"Item": {"v": {"S": "x" * 390_000}}}} for _ in range(11)]
+        )
     vault.close()
 
 
-def test_vector_filter_includes_supported_filters_and_expiry_only_when_requested(tmp_path):
+def test_vector_filter_includes_supported_filters_and_expiry_only_when_requested(
+    tmp_path,
+):
     vault = _open(tmp_path, FakeAws())
 
-    assert vault._vector_filter("active", {"unknown": "ignored"}, None) == {"status": "active"}
+    assert vault._vector_filter("active", {"unknown": "ignored"}, None) == {
+        "status": "active"
+    }
     assert vault._vector_filter(
-        "archived", {"team_id": "team", "memory_type": "semantic", "unknown": "ignored"}, 100,
+        "archived",
+        {"team_id": "team", "memory_type": "semantic", "unknown": "ignored"},
+        100,
     ) == {
         "$and": [
-            {"status": "archived"}, {"team_id": "team"}, {"memory_type": "semantic"},
+            {"status": "archived"},
+            {"team_id": "team"},
+            {"memory_type": "semantic"},
             {"$or": [{"expires_at": {"$exists": False}}, {"expires_at": {"$gt": 100}}]},
         ],
     }
     vault.close()
 
 
-def test_knn_uses_paged_vector_results_and_filters_invalid_candidates(tmp_path, monkeypatch):
+def test_knn_uses_paged_vector_results_and_filters_invalid_candidates(
+    tmp_path, monkeypatch
+):
     aws = FakeAws()
     vault = _open(tmp_path, aws)
     valid = _memory()
     expired = _memory("expired") | {"key": "mem_agent_expired_1", "expires_at": 1}
-    other_team = _memory("other team") | {"key": "mem_agent_other_1", "team_id": "other"}
-    archived = _memory("archived") | {"key": "mem_agent_archived_1", "status": "archived"}
+    other_team = _memory("other team") | {
+        "key": "mem_agent_other_1",
+        "team_id": "other",
+    }
+    archived = _memory("archived") | {
+        "key": "mem_agent_archived_1",
+        "status": "archived",
+    }
     rows = {row["key"]: row for row in (valid, expired, other_team, archived)}
     monkeypatch.setattr(vault, "_refresh_cloud_events", lambda: True)
     monkeypatch.setattr(vault, "get", lambda key: rows.get(key))
     aws.vectors.query_pages = [
-        {"vectors": [
-            {"key": "absent", "distance": 0.01},
-            {"key": expired["key"], "distance": 0.02},
-            {"key": other_team["key"], "distance": 0.03},
-            {"key": archived["key"], "distance": 0.04},
-        ], "nextToken": "page-2"},
+        {
+            "vectors": [
+                {"key": "absent", "distance": 0.01},
+                {"key": expired["key"], "distance": 0.02},
+                {"key": other_team["key"], "distance": 0.03},
+                {"key": archived["key"], "distance": 0.04},
+            ],
+            "nextToken": "page-2",
+        },
         {"vectors": [{"key": valid["key"], "distance": 0.25}]},
     ]
 
     result = vault.knn(np.asarray([1, 0, 0]), 1, filters={"team_id": "team"}, now=2)
 
-    assert [(row["key"], distance) for row, distance in result] == [(valid["key"], 0.25)]
+    assert [(row["key"], distance) for row, distance in result] == [
+        (valid["key"], 0.25)
+    ]
     assert aws.vectors.query_calls[0]["filter"] == vault._vector_filter(
-        "active", {"team_id": "team"}, 2,
+        "active",
+        {"team_id": "team"},
+        2,
     )
     assert aws.vectors.query_calls[1]["nextToken"] == "page-2"
     vault.close()
 
 
 def test_knn_handles_empty_queries_and_uses_local_fallback_when_vectors_are_unavailable(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     vault = _open(tmp_path, FakeAws())
     vector = np.asarray([1, 0, 0], dtype=np.float32)
@@ -801,7 +998,9 @@ def test_knn_handles_empty_queries_and_uses_local_fallback_when_vectors_are_unav
     vault.close()
 
 
-def test_sweep_orphan_docs_preserves_referenced_content_and_removes_orphans(tmp_path, monkeypatch):
+def test_sweep_orphan_docs_preserves_referenced_content_and_removes_orphans(
+    tmp_path, monkeypatch
+):
     aws = FakeAws()
     vault = _open(tmp_path, aws)
     content_prefix = f"{VAULT_ID}/content/"
@@ -810,9 +1009,13 @@ def test_sweep_orphan_docs_preserves_referenced_content_and_removes_orphans(tmp_
     event_referenced = event_prefix + content_digest("event kept")
     orphan = content_prefix + content_digest("orphan")
     event_orphan = event_prefix + content_digest("event orphan")
-    aws.s3.objects.update({key: b"body" for key in (referenced, event_referenced, orphan, event_orphan)})
+    aws.s3.objects.update(
+        {key: b"body" for key in (referenced, event_referenced, orphan, event_orphan)}
+    )
     monkeypatch.setattr(
-        vault, "_content_object_references", lambda: {referenced, event_referenced},
+        vault,
+        "_content_object_references",
+        lambda: {referenced, event_referenced},
     )
 
     removed = vault.sweep_orphan_docs()
@@ -850,7 +1053,9 @@ def test_content_sweep_blocks_same_hash_insert_between_owner_check_and_delete(tm
     vault.close()
 
 
-def test_content_writer_holds_lease_until_event_transaction_commits(tmp_path, monkeypatch):
+def test_content_writer_holds_lease_until_event_transaction_commits(
+    tmp_path, monkeypatch
+):
     aws = FakeAws()
     vault = _open(tmp_path, aws)
     transact = aws.transact_write_items
@@ -872,7 +1077,9 @@ def test_content_writer_holds_lease_until_event_transaction_commits(tmp_path, mo
     vault.close()
 
 
-def test_content_sweep_aborts_after_writer_takes_over_expired_lease(tmp_path, monkeypatch):
+def test_content_sweep_aborts_after_writer_takes_over_expired_lease(
+    tmp_path, monkeypatch
+):
     aws = FakeAws()
     vault = _open(tmp_path, aws)
     record = _memory()
@@ -887,7 +1094,9 @@ def test_content_sweep_aborts_after_writer_takes_over_expired_lease(tmp_path, mo
         vault.insert(record, np.asarray([1, 0, 0], dtype=np.float32))
         return set()  # stale sweep snapshot from before the writer committed
 
-    monkeypatch.setattr(vault, "_content_object_references", take_over_after_reference_scan)
+    monkeypatch.setattr(
+        vault, "_content_object_references", take_over_after_reference_scan
+    )
 
     assert vault.sweep_orphan_docs() == 0
     stored = vault.get(record["key"])
@@ -897,7 +1106,8 @@ def test_content_sweep_aborts_after_writer_takes_over_expired_lease(tmp_path, mo
 
 
 def test_content_sweep_deletes_only_preexisting_versions_after_writer_takes_over(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     aws = FakeAws()
     vault = _open(tmp_path, aws)
@@ -967,21 +1177,29 @@ def test_content_sweep_reads_event_references_across_shard_pages(tmp_path):
     vault.close()
 
 
-def test_delete_object_versions_follows_version_markers_and_filters_other_keys(tmp_path, monkeypatch):
+def test_delete_object_versions_follows_version_markers_and_filters_other_keys(
+    tmp_path, monkeypatch
+):
     aws = FakeAws()
     vault = _open(tmp_path, aws)
     key = f"{VAULT_ID}/content/object"
     pages = [
         {
-            "Versions": [{"Key": key, "VersionId": "v1"}, {"Key": key + "/child", "VersionId": "v0"}],
+            "Versions": [
+                {"Key": key, "VersionId": "v1"},
+                {"Key": key + "/child", "VersionId": "v0"},
+            ],
             "DeleteMarkers": [{"Key": key, "VersionId": "marker"}],
-            "IsTruncated": True, "NextKeyMarker": key, "NextVersionIdMarker": "v1",
+            "IsTruncated": True,
+            "NextKeyMarker": key,
+            "NextVersionIdMarker": "v1",
         },
         {"Versions": [{"Key": key, "VersionId": "v2"}], "IsTruncated": False},
     ]
     calls = []
     monkeypatch.setattr(
-        aws.s3, "list_object_versions",
+        aws.s3,
+        "list_object_versions",
         lambda **kwargs: calls.append(kwargs) or pages.pop(0),
     )
 
@@ -989,7 +1207,11 @@ def test_delete_object_versions_follows_version_markers_and_filters_other_keys(t
 
     assert calls[1]["KeyMarker"] == key
     assert calls[1]["VersionIdMarker"] == "v1"
-    assert [entry["VersionId"] for batch in aws.s3.deleted_batches for entry in batch] == [
-        "v1", "marker", "v2",
+    assert [
+        entry["VersionId"] for batch in aws.s3.deleted_batches for entry in batch
+    ] == [
+        "v1",
+        "marker",
+        "v2",
     ]
     vault.close()

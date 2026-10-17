@@ -1,4 +1,5 @@
 """Copy the source Agent Skill into Cairn's installable package."""
+
 from __future__ import annotations
 
 import argparse
@@ -10,7 +11,10 @@ from pathlib import Path
 
 def paths() -> tuple[Path, Path]:
     repo = Path(__file__).resolve().parents[1]
-    return repo / "skills" / "cairn" / "SKILL.md", repo / "src" / "cairn" / "agent_skill.md"
+    return (
+        repo / "skills" / "cairn" / "SKILL.md",
+        repo / "src" / "cairn" / "agent_skill.md",
+    )
 
 
 def main() -> int:
@@ -38,8 +42,11 @@ def main() -> int:
     temp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="wb", prefix=".agent_skill.", suffix=".tmp",
-            dir=destination.parent, delete=False,
+            mode="wb",
+            prefix=".agent_skill.",
+            suffix=".tmp",
+            dir=destination.parent,
+            delete=False,
         ) as temporary:
             temp_path = Path(temporary.name)
             temporary.write(content)

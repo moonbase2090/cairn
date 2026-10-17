@@ -1,4 +1,5 @@
 """cairn — local-first shared memory for CLI agents."""
+
 from importlib.metadata import PackageNotFoundError, version
 
 try:

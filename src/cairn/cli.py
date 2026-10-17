@@ -19,6 +19,7 @@ local SQLite file with a vector index. Output is human by default, JSON with
     cairn galaxy [--port 8780]          # host the starfield on a local HTTP server
     cairn whoami | doctor | log        # identity, diagnostics, audit trail
 """
+
 from __future__ import annotations
 
 import argparse
@@ -102,12 +103,25 @@ def _config_storage(path: Path) -> StorageConfig | None:
         # ValueError, not TypeError: the CLI and cairn-mcp report ValueErrors cleanly.
         raise ValueError(f"{path}: [storage] must be a table")  # noqa: TRY004
     allowed = {
-        "backend", "url", "region", "profile", "vault_id", "vault_name", "table", "cache_table",
-        "content_bucket", "vector_bucket", "vector_index", "vector_index_arn", "sync_endpoint",
+        "backend",
+        "url",
+        "region",
+        "profile",
+        "vault_id",
+        "vault_name",
+        "table",
+        "cache_table",
+        "content_bucket",
+        "vector_bucket",
+        "vector_index",
+        "vector_index_arn",
+        "sync_endpoint",
     }
     unknown = set(storage) - allowed
     if unknown:
-        raise ValueError(f"{path}: unknown [storage] setting(s): {', '.join(sorted(unknown))}")
+        raise ValueError(
+            f"{path}: unknown [storage] setting(s): {', '.join(sorted(unknown))}"
+        )
     backend = storage.get("backend")
     if backend is not None and not isinstance(backend, str):
         raise ValueError(f"{path}: [storage] backend must be a string")
@@ -120,7 +134,9 @@ def _config_storage(path: Path) -> StorageConfig | None:
         if configured:
             if configured == ["url"]:
                 raise ValueError(f"{path}: [storage] url requires backend = 'postgres'")
-            raise ValueError(f"{path}: [storage] {configured[0]} requires a backend setting")
+            raise ValueError(
+                f"{path}: [storage] {configured[0]} requires a backend setting"
+            )
         return None
     try:
         return StorageConfig(backend=backend, **values)
@@ -185,13 +201,19 @@ def _human_store(obj) -> None:
     print(f"{obj['action']}: {obj.get('key') or '(no write)'}")
     for near in obj.get("near_duplicates", []):
         sim = near.get("similarity", 0)
-        print(f"  ~ {near['key']} sim={sim:.2f} :: {near.get('content_summary', '')[:100]}")
+        print(
+            f"  ~ {near['key']} sim={sim:.2f} :: {near.get('content_summary', '')[:100]}"
+        )
 
 
 def _human_memories(obj, full: bool) -> None:
     for i, mem in enumerate(obj, 1):
-        sim = f" sim={mem['similarity']:.2f}" if mem.get("similarity") is not None else ""
-        print(f"{i}. {mem['key']}{sim} [{mem.get('memory_type')}/{mem.get('status')}] {mem.get('origin')}")
+        sim = (
+            f" sim={mem['similarity']:.2f}" if mem.get("similarity") is not None else ""
+        )
+        print(
+            f"{i}. {mem['key']}{sim} [{mem.get('memory_type')}/{mem.get('status')}] {mem.get('origin')}"
+        )
         body = mem.get("content") or mem.get("content_summary") or ""
         shown = body if full else (mem.get("content_summary") or "")[:160]
         print(f"   {shown}")
@@ -202,14 +224,26 @@ def _human_memories(obj, full: bool) -> None:
 def _human_lines(obj) -> None:
     for line in obj:
         if isinstance(line, dict) and "action" in line:
-            detail = line.get("key") or line.get("canonical_id") or line.get("result") or ""
-            print(f"{line.get('ts')} {line.get('agent')} {line.get('action')} {detail}".rstrip())
+            detail = (
+                line.get("key") or line.get("canonical_id") or line.get("result") or ""
+            )
+            print(
+                f"{line.get('ts')} {line.get('agent')} {line.get('action')} {detail}".rstrip()
+            )
         else:
             print(line)
 
 
 def _human_get(obj) -> None:
-    for key in ("key", "canonical_id", "status", "version", "task_id", "agent_id", "origin"):
+    for key in (
+        "key",
+        "canonical_id",
+        "status",
+        "version",
+        "task_id",
+        "agent_id",
+        "origin",
+    ):
         print(f"{key}: {obj.get(key)}")
     print(f"content: {obj.get('content')}")
 
@@ -244,35 +278,72 @@ def build_client(args) -> CairnClient:
     embedder = get_embedder(embed_spec, dims=None if args.embed else dims)
     if not args.embed and dims is None:
         write_embedder_hint(vdir, embed_spec, embedder.dims)
-    vault = open_backend(vdir, embedder.name, embedder.dims, config=storage_config(vdir))
+    vault = open_backend(
+        vdir, embedder.name, embedder.dims, config=storage_config(vdir)
+    )
     return CairnClient(vault, args.agent_id, embedder, audit_path=vdir / "audit.jsonl")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="cairn", description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--vault", default=None, help="Vault dir (default ./.cairn or $CAIRN_DIR).")
-    p.add_argument("--agent-id", default=None, help="Agent id (default $CAIRN_AGENT, ~/.cairn/config.toml, or cairn-cli).")
-    p.add_argument("--embed", default=None, help="Embedder: hash (default) | fastembed[:model] | ollama[:model].")
+    p = argparse.ArgumentParser(
+        prog="cairn",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "--vault", default=None, help="Vault dir (default ./.cairn or $CAIRN_DIR)."
+    )
+    p.add_argument(
+        "--agent-id",
+        default=None,
+        help="Agent id (default $CAIRN_AGENT, ~/.cairn/config.toml, or cairn-cli).",
+    )
+    p.add_argument(
+        "--embed",
+        default=None,
+        help="Embedder: hash (default) | fastembed[:model] | ollama[:model].",
+    )
     p.add_argument("--json", action="store_true", help="Machine-readable JSON output.")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    i = sub.add_parser("init", help="Create a vault in --vault (prompts for project/agent/team).")
-    i.add_argument("--embed-spec", default="fastembed",
-                   help="Embedder (default fastembed; falls back to hash if not installed).")
-    i.add_argument("--doc-threshold", type=int, default=None,
-                   help="Memories larger than BYTES spill content to docs/ (default 2048).")
-    i.add_argument("--project", default=None, help="Project display name (default: directory name).")
-    i.add_argument("--team", default=None, help="Team scope for memories (default: project slug).")
-    i.add_argument("--yes", action="store_true", help="Accept defaults, never prompt (for agents/CI).")
+    i = sub.add_parser(
+        "init", help="Create a vault in --vault (prompts for project/agent/team)."
+    )
+    i.add_argument(
+        "--embed-spec",
+        default="fastembed",
+        help="Embedder (default fastembed; falls back to hash if not installed).",
+    )
+    i.add_argument(
+        "--doc-threshold",
+        type=int,
+        default=None,
+        help="Memories larger than BYTES spill content to docs/ (default 2048).",
+    )
+    i.add_argument(
+        "--project",
+        default=None,
+        help="Project display name (default: directory name).",
+    )
+    i.add_argument(
+        "--team", default=None, help="Team scope for memories (default: project slug)."
+    )
+    i.add_argument(
+        "--yes",
+        action="store_true",
+        help="Accept defaults, never prompt (for agents/CI).",
+    )
 
     s = sub.add_parser("store", help="Store a fact (or correct one with --supersedes).")
     s.add_argument("content")
     s.add_argument("--team", required=True)
     s.add_argument("--task", required=True)
-    s.add_argument("--type", default="semantic",
-                   choices=["episodic", "semantic", "procedural", "document", "chunk"])
+    s.add_argument(
+        "--type",
+        default="semantic",
+        choices=["episodic", "semantic", "procedural", "document", "chunk"],
+    )
     s.add_argument("--origin", default="agent", choices=["agent", "external"])
     s.add_argument("--supersedes", default=None)
     s.add_argument("--mode", default="auto", choices=["auto", "new"])
@@ -283,27 +354,44 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--team", default=None)
     r.add_argument("--type", default=None)
     r.add_argument("--top-k", type=int, default=5)
-    r.add_argument("--min-sim", type=float, default=None,
-                   help="Drop hits below this cosine similarity (default: no floor).")
+    r.add_argument(
+        "--min-sim",
+        type=float,
+        default=None,
+        help="Drop hits below this cosine similarity (default: no floor).",
+    )
 
     ls = sub.add_parser("list", help="Exact lookups (not semantic).")
     ls.add_argument("--task", default=None)
     ls.add_argument("--type", default=None)
     ls.add_argument("--status", default=None)
     ls.add_argument("--canonical", default=None)
-    ls.add_argument("--search", default=None,
-                    help="BM25 keyword search over content (active memories, best match first).")
+    ls.add_argument(
+        "--search",
+        default=None,
+        help="BM25 keyword search over content (active memories, best match first).",
+    )
     ls.add_argument("--limit", type=int, default=100)
 
-    for name, helptext in (("get", "Fetch one memory by key."),
-                           ("archive", "Retract a memory (stops surfacing)."),
-                           ("restore", "Undo a bad correction or archive.")):
+    for name, helptext in (
+        ("get", "Fetch one memory by key."),
+        ("archive", "Retract a memory (stops surfacing)."),
+        ("restore", "Undo a bad correction or archive."),
+    ):
         g = sub.add_parser(name, help=helptext)
         if name == "restore":
             g.add_argument("key", nargs="?")
-            g.add_argument("--from", dest="from_target", default=None,
-                           help="Restore the SQLite vault from a configured backup target.")
-            g.add_argument("--at", default=None, help="Point-in-time (ISO 8601 timestamp with timezone).")
+            g.add_argument(
+                "--from",
+                dest="from_target",
+                default=None,
+                help="Restore the SQLite vault from a configured backup target.",
+            )
+            g.add_argument(
+                "--at",
+                default=None,
+                help="Point-in-time (ISO 8601 timestamp with timezone).",
+            )
         else:
             g.add_argument("key")
 
@@ -322,21 +410,31 @@ def build_parser() -> argparse.ArgumentParser:
     ng = sub.add_parser("ingest", help="Seed the vault from a docs directory.")
     ng.add_argument("dir")
     ng.add_argument("--team", required=True)
-    ng.add_argument("--type", default="document",
-                    choices=["episodic", "semantic", "procedural", "document", "chunk"])
+    ng.add_argument(
+        "--type",
+        default="document",
+        choices=["episodic", "semantic", "procedural", "document", "chunk"],
+    )
 
     ex = sub.add_parser("export", help="Export a sync pack (stdout or --out).")
     ex.add_argument("--out", default=None)
-    ex.add_argument("--since", type=int, default=None, help="Only rows updated_at >= epoch.")
+    ex.add_argument(
+        "--since", type=int, default=None, help="Only rows updated_at >= epoch."
+    )
     im = sub.add_parser("import", help="Merge a sync pack (idempotent union).")
     im.add_argument("pack")
 
     tk = sub.add_parser("token", help="Manage server access tokens.")
     tk_sub = tk.add_subparsers(dest="token_action", required=True)
     tk_create = tk_sub.add_parser("create", help="Create a token for one agent.")
-    tk_create.add_argument("--agent", required=True, help="Agent identity allowed to push memories.")
-    tk_create.add_argument("--curator", action="store_true",
-                           help="Allow cross-agent state changes and conflict resolution.")
+    tk_create.add_argument(
+        "--agent", required=True, help="Agent identity allowed to push memories."
+    )
+    tk_create.add_argument(
+        "--curator",
+        action="store_true",
+        help="Allow cross-agent state changes and conflict resolution.",
+    )
     tk_sub.add_parser("list", help="List active server tokens.")
     tk_revoke = tk_sub.add_parser("revoke", help="Revoke a server token.")
     tk_revoke.add_argument("token_id")
@@ -345,30 +443,55 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8778)
     sv.add_argument(
-        "--token", default=None,
+        "--token",
+        default=None,
         help="Shared bearer token (default: $CAIRN_TOKEN or a random token printed once).",
     )
-    sv.add_argument("--token-mode", choices=["shared", "per-agent"], default="shared",
-                    help="Use shared-token auth or tokens managed with `cairn token`.")
-    sv.add_argument("--tls-cert", default=None, help="Certificate PEM. Required when --host is not localhost.")
-    sv.add_argument("--tls-key", default=None, help="Private key PEM. Pair with --tls-cert.")
+    sv.add_argument(
+        "--token-mode",
+        choices=["shared", "per-agent"],
+        default="shared",
+        help="Use shared-token auth or tokens managed with `cairn token`.",
+    )
+    sv.add_argument(
+        "--tls-cert",
+        default=None,
+        help="Certificate PEM. Required when --host is not localhost.",
+    )
+    sv.add_argument(
+        "--tls-key", default=None, help="Private key PEM. Pair with --tls-cert."
+    )
 
-    for name, helptext in (("push", "Push local memories to a `cairn serve` peer."),
-                           ("pull", "Pull memories from a `cairn serve` peer.")):
+    for name, helptext in (
+        ("push", "Push local memories to a `cairn serve` peer."),
+        ("pull", "Pull memories from a `cairn serve` peer."),
+    ):
         peer = sub.add_parser(name, help=helptext)
         peer.add_argument("url", nargs="?", help="Server URL (default: $CAIRN_URL).")
-        peer.add_argument("--token", default=None, help="Bearer token (default: $CAIRN_TOKEN).")
-        peer.add_argument("--tls-ca", default=None, help="CA bundle PEM for an https:// peer.")
+        peer.add_argument(
+            "--token", default=None, help="Bearer token (default: $CAIRN_TOKEN)."
+        )
+        peer.add_argument(
+            "--tls-ca", default=None, help="CA bundle PEM for an https:// peer."
+        )
     # pull extras (added after the loop so push stays lean)
     sub.choices["pull"].add_argument("--since", type=int, default=None)
-    sub.choices["pull"].add_argument("--out", default=None, help="Save pack instead of importing.")
+    sub.choices["pull"].add_argument(
+        "--out", default=None, help="Save pack instead of importing."
+    )
 
     sy = sub.add_parser("sync", help="Inspect resumable sync state.")
     sy_sub = sy.add_subparsers(dest="sync_action", required=True)
-    sy_status = sy_sub.add_parser("status", help="Show peer cursors and competing corrections.")
+    sy_status = sy_sub.add_parser(
+        "status", help="Show peer cursors and competing corrections."
+    )
     sy_status.add_argument("url", nargs="?", help="Limit status to this peer URL.")
-    sy_status.add_argument("--token", default=None, help="Bearer token (default: $CAIRN_TOKEN).")
-    sy_status.add_argument("--tls-ca", default=None, help="CA bundle PEM for an https:// peer.")
+    sy_status.add_argument(
+        "--token", default=None, help="Bearer token (default: $CAIRN_TOKEN)."
+    )
+    sy_status.add_argument(
+        "--tls-ca", default=None, help="CA bundle PEM for an https:// peer."
+    )
 
     cf = sub.add_parser("conflicts", help="List or resolve competing corrections.")
     cf_sub = cf.add_subparsers(dest="conflicts_action", required=True)
@@ -380,14 +503,21 @@ def build_parser() -> argparse.ArgumentParser:
     cf_resolve.add_argument("--token", default=None)
     cf_resolve.add_argument("--tls-ca", default=None)
 
-    gx = sub.add_parser("galaxy", help="Host the vault starfield on a local HTTP server.")
+    gx = sub.add_parser(
+        "galaxy", help="Host the vault starfield on a local HTTP server."
+    )
     gx.add_argument("--out", default=None, help="Also write the HTML to this path.")
     gx.add_argument("--limit", type=int, default=2000)
     gx.add_argument("--host", default="127.0.0.1")
-    gx.add_argument("--port", type=int, default=8780, help="Port (0 = ephemeral). Default 8780.")
+    gx.add_argument(
+        "--port", type=int, default=8780, help="Port (0 = ephemeral). Default 8780."
+    )
     gx.add_argument("--no-open", action="store_true", help="Do not open a browser.")
-    gx.add_argument("--no-serve", action="store_true",
-                    help="Write --out only; do not start the HTTP server.")
+    gx.add_argument(
+        "--no-serve",
+        action="store_true",
+        help="Write --out only; do not start the HTTP server.",
+    )
 
     sub.add_parser("whoami", help="Show effective identity + vault + embedder.")
     sub.add_parser(
@@ -395,19 +525,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Read-only preflight scan of existing vault content; reports categories only.",
     )
     doc = sub.add_parser("doctor", help="Diagnose the vault and environment.")
-    doc.add_argument("--repair-vec", action="store_true",
-                     help="Rebuild mem_vec from stored embeddings when the index is incomplete.")
-    bg = sub.add_parser("bootstrap", help="Wire this project for agents: .mcp.json + AGENTS.md + onboarding pack.")
-    bg.add_argument("--no-seed", action="store_true", help="Skip seeding the onboarding pack.")
-    bg.add_argument("--server", default="cairn-mcp", help="MCP server command for .mcp.json.")
+    doc.add_argument(
+        "--repair-vec",
+        action="store_true",
+        help="Rebuild mem_vec from stored embeddings when the index is incomplete.",
+    )
+    bg = sub.add_parser(
+        "bootstrap",
+        help="Wire this project for agents: .mcp.json + AGENTS.md + onboarding pack.",
+    )
     bg.add_argument(
-        "--name", default="cairn",
+        "--no-seed", action="store_true", help="Skip seeding the onboarding pack."
+    )
+    bg.add_argument(
+        "--server", default="cairn-mcp", help="MCP server command for .mcp.json."
+    )
+    bg.add_argument(
+        "--name",
+        default="cairn",
         help="MCP entry to add or update (default: cairn; use cairn-personal for another vault).",
     )
-    bg.add_argument("--agent-id", default=None, help="Seat identity (<harness>-<slug>); updates project.json and .mcp.json.")
+    bg.add_argument(
+        "--agent-id",
+        default=None,
+        help="Seat identity (<harness>-<slug>); updates project.json and .mcp.json.",
+    )
     lg = sub.add_parser("log", help="Show the audit trail.")
     lg.add_argument("--limit", type=int, default=20)
-    ed = sub.add_parser("embedd", help="Run the machine-wide embed daemon (one ONNX session).")
+    ed = sub.add_parser(
+        "embedd", help="Run the machine-wide embed daemon (one ONNX session)."
+    )
     ed.add_argument("--spec", default="fastembed")
     ed.add_argument("--sock", default=None)
     ed.add_argument("--idle", type=int, default=900)
@@ -432,13 +579,22 @@ def build_parser() -> argparse.ArgumentParser:
     skill_install.add_argument(
         "--agent",
         choices=[
-            "all", "codex", "claude", "cursor", "kiro", "muse", "shared", "detected",
+            "all",
+            "codex",
+            "claude",
+            "cursor",
+            "kiro",
+            "muse",
+            "shared",
+            "detected",
         ],
         default="all",
         help="Target agent (default: all).",
     )
     skill_install.add_argument(
-        "--check", action="store_true", help="Report destination state without writing files."
+        "--check",
+        action="store_true",
+        help="Report destination state without writing files.",
     )
     skill_install.add_argument(
         "--force", action="store_true", help="Replace an existing skill file."
@@ -467,8 +623,12 @@ AGENTS_END = "<!-- cairn:end -->"
 
 
 def _validate_identity_token(label: str, value: str) -> None:
-    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
-        raise ValueError(f"{label} must be a single token containing only letters, numbers, '.', '_' or '-'")
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.-]*", value
+    ):
+        raise ValueError(
+            f"{label} must be a single token containing only letters, numbers, '.', '_' or '-'"
+        )
 
 
 def agents_section(project: str, team: str, agent: str) -> str:
@@ -586,15 +746,26 @@ def _cmd_init(args, flag_agent_id) -> int:
         _validate_identity_token("agent id", agent)
         config = storage_config(vdir)
         if config.backend == "sqlite" and (vdir / "vault.db").exists():
-            emit({"initialized": str(vdir / "vault.db"), "note": "already exists"}, args.json)
+            emit(
+                {"initialized": str(vdir / "vault.db"), "note": "already exists"},
+                args.json,
+            )
             return 0
         embedder, effective, notice = resolve_init_embedder(spec)
         vdir.mkdir(parents=True, exist_ok=True)
-        (vdir / "project.json").write_text(json.dumps(
-            {"project": project, "slug": slug, "team": team, "agent_id": agent}, indent=2))
+        (vdir / "project.json").write_text(
+            json.dumps(
+                {"project": project, "slug": slug, "team": team, "agent_id": agent},
+                indent=2,
+            )
+        )
         open_backend(
-            vdir, embedder.name, embedder.dims, config=config,
-            create=True, doc_threshold=args.doc_threshold,
+            vdir,
+            embedder.name,
+            embedder.dims,
+            config=config,
+            create=True,
+            doc_threshold=args.doc_threshold,
         ).close()
     except (ImportError, ValueError, OSError, sqlite3.Error) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -602,9 +773,15 @@ def _cmd_init(args, flag_agent_id) -> int:
     write_embedder_hint(vdir, effective, embedder.dims)
     ensure_vault_gitignore(vdir)
     out = {
-        "initialized": (str(vdir / "vault.db") if config.backend == "sqlite" else config.backend),
-        "storage": config.backend, "embedder": embedder.name,
-        "dims": embedder.dims, "project": project, "team": team, "agent_id": agent,
+        "initialized": (
+            str(vdir / "vault.db") if config.backend == "sqlite" else config.backend
+        ),
+        "storage": config.backend,
+        "embedder": embedder.name,
+        "dims": embedder.dims,
+        "project": project,
+        "team": team,
+        "agent_id": agent,
     }
     if notice:
         out["notice"] = notice
@@ -639,7 +816,13 @@ def _open_client(args):
 
 def _cmd_store(args, client) -> int:
     res = client.store_memory(
-        args.content, args.team, args.task, args.type, args.origin, args.supersedes, args.mode,
+        args.content,
+        args.team,
+        args.task,
+        args.type,
+        args.origin,
+        args.supersedes,
+        args.mode,
     )
     emit(res.to_dict(), args.json)
     return 0
@@ -647,9 +830,13 @@ def _cmd_store(args, client) -> int:
 
 def _cmd_retrieve(args, client) -> int:
     filters = {
-        k: v for k, v in (
-            ("task_id", args.task), ("team_id", args.team), ("memory_type", args.type),
-        ) if v
+        k: v
+        for k, v in (
+            ("task_id", args.task),
+            ("team_id", args.team),
+            ("memory_type", args.type),
+        )
+        if v
     }
     hits = client.retrieve_memory(args.query, filters or None, args.top_k, args.min_sim)
     emit([m.to_dict() for m in hits], args.json, full=True)
@@ -661,10 +848,14 @@ def _cmd_list(args, client) -> int:
         filters = {"canonical_id": args.canonical}
     else:
         filters = {
-            k: v for k, v in (
-                ("task_id", args.task), ("memory_type", args.type),
-                ("status", args.status), ("search", args.search),
-            ) if v
+            k: v
+            for k, v in (
+                ("task_id", args.task),
+                ("memory_type", args.type),
+                ("status", args.status),
+                ("search", args.search),
+            )
+            if v
         }
     if not filters:
         print("error: list needs --task, --canonical, or --search", file=sys.stderr)
@@ -735,10 +926,19 @@ def _cmd_token(args, client) -> int:
         token = "cairn_" + secrets.token_urlsafe(32)
         digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
         with client.vault.transaction():
-            client.vault.create_server_token(token_id, digest, agent_id, now_epoch(), args.curator)
+            client.vault.create_server_token(
+                token_id, digest, agent_id, now_epoch(), args.curator
+            )
         if args.json:
-            emit({"token_id": token_id, "agent_id": agent_id, "curator": args.curator,
-                  "token": token}, True)
+            emit(
+                {
+                    "token_id": token_id,
+                    "agent_id": agent_id,
+                    "curator": args.curator,
+                    "token": token,
+                },
+                True,
+            )
         else:
             print(f"token_id: {token_id}")
             print(f"agent_id: {agent_id}")
@@ -754,7 +954,9 @@ def _cmd_token(args, client) -> int:
         elif tokens:
             for item in tokens:
                 role = "curator" if item["curator"] else "agent"
-                print(f"{item['token_id']}  {item['agent_id']}  {role}  created {item['created_at']}")
+                print(
+                    f"{item['token_id']}  {item['agent_id']}  {role}  created {item['created_at']}"
+                )
         else:
             print("(no active tokens)")
         return 0
@@ -771,7 +973,9 @@ def _cmd_serve(args, client) -> int:
     configured_token = args.token or os.environ.get("CAIRN_TOKEN")
     if args.token_mode == "per-agent":
         if configured_token:
-            raise ValueError("omit --token and CAIRN_TOKEN when using --token-mode per-agent")
+            raise ValueError(
+                "omit --token and CAIRN_TOKEN when using --token-mode per-agent"
+            )
         token = ""
         auth = "per-agent tokens enabled"
     else:
@@ -779,18 +983,33 @@ def _cmd_serve(args, client) -> int:
         auth = "bearer token configured" if configured_token else f"token: {token}"
     scheme = "https" if args.tls_cert else "http"
     vdir = vault_dir(args)
-    target = (str(vdir / "vault.db") if client.vault.name == "sqlite"
-              else f"{client.vault.name} storage at {vdir}")
-    print(f"serving {target} on {scheme}://{args.host}:{args.port} ({auth})", flush=True)
-    serve_forever(client, args.host, args.port, token, args.tls_cert, args.tls_key,
-                  token_mode=args.token_mode)
+    target = (
+        str(vdir / "vault.db")
+        if client.vault.name == "sqlite"
+        else f"{client.vault.name} storage at {vdir}"
+    )
+    print(
+        f"serving {target} on {scheme}://{args.host}:{args.port} ({auth})", flush=True
+    )
+    serve_forever(
+        client,
+        args.host,
+        args.port,
+        token,
+        args.tls_cert,
+        args.tls_key,
+        token_mode=args.token_mode,
+    )
     return 0
 
 
 def _cmd_push(args, client) -> int:
     token = token_for(args)
     handshake = sync_handshake(
-        args.url, client.vault.vault_identity.vault_id, token=token, cafile=args.tls_ca,
+        args.url,
+        client.vault.vault_identity.vault_id,
+        token=token,
+        cafile=args.tls_ca,
     )
     token_id = handshake["token_id"]
     peer = handshake["origin_id"]
@@ -814,22 +1033,35 @@ def _cmd_pull(args, client) -> int:
     else:
         token = token_for(args)
         handshake = sync_handshake(
-            args.url, client.vault.vault_identity.vault_id, token=token,
+            args.url,
+            client.vault.vault_identity.vault_id,
+            token=token,
             cafile=args.tls_ca,
         )
         token_id = handshake["token_id"]
         peer = handshake["origin_id"]
         after = client.vault.get_sync_cursor(peer, "pull", token_id)
-        pack = pull_from(args.url, token, cafile=args.tls_ca, after=after,
-                         peer=client.vault.sync_origin_id())
+        pack = pull_from(
+            args.url,
+            token,
+            cafile=args.tls_ca,
+            after=after,
+            peer=client.vault.sync_origin_id(),
+        )
     if args.out:
         Path(args.out).write_text(json.dumps(pack, default=str))
         count = len(pack.get("events", pack.get("memories", [])))
         emit({"pulled": count, "out": args.out}, args.json)
     elif pack.get("pack") == "cairn-sync-2":
-        emit(client.import_sync_pack(
-            pack, peer=peer, direction="pull", token_id=token_id,
-        ), args.json)
+        emit(
+            client.import_sync_pack(
+                pack,
+                peer=peer,
+                direction="pull",
+                token_id=token_id,
+            ),
+            args.json,
+        )
     else:
         emit(client.import_pack(pack), args.json)
     return 0
@@ -839,8 +1071,10 @@ def _cmd_sync(args, client) -> int:
     peer = None
     if args.url:
         handshake = sync_handshake(
-            args.url, client.vault.vault_identity.vault_id,
-            token=token_for(args), cafile=args.tls_ca,
+            args.url,
+            client.vault.vault_identity.vault_id,
+            token=token_for(args),
+            cafile=args.tls_ca,
         )
         peer = handshake["origin_id"]
     emit(client.sync_status(peer), args.json)
@@ -852,11 +1086,22 @@ def _cmd_conflicts(args, client) -> int:
         emit(client.sync_status()["conflicts"], args.json)
     else:
         if args.url:
-            emit(resolve_conflict_to(args.url, args.base_key, args.winner_key,
-                                     token_for(args), agent_id=client.agent_id,
-                                     cafile=args.tls_ca), args.json)
+            emit(
+                resolve_conflict_to(
+                    args.url,
+                    args.base_key,
+                    args.winner_key,
+                    token_for(args),
+                    agent_id=client.agent_id,
+                    cafile=args.tls_ca,
+                ),
+                args.json,
+            )
         else:
-            emit(client.resolve_competing_correction(args.base_key, args.winner_key), args.json)
+            emit(
+                client.resolve_competing_correction(args.base_key, args.winner_key),
+                args.json,
+            )
     return 0
 
 
@@ -909,7 +1154,10 @@ def _remove_galaxy_token(client, token: str) -> None:
 def _galaxy_reuse(args, html_info, client) -> int:
     token = _read_galaxy_token(client)
     if token is None:
-        print("error: running galaxy has no readable access token; stop it and restart", file=sys.stderr)
+        print(
+            "error: running galaxy has no readable access token; stop it and restart",
+            file=sys.stderr,
+        )
         return 1
     url = galaxy_url(args.host, args.port, token)
     html_info.update({"url": url, "host": args.host, "port": args.port, "reused": True})
@@ -973,19 +1221,26 @@ def _cmd_galaxy(args, client) -> int:
 
 def _cmd_whoami(args, client) -> int:
     identity = client.vault.vault_identity
-    role = "curator" if any(
-        token["agent_id"] == client.agent_id and bool(token["curator"])
-        for token in client.vault.list_server_tokens()
-    ) else "member"
-    emit({
-        "agent": client.agent_id,
-        "vault_name": identity.name,
-        "vault_id": identity.vault_id,
-        "role": role,
-        "storage": client.vault.name,
-        "embedder": client.embedder.name,
-        "dims": client.embedder.dims,
-    }, args.json)
+    role = (
+        "curator"
+        if any(
+            token["agent_id"] == client.agent_id and bool(token["curator"])
+            for token in client.vault.list_server_tokens()
+        )
+        else "member"
+    )
+    emit(
+        {
+            "agent": client.agent_id,
+            "vault_name": identity.name,
+            "vault_id": identity.vault_id,
+            "role": role,
+            "storage": client.vault.name,
+            "embedder": client.embedder.name,
+            "dims": client.embedder.dims,
+        },
+        args.json,
+    )
     return 0
 
 
@@ -1010,7 +1265,8 @@ def _cmd_doctor(args, client) -> int:
     info = {
         "vault": str(vdir / "vault.db") if client.vault.name == "sqlite" else str(vdir),
         "storage": client.vault.name,
-        "memories": st["total"], "by_status": st["by_status"],
+        "memories": st["total"],
+        "by_status": st["by_status"],
         "embedder": f"{st['embedder']}/{st['dims']}d",
         "sqlite_vec": vec,
         "docs": st["docs"],
@@ -1036,12 +1292,14 @@ def _bootstrap_project(vdir, flag_agent_id, client):
     _validate_identity_token("team", team)
     _validate_identity_token("agent id", agent)
     if flag_agent_id:
-        proj.update({
-            "agent_id": agent,
-            "project": proj.get("project") or Path.cwd().name,
-            "slug": proj.get("slug") or team,
-            "team": team,
-        })
+        proj.update(
+            {
+                "agent_id": agent,
+                "project": proj.get("project") or Path.cwd().name,
+                "slug": proj.get("slug") or team,
+                "team": team,
+            }
+        )
         (vdir / "project.json").write_text(json.dumps(proj, indent=2))
     return proj, team, agent
 
@@ -1068,7 +1326,9 @@ def _load_mcp_config(path: Path) -> dict:
     try:
         config = json.loads(text)
     except json.JSONDecodeError as error:
-        raise ValueError(f"{path.name} is not valid JSON; refusing to overwrite it") from error
+        raise ValueError(
+            f"{path.name} is not valid JSON; refusing to overwrite it"
+        ) from error
     if not isinstance(config, dict):
         raise ValueError(f"{path.name} must contain a JSON object")
     servers = config.setdefault("mcpServers", {})
@@ -1126,12 +1386,20 @@ def _cmd_bootstrap(args, client, flag_agent_id) -> int:
     mcp_path.write_text(json.dumps(mcp, indent=2) + "\n")
     agents_path = Path.cwd() / "AGENTS.md"
     _write_agents_section(agents_path, agents_section(project, team, agent))
-    emit({
-        "project": project, "team": team, "agent_id": agent,
-        "mcp_server_name": args.name,
-        "mcp_json": str(mcp_path), "agents_md": str(agents_path),
-        "onboarding_task": ONBOARDING_TASK, "seeded": seeded, "warnings": warnings,
-    }, args.json)
+    emit(
+        {
+            "project": project,
+            "team": team,
+            "agent_id": agent,
+            "mcp_server_name": args.name,
+            "mcp_json": str(mcp_path),
+            "agents_md": str(agents_path),
+            "onboarding_task": ONBOARDING_TASK,
+            "seeded": seeded,
+            "warnings": warnings,
+        },
+        args.json,
+    )
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
     return 0
@@ -1147,7 +1415,7 @@ def _cmd_log(args, _client) -> int:
                     lines.append(json.loads(line))
     except OSError:
         pass
-    emit(lines[-args.limit:], args.json)
+    emit(lines[-args.limit :], args.json)
     return 0
 
 
@@ -1179,7 +1447,10 @@ def _run_backup_command(args) -> int:
 
 def _cmd_skills(args) -> int:
     if os.environ.get("CAIRN_EXPERIMENTAL_SKILLS", "").strip().lower() not in {
-        "1", "true", "on", "yes",
+        "1",
+        "true",
+        "on",
+        "yes",
     }:
         print(
             "error: cairn skills install is off by default; "
@@ -1221,7 +1492,9 @@ def _restore_backup_command(args) -> int:
         if args.json:
             print(json.dumps(result, indent=2))
         else:
-            print(f"restored {result['restored']} from {result['target']} at {result['at']}")
+            print(
+                f"restored {result['restored']} from {result['target']} at {result['at']}"
+            )
         return 0
     except (ValueError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
@@ -1280,6 +1553,7 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     args.json = as_json or args.json
+
     def configured_sync_url() -> str | None:
         try:
             return storage_config(vault_dir(args)).sync_endpoint
@@ -1289,7 +1563,9 @@ def main(argv=None) -> int:
     if args.cmd in {"push", "pull"}:
         args.url = args.url or os.environ.get("CAIRN_URL") or configured_sync_url()
         if not args.url:
-            parser.error("push and pull need a server URL; pass one, set CAIRN_URL, or configure AWS sync_endpoint")
+            parser.error(
+                "push and pull need a server URL; pass one, set CAIRN_URL, or configure AWS sync_endpoint"
+            )
     if args.cmd == "sync" and args.sync_action == "status":
         args.url = args.url or os.environ.get("CAIRN_URL") or configured_sync_url()
     # explicit --agent-id only; captured BEFORE env/config pre-fill below

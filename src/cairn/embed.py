@@ -12,6 +12,7 @@
 Each collection is tagged with its embed model + dims; vectors from different
 spaces are never compared (cross-space queries are refused at open/import).
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -56,7 +57,7 @@ class HashEmbedder(Embedder):
             self._accumulate(vec, tok.encode())
         encoded = raw.encode()
         for i in range(max(0, len(encoded) - 2)):
-            self._accumulate(vec, encoded[i:i + 3])
+            self._accumulate(vec, encoded[i : i + 3])
         norm = float(np.linalg.norm(vec))
         if norm > 0:
             vec /= norm
@@ -99,8 +100,12 @@ class FastEmbedder(Embedder):
 
 
 class OllamaEmbedder(Embedder):
-    def __init__(self, model: str = "mxbai-embed-large", host: str = "http://localhost:11434",
-                 dims: int | None = None):
+    def __init__(
+        self,
+        model: str = "mxbai-embed-large",
+        host: str = "http://localhost:11434",
+        dims: int | None = None,
+    ):
         self.model_id = model
         self.name = f"ollama-{model}"
         self.host = host.rstrip("/")
@@ -144,7 +149,12 @@ def format_embedder_hint(spec: str, dims: int | None = None) -> str:
 
 
 def _socket_disabled() -> bool:
-    return os.environ.get("CAIRN_EMBEDD", "1").strip().lower() in {"0", "off", "false", "no"}
+    return os.environ.get("CAIRN_EMBEDD", "1").strip().lower() in {
+        "0",
+        "off",
+        "false",
+        "no",
+    }
 
 
 def _model_id(spec: str, default: str) -> str:
@@ -164,13 +174,16 @@ def _try_socket_embedder(spec: str, dims: int | None):
         return embedder
     except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
         import sys
+
         sys.stderr.write(
             f"cairn-embedd unavailable ({exc}); loading fastembed in-process\n"
         )
         return None
 
 
-def get_embedder(spec: str, dims: int | None = None, skip_socket: bool = False) -> Embedder:
+def get_embedder(
+    spec: str, dims: int | None = None, skip_socket: bool = False
+) -> Embedder:
     """`hash` (default) | `fastembed[:model]` | `ollama[:model]`.
 
     Pass cached `dims` to skip the FastEmbed/Ollama probe embed on process start.

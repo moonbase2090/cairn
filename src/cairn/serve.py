@@ -9,6 +9,7 @@ A host other than loopback requires TLS 1.2+ and a bearer token.
 Threading: every request reopens the storage backend (SQLite connections
 never cross threads); the embedder is stateless and shared.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -72,28 +73,43 @@ class _Handler(BaseHTTPRequestHandler):
                 return False, None, False, None
             digest = hashlib.sha256(bearer.encode("utf-8")).hexdigest()
             token = client.vault.get_server_token(digest)
-            return (token is not None, token["agent_id"] if token is not None else None,
-                    bool(token["curator"]) if token is not None else False,
-                    token["token_id"] if token is not None else None)
+            return (
+                token is not None,
+                token["agent_id"] if token is not None else None,
+                bool(token["curator"]) if token is not None else False,
+                token["token_id"] if token is not None else None,
+            )
 
         token = getattr(self.server, "token", "")
         if not token:
             return True, None, False, "shared"
-        return hmac.compare_digest(authorization, f"Bearer {token}"), None, False, "shared"
+        return (
+            hmac.compare_digest(authorization, f"Bearer {token}"),
+            None,
+            False,
+            "shared",
+        )
 
     @staticmethod
-    def _sync_pack_matches_agent(pack: dict, agent_id: str, curator: bool, client) -> bool:
+    def _sync_pack_matches_agent(
+        pack: dict, agent_id: str, curator: bool, client
+    ) -> bool:
         return sync_pack_matches_agent(pack, agent_id, curator, client.vault)
 
     @staticmethod
-    def _pack_matches_agent(pack: dict, agent_id: str, client, curator: bool = False) -> bool:
+    def _pack_matches_agent(
+        pack: dict, agent_id: str, client, curator: bool = False
+    ) -> bool:
         memories = pack.get("memories") if isinstance(pack, dict) else None
         if not isinstance(memories, list):
             return True  # import_pack reports malformed pack structure
-        existing_agents = client.vault.get_agent_ids([
-            memory["key"] for memory in memories
-            if isinstance(memory, dict) and isinstance(memory.get("key"), str)
-        ])
+        existing_agents = client.vault.get_agent_ids(
+            [
+                memory["key"]
+                for memory in memories
+                if isinstance(memory, dict) and isinstance(memory.get("key"), str)
+            ]
+        )
         for memory in memories:
             if not isinstance(memory, dict):
                 return False
@@ -104,7 +120,9 @@ class _Handler(BaseHTTPRequestHandler):
             if memory_agent == agent_id:
                 if existing_agents.get(key) is None and not curator:
                     parent = memory.get("supersedes")
-                    parent_row = client.vault.get(parent) if isinstance(parent, str) else None
+                    parent_row = (
+                        client.vault.get(parent) if isinstance(parent, str) else None
+                    )
                     if parent_row and parent_row["agent_id"] != agent_id:
                         return False
                 continue
@@ -133,12 +151,14 @@ class _Handler(BaseHTTPRequestHandler):
                 identity = client.vault.vault_identity
                 result = {"ok": True, "memories": client.vault.count()}
                 if authorized:
-                    result.update({
-                        "vault_id": identity.vault_id,
-                        "vault_name": identity.name,
-                        "origin_id": client.vault.sync_origin_id(),
-                        "token_id": token_id,
-                    })
+                    result.update(
+                        {
+                            "vault_id": identity.vault_id,
+                            "vault_name": identity.name,
+                            "origin_id": client.vault.sync_origin_id(),
+                            "token_id": token_id,
+                        }
+                    )
                 self._send(200, result)
             return
         if u.path == "/pull":
@@ -157,13 +177,21 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send(400, {"error": "cursor cannot be negative"})
                     return
                 peer_identity = self.headers.get("X-Cairn-Peer") or "anonymous"
-                if after > _server_sync_cursor(client.vault, peer_identity, "pull", token_id):
-                    self._send(409, {"error": "requested cursor is ahead of the saved peer cursor"})
+                if after > _server_sync_cursor(
+                    client.vault, peer_identity, "pull", token_id
+                ):
+                    self._send(
+                        409,
+                        {"error": "requested cursor is ahead of the saved peer cursor"},
+                    )
                     return
                 pack = client.export_delta(after)
                 with client.vault.transaction():
                     client.vault.set_sync_cursor(
-                        peer_identity, "pull", pack["cursor"], int(pack["exported_at"]),
+                        peer_identity,
+                        "pull",
+                        pack["cursor"],
+                        int(pack["exported_at"]),
                         token_id,
                     )
                 self._send(200, pack)
@@ -194,9 +222,11 @@ class _Handler(BaseHTTPRequestHandler):
             if self.path == "/conflicts/resolve":
                 try:
                     result = client.resolve_competing_correction(
-                        str(pack.get("base_key", "")), str(pack.get("winner_key", "")),
+                        str(pack.get("base_key", "")),
+                        str(pack.get("winner_key", "")),
                         curator=curator,
-                        resolver_agent=agent_id or str(pack.get("agent_id") or client.agent_id),
+                        resolver_agent=agent_id
+                        or str(pack.get("agent_id") or client.agent_id),
                     )
                 except PermissionError as e:
                     self._send(403, {"error": str(e)})
@@ -210,22 +240,39 @@ class _Handler(BaseHTTPRequestHandler):
                 with client.vault.transaction():
                     if agent_id is not None:
                         if pack.get("pack") == "cairn-sync-2":
-                            allowed = self._sync_pack_matches_agent(pack, agent_id, curator, client)
+                            allowed = self._sync_pack_matches_agent(
+                                pack, agent_id, curator, client
+                            )
                         else:
-                            allowed = self._pack_matches_agent(pack, agent_id, client, curator)
+                            allowed = self._pack_matches_agent(
+                                pack, agent_id, client, curator
+                            )
                         if not allowed:
-                            self._send(403, {"error": "token is restricted to its assigned agent; curator permission is required for cross-agent state changes"})
+                            self._send(
+                                403,
+                                {
+                                    "error": "token is restricted to its assigned agent; curator permission is required for cross-agent state changes"
+                                },
+                            )
                             return
                     if pack.get("pack") == "cairn-sync-2":
                         after, cursor = pack.get("after"), pack.get("cursor")
-                        if (not isinstance(after, int) or isinstance(after, bool)
-                                or not isinstance(cursor, int) or isinstance(cursor, bool)
-                                or after < 0 or cursor < after):
+                        if (
+                            not isinstance(after, int)
+                            or isinstance(after, bool)
+                            or not isinstance(cursor, int)
+                            or isinstance(cursor, bool)
+                            or after < 0
+                            or cursor < after
+                        ):
                             self._send(400, {"error": "invalid sync pack cursor"})
                             return
                         peer_identity = pack.get("origin_id", "anonymous")
                         if after > _server_sync_cursor(
-                            client.vault, peer_identity, "push", token_id,
+                            client.vault,
+                            peer_identity,
+                            "push",
+                            token_id,
                         ):
                             self._send(409, {"error": "pushed cursor skips events"})
                             return
@@ -233,8 +280,11 @@ class _Handler(BaseHTTPRequestHandler):
                     peer_identity = pack.get("origin_id", "anonymous")
                     if pack.get("pack") == "cairn-sync-2":
                         client.vault.set_sync_cursor(
-                            peer_identity, "push", int(pack["cursor"]),
-                            int(pack.get("exported_at", 0)), token_id,
+                            peer_identity,
+                            "push",
+                            int(pack["cursor"]),
+                            int(pack.get("exported_at", 0)),
+                            token_id,
                         )
             except ValueError as e:  # cross-space pack
                 self._send(400, {"error": str(e)})
@@ -258,15 +308,24 @@ def _tls_context(cert: str | Path, key: str | Path) -> ssl.SSLContext:
     return ctx
 
 
-def _bind(client, host: str, port: int, token: str, tls_cert: str | None,
-          tls_key: str | None, token_mode: str = "shared"):
+def _bind(
+    client,
+    host: str,
+    port: int,
+    token: str,
+    tls_cert: str | None,
+    tls_key: str | None,
+    token_mode: str = "shared",
+):
     if token_mode not in {"shared", "per-agent"}:
         raise ValueError("token mode must be 'shared' or 'per-agent'")
     if bool(tls_cert) != bool(tls_key):
         raise ValueError("HTTPS needs both --tls-cert and --tls-key")
     if not _is_loopback(host):
         if not tls_cert:
-            raise ValueError("plain HTTP is only allowed on localhost; pass --tls-cert and --tls-key")
+            raise ValueError(
+                "plain HTTP is only allowed on localhost; pass --tls-cert and --tls-key"
+            )
         if token_mode == "shared" and not token:
             raise ValueError("a bearer token is required when serving beyond localhost")
     srv = ThreadingHTTPServer((host, port), _Handler)
@@ -274,22 +333,36 @@ def _bind(client, host: str, port: int, token: str, tls_cert: str | None,
     srv.token = token
     srv.token_mode = token_mode
     if tls_cert:
-        srv.socket = _tls_context(tls_cert, tls_key).wrap_socket(srv.socket, server_side=True)
+        srv.socket = _tls_context(tls_cert, tls_key).wrap_socket(
+            srv.socket, server_side=True
+        )
     return srv
 
 
-def start_background(client, host: str = "127.0.0.1", port: int = 0, token: str = "",
-                     tls_cert: str | None = None, tls_key: str | None = None,
-                     token_mode: str = "shared"):
+def start_background(
+    client,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    token: str = "",
+    tls_cert: str | None = None,
+    tls_key: str | None = None,
+    token_mode: str = "shared",
+):
     """Start the sync server in a daemon thread. Returns the server (has .server_address)."""
     srv = _bind(client, host, port, token, tls_cert, tls_key, token_mode)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
 
-def serve_forever(client, host: str = "127.0.0.1", port: int = 8778, token: str = "",
-                  tls_cert: str | None = None, tls_key: str | None = None,
-                  token_mode: str = "shared") -> None:
+def serve_forever(
+    client,
+    host: str = "127.0.0.1",
+    port: int = 8778,
+    token: str = "",
+    tls_cert: str | None = None,
+    tls_key: str | None = None,
+    token_mode: str = "shared",
+) -> None:
     srv = _bind(client, host, port, token, tls_cert, tls_key, token_mode)
     try:
         srv.serve_forever()
@@ -320,10 +393,17 @@ def _open_peer_request(request, base_url: str, timeout: int, cafile: str | None)
     return urlrequest.build_opener(*handlers).open(request, timeout=timeout)
 
 
-def pull_from(base_url: str, token: str = "", since: int | None = None,
-              cafile: str | None = None, after: int | None = None,
-              peer: str | None = None) -> dict:
-    cursor_name, cursor_value = ("after", after) if after is not None else ("since", since)
+def pull_from(
+    base_url: str,
+    token: str = "",
+    since: int | None = None,
+    cafile: str | None = None,
+    after: int | None = None,
+    peer: str | None = None,
+) -> dict:
+    cursor_name, cursor_value = (
+        ("after", after) if after is not None else ("since", since)
+    )
     query = f"?{cursor_name}={cursor_value}" if cursor_value is not None else ""
     url = base_url.rstrip("/") + "/pull" + query
     headers = {"Authorization": f"Bearer {token}"}
@@ -341,8 +421,9 @@ def health_from(base_url: str, cafile: str | None = None, token: str = "") -> di
         return json.load(resp)
 
 
-def sync_handshake(base_url: str, vault_id: str, token: str = "",
-                   cafile: str | None = None) -> dict:
+def sync_handshake(
+    base_url: str, vault_id: str, token: str = "", cafile: str | None = None
+) -> dict:
     """Validate a peer's vault and token identity before starting a sync exchange."""
     peer = health_from(base_url, cafile=cafile, token=token)
     if peer.get("ok") is not True:
@@ -361,25 +442,40 @@ def sync_handshake(base_url: str, vault_id: str, token: str = "",
     return peer
 
 
-def push_to(base_url: str, pack: dict, token: str = "", cafile: str | None = None) -> dict:
+def push_to(
+    base_url: str, pack: dict, token: str = "", cafile: str | None = None
+) -> dict:
     data = json.dumps(pack, default=str).encode()
     req = urlrequest.Request(
         base_url.rstrip("/") + "/push",
         data=data,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
     )
     with _open_peer_request(req, base_url, 60, cafile) as resp:
         return json.load(resp)
 
 
-def resolve_conflict_to(base_url: str, base_key: str, winner_key: str,
-                        token: str = "", agent_id: str = "",
-                        cafile: str | None = None) -> dict:
-    data = json.dumps({"base_key": base_key, "winner_key": winner_key,
-                       "agent_id": agent_id}).encode()
+def resolve_conflict_to(
+    base_url: str,
+    base_key: str,
+    winner_key: str,
+    token: str = "",
+    agent_id: str = "",
+    cafile: str | None = None,
+) -> dict:
+    data = json.dumps(
+        {"base_key": base_key, "winner_key": winner_key, "agent_id": agent_id}
+    ).encode()
     req = urlrequest.Request(
-        base_url.rstrip("/") + "/conflicts/resolve", data=data,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        base_url.rstrip("/") + "/conflicts/resolve",
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
     )
     with _open_peer_request(req, base_url, 30, cafile) as resp:
         return json.load(resp)
