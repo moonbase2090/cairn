@@ -2,6 +2,17 @@
 
 Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
+## 0.15.5 - 2026-10-17
+
+### Fixed
+
+- Release builds publish again. The release text check now reads compressed
+  files that are not tar archives and skips files bundled from the Python
+  runtime and third-party packages, while still scanning Cairn's own files,
+  archive metadata, and the release text.
+- Release archives no longer include the build directory path in Cairn's
+  package metadata or bytecode.
+
 ## 0.15.4 - 2026-10-17
 
 ### Added
