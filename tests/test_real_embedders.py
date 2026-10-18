@@ -4,6 +4,7 @@ Measured 2026-09-18 (BAAI/bge-small-en-v1.5 via fastembed, mxbai-embed-large via
 ollama). These pin the quality gap over the hash default and the per-embedder
 behavior of the 0.95 near-dup threshold.
 """
+
 import numpy as np
 import pytest
 
@@ -14,8 +15,14 @@ from cairn.embed import FastEmbedder, OllamaEmbedder
 from cairn.store import Vault
 
 RELATED = ("Q2 revenue grew 12 percent year over year", "how did Q2 revenue do?")
-NEAR_DUP = ("the quick brown fox jumps over the lazy dog", "the quick brown fox jumps over the lazy dogs")
-UNRELATED = ("Q2 revenue grew 12 percent year over year", "deploy the coolant manifold before friday")
+NEAR_DUP = (
+    "the quick brown fox jumps over the lazy dog",
+    "the quick brown fox jumps over the lazy dogs",
+)
+UNRELATED = (
+    "Q2 revenue grew 12 percent year over year",
+    "deploy the coolant manifold before friday",
+)
 
 
 def sim(e, a, b):
@@ -40,7 +47,9 @@ def test_fastembed_quality():
 
 def test_fastembed_vault_roundtrip(tmp_path):
     e = FastEmbedder()
-    client = CairnClient(Vault(tmp_path / "vault.db", e.name, e.dims, create=True), "fe-test", e)
+    client = CairnClient(
+        Vault(tmp_path / "vault.db", e.name, e.dims, create=True), "fe-test", e
+    )
     res = client.store_memory(RELATED[0], team_id="t", task_id="k")
     hits = client.retrieve_memory(RELATED[1], filters={"task_id": "k"})
     assert hits and hits[0].key == res.key and hits[0].similarity > 0.6
@@ -55,12 +64,16 @@ def test_ollama_quality():
     assert (e.dims, e.name) == (1024, "ollama-mxbai-embed-large")
     assert sim(e, *RELATED) > 0.6  # measured 0.75 (hash: 0.33)
     assert sim(e, *UNRELATED) < 0.6  # measured 0.31 — best separation of the three
-    assert 0.8 < sim(e, *NEAR_DUP) < 0.95  # measured 0.92: no false block, explicit supersede still works
+    assert (
+        0.8 < sim(e, *NEAR_DUP) < 0.95
+    )  # measured 0.92: no false block, explicit supersede still works
 
 
 def test_ollama_vault_roundtrip(tmp_path):
     e = ollama_or_skip()
-    client = CairnClient(Vault(tmp_path / "vault.db", e.name, e.dims, create=True), "ol-test", e)
+    client = CairnClient(
+        Vault(tmp_path / "vault.db", e.name, e.dims, create=True), "ol-test", e
+    )
     res = client.store_memory(RELATED[0], team_id="t", task_id="k")
     hits = client.retrieve_memory(RELATED[1], filters={"task_id": "k"})
     assert hits and hits[0].key == res.key and hits[0].similarity > 0.6

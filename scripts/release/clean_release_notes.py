@@ -11,7 +11,9 @@ import re
 import sys
 
 ATTRIBUTION = re.compile(r" by @[A-Za-z0-9-]+(?:\[bot\])?(?= in https://)")
-NEW_CONTRIBUTOR = re.compile(r"^\* @[A-Za-z0-9-]+(?:\[bot\])? made their first contribution\b")
+NEW_CONTRIBUTOR = re.compile(
+    r"^\* @[A-Za-z0-9-]+(?:\[bot\])? made their first contribution\b"
+)
 
 
 def clean(text: str) -> str:
@@ -23,7 +25,9 @@ def clean(text: str) -> str:
     out: list[str] = []
     for index, line in enumerate(lines):
         if line.strip() == "## New Contributors":
-            following = next((later for later in lines[index + 1 :] if later.strip()), "")
+            following = next(
+                (later for later in lines[index + 1 :] if later.strip()), ""
+            )
             if not following.startswith("* "):
                 continue
         out.append(line)

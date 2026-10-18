@@ -89,7 +89,10 @@ def configured_patterns() -> list[re.Pattern[str]]:
             try:
                 patterns.append(re.compile(expression))
             except re.error:
-                print(f"invalid {source} release denylist pattern on line {number}", file=sys.stderr)
+                print(
+                    f"invalid {source} release denylist pattern on line {number}",
+                    file=sys.stderr,
+                )
                 raise SystemExit(2)
     return patterns
 
@@ -101,7 +104,11 @@ def is_private_ip(text: str) -> bool:
                 address = ipaddress.ip_address(match.group(0))
             except ValueError:
                 continue
-            if any(address in network for network in PRIVATE_NETWORKS if network.version == address.version):
+            if any(
+                address in network
+                for network in PRIVATE_NETWORKS
+                if network.version == address.version
+            ):
                 return True
     return False
 
@@ -219,7 +226,15 @@ def is_tracked(path: Path, root: Path) -> bool:
     """True when git tracks the path, or when that cannot be ruled out."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", str(path.resolve())],
+            [
+                "git",
+                "-C",
+                str(root),
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                str(path.resolve()),
+            ],
             capture_output=True,
             check=False,
         )
@@ -292,7 +307,10 @@ def scan_member(
         root = release_root
         lines = data.decode("utf-8", errors="replace").split("\n")
         kept = [
-            "" if len(line.split("  ", 1)) == 2 and is_vendored_member(f"{root}/{line.split('  ', 1)[1]}", release_root) else line
+            ""
+            if len(line.split("  ", 1)) == 2
+            and is_vendored_member(f"{root}/{line.split('  ', 1)[1]}", release_root)
+            else line
             for line in lines
         ]
         data = "\n".join(kept).encode("utf-8")
@@ -332,17 +350,29 @@ def scan_blob(
                 scan_binary(archive.comment, f"{display}-comment", patterns, findings)
                 for index, member in enumerate(archive.infolist(), start=1):
                     label = safe_member_label(display, index)
-                    vendored = depth == 0 and is_vendored_member(member.filename, release_root)
+                    vendored = depth == 0 and is_vendored_member(
+                        member.filename, release_root
+                    )
                     if not vendored:
                         scan_text(member.filename, f"{label}-name", patterns, findings)
                     scan_binary(member.comment, f"{label}-comment", patterns, findings)
                     scan_binary(member.extra, f"{label}-extra", patterns, findings)
                     local_extra = zip_local_extra(data, member, archive.start_dir)
                     if local_extra != member.extra:
-                        scan_binary(local_extra, f"{label}-local-extra", patterns, findings)
+                        scan_binary(
+                            local_extra, f"{label}-local-extra", patterns, findings
+                        )
                     if member.is_dir() or vendored:
                         continue
-                    scan_member(archive.read(member), member.filename, label, patterns, findings, depth, release_root)
+                    scan_member(
+                        archive.read(member),
+                        member.filename,
+                        label,
+                        patterns,
+                        findings,
+                        depth,
+                        release_root,
+                    )
                 return
         except Exception as error:
             raise ScanError from error
@@ -355,13 +385,17 @@ def scan_blob(
                 raise ScanError from error
             # A compressed stream that is not a tar (such as a .pkl.gz data
             # file): scan the decompressed payload instead.
-            scan_blob(decompress(data), f"{display}!stream", patterns, findings, depth + 1)
+            scan_blob(
+                decompress(data), f"{display}!stream", patterns, findings, depth + 1
+            )
             return
         try:
             with archive:
                 for index, member in enumerate(archive.getmembers(), start=1):
                     label = safe_member_label(display, index)
-                    vendored = depth == 0 and is_vendored_member(member.name, release_root)
+                    vendored = depth == 0 and is_vendored_member(
+                        member.name, release_root
+                    )
                     if not vendored:
                         scan_text(member.name, f"{label}-name", patterns, findings)
                     scan_text(member.linkname, f"{label}-link", patterns, findings)
@@ -374,7 +408,15 @@ def scan_blob(
                         continue
                     stream = archive.extractfile(member)
                     if stream is not None:
-                        scan_member(stream.read(), member.name, label, patterns, findings, depth, release_root)
+                        scan_member(
+                            stream.read(),
+                            member.name,
+                            label,
+                            patterns,
+                            findings,
+                            depth,
+                            release_root,
+                        )
                 return
         except Exception as error:
             raise ScanError from error
@@ -408,7 +450,13 @@ def main() -> int:
     for path in sorted(files, key=lambda item: display_path(item, root)):
         display = display_path(path, root)
         try:
-            scan_blob(path.read_bytes(), display, patterns, findings, release_root=release_root_for(path, root))
+            scan_blob(
+                path.read_bytes(),
+                display,
+                patterns,
+                findings,
+                release_root=release_root_for(path, root),
+            )
         except (OSError, ScanError):
             print(f"cannot scan {display}:1", file=sys.stderr)
             return 2

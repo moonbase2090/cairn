@@ -13,6 +13,7 @@ Protocol: 4-byte big-endian length + UTF-8 JSON.
   <- {"ok":true,"name":"fastembed-bge-small","dims":384,"vectors":["<b64 float32>",…]}
   -> {"op":"ping"|"info"}
 """
+
 from __future__ import annotations
 
 import argparse
@@ -164,9 +165,19 @@ def spawn(spec: str, path: Path | None = None, idle: int = DEFAULT_IDLE) -> None
     with spawn_lock(path):
         if ping(path):
             return
-        cmd = [sys.executable, "-m", "cairn.embedd", "--spec", spec,
-               "--sock", str(path), "--idle", str(idle)]
+        cmd = [
+            sys.executable,
+            "-m",
+            "cairn.embedd",
+            "--spec",
+            spec,
+            "--sock",
+            str(path),
+            "--idle",
+            str(idle),
+        ]
         import subprocess
+
         subprocess.Popen(
             cmd,
             start_new_session=True,
@@ -190,7 +201,9 @@ def _op_embed(req, embedder, lock) -> None:
     with lock:
         arr = embedder.embed(texts)
     return {
-        "ok": True, "name": embedder.name, "dims": embedder.dims,
+        "ok": True,
+        "name": embedder.name,
+        "dims": embedder.dims,
         "vectors": encode_vectors(arr),
     }
 
@@ -242,15 +255,21 @@ def _accept_until_idle(srv, path, embedder, lock, last, idle: int) -> None:
                 continue
             conn.settimeout(60)
             threading.Thread(
-                target=_handle, args=(conn, embedder, lock, last), daemon=True,
+                target=_handle,
+                args=(conn, embedder, lock, last),
+                daemon=True,
             ).start()
     finally:
         srv.close()
         _unlink_quiet(path)
 
 
-def serve_forever(spec: str, path: Path | None = None, idle: int = DEFAULT_IDLE,
-                  dims: int | None = None) -> int:
+def serve_forever(
+    spec: str,
+    path: Path | None = None,
+    idle: int = DEFAULT_IDLE,
+    dims: int | None = None,
+) -> int:
     from cairn.embed import get_embedder
 
     path = path or sock_path()
@@ -272,10 +291,16 @@ def serve_forever(spec: str, path: Path | None = None, idle: int = DEFAULT_IDLE,
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="cairn-embedd", description=__doc__)
-    p.add_argument("--spec", default="fastembed", help="Embedder spec (default fastembed).")
+    p.add_argument(
+        "--spec", default="fastembed", help="Embedder spec (default fastembed)."
+    )
     p.add_argument("--sock", default=None, help="Unix socket path.")
-    p.add_argument("--idle", type=int, default=DEFAULT_IDLE,
-                   help="Exit after this many idle seconds (0 = never). Default 900.")
+    p.add_argument(
+        "--idle",
+        type=int,
+        default=DEFAULT_IDLE,
+        help="Exit after this many idle seconds (0 = never). Default 900.",
+    )
     p.add_argument("--dims", type=int, default=None, help="Cached dims (skip probe).")
     args = p.parse_args(argv)
     path = Path(args.sock) if args.sock else sock_path()

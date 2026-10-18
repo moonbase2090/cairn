@@ -1,4 +1,5 @@
 """cairn-embedd socket protocol — hash backend, no FastEmbed load."""
+
 import os
 import shutil
 import subprocess
@@ -46,11 +47,25 @@ def sock_dir():
 def embedd_hash(sock_dir):
     sock = sock_dir / "embed.sock"
     proc = subprocess.Popen(
-        [sys.executable, "-m", "cairn.embedd", "--spec", "hash",
-         "--sock", str(sock), "--idle", "8", "--dims", "384"],
+        [
+            sys.executable,
+            "-m",
+            "cairn.embedd",
+            "--spec",
+            "hash",
+            "--sock",
+            str(sock),
+            "--idle",
+            "8",
+            "--dims",
+            "384",
+        ],
         cwd=str(ROOT),
-        env={**os.environ, "PYTHONPATH": f"{ROOT}/src",
-             "CAIRN_EMBEDD": "0"},  # daemon loads in-process hash
+        env={
+            **os.environ,
+            "PYTHONPATH": f"{ROOT}/src",
+            "CAIRN_EMBEDD": "0",
+        },  # daemon loads in-process hash
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )
@@ -84,11 +99,21 @@ def test_ping_false_when_missing(tmp_path):
 def test_idle_exit(sock_dir):
     sock = sock_dir / "idle.sock"
     proc = subprocess.Popen(
-        [sys.executable, "-m", "cairn.embedd", "--spec", "hash",
-         "--sock", str(sock), "--idle", "1", "--dims", "384"],
+        [
+            sys.executable,
+            "-m",
+            "cairn.embedd",
+            "--spec",
+            "hash",
+            "--sock",
+            str(sock),
+            "--idle",
+            "1",
+            "--dims",
+            "384",
+        ],
         cwd=str(ROOT),
-        env={**os.environ, "PYTHONPATH": f"{ROOT}/src",
-             "CAIRN_EMBEDD": "0"},
+        env={**os.environ, "PYTHONPATH": f"{ROOT}/src", "CAIRN_EMBEDD": "0"},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

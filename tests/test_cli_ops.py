@@ -1,4 +1,5 @@
 """CLI ops tests — drive main() with an isolated CAIRN_DIR."""
+
 import json
 
 from cairn.cli import main
@@ -21,10 +22,17 @@ def test_whoami_doctor_log_purge_guard(tmp_path, monkeypatch, capsys):
     doc = json.loads(out)
     assert rc == 0 and doc["memories"] == 0 and doc["vec_in_sync"] is True
 
-    assert run(["store", "ops memory one two three", "--team", "t", "--task", "k"], capsys)[0] == 0
+    assert (
+        run(
+            ["store", "ops memory one two three", "--team", "t", "--task", "k"], capsys
+        )[0]
+        == 0
+    )
     rc, out, _ = run(["secret-scan", "--json"], capsys)
     assert rc == 0 and json.loads(out) == {
-        "scanned": 1, "findings": {}, "safe": True,
+        "scanned": 1,
+        "findings": {},
+        "safe": True,
     }
     rc, out, _ = run(["log", "--json"], capsys)
     assert rc == 0
@@ -33,12 +41,15 @@ def test_whoami_doctor_log_purge_guard(tmp_path, monkeypatch, capsys):
     rc, _, err = run(["purge", "k-abc"], capsys)
     assert rc == 2 and "--force" in err  # destructive guard
 
-    assert run(["retrieve", "ops memory", "--team", "t", "--top-k", "3"], capsys)[0] == 0
+    assert (
+        run(["retrieve", "ops memory", "--team", "t", "--top-k", "3"], capsys)[0] == 0
+    )
     assert run(["list", "--task", "k", "--limit", "5"], capsys)[0] == 0
 
 
 def test_version_flag(capsys):
     import cairn
+
     with __import__("pytest").raises(SystemExit) as exc:
         main(["--version"])
     assert exc.value.code == 0

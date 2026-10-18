@@ -11,6 +11,7 @@ Rules:
   - If only other files changed, the version MAY stay the same; if it
     moves it must still be a valid increase.
 """
+
 import os
 import re
 import subprocess
@@ -89,13 +90,20 @@ def main():
             print(f"FAIL: src/ changed but version did not increase ({old} -> {new})")
             return 1
         if level != required:
-            print(f"FAIL: title requires {required} bump but version went {old} -> {new} ({level})")
+            print(
+                f"FAIL: title requires {required} bump but version went {old} -> {new} ({level})"
+            )
             return 1
-    elif level is not None and not (tuple(map(int, new.split("."))) > tuple(map(int, old.split(".")))):
+    elif level is not None and not (
+        tuple(map(int, new.split("."))) > tuple(map(int, old.split(".")))
+    ):
         print(f"FAIL: invalid version change {old} -> {new}")
         return 1
 
-    print(f"PASS: {old} -> {new}" + (f" ({level})" if level else " (unchanged, src untouched)"))
+    print(
+        f"PASS: {old} -> {new}"
+        + (f" ({level})" if level else " (unchanged, src untouched)")
+    )
     return 0
 
 
