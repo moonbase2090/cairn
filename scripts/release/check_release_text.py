@@ -3,16 +3,20 @@
 
 from __future__ import annotations
 
-import ipaddress
+import bz2
+import gzip
 import io
+import ipaddress
+import lzma
 import os
 import re
 import struct
+import subprocess
 import sys
 import tarfile
+import tomllib
 import zipfile
-from pathlib import Path
-
+from pathlib import Path, PurePosixPath
 
 ALLOWED_EMAIL = "322824348+mb2090@users.noreply.github.com"
 PRIVATE_NETWORKS = (
@@ -26,6 +30,7 @@ IPV6_CANDIDATE = re.compile(
     r"(?<![0-9a-f:])(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(?![0-9a-f:])",
     re.IGNORECASE,
 )
+URL_USERINFO_PREFIX = re.compile(r"://[^\s/@:]*:$")
 EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 ASCII_STRINGS = re.compile(rb"[\x20-\x7e\t]{4,}")
 UTF16_STRINGS = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
@@ -34,9 +39,21 @@ TAR_SIGNATURE = b"ustar"
 COMPRESSED_TAR_SIGNATURES = (b"\x1f\x8b", b"BZh", b"\xfd7zXZ\x00")
 ZIP_LOCAL_HEADER = struct.Struct("<IHHHHHIIIHH")
 ZIP_LOCAL_SIGNATURE = 0x04034B50
+# Top-level directory of a packaged release archive, e.g. cairn-0.15.4-x86_64-unknown-linux-gnu.
+RELEASE_ROOT = re.compile(r"^cairn-\d+\.\d+\.\d+(?:-[^/]+)?$")
+# Must match TARGETS in scripts/release/package.py.
+RELEASE_TARGETS = (
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+)
+OWNED_APP_ENTRIES = frozenset({"cairn", "entries", ".lock"})
+OWNED_DIST_INFO = re.compile(r"^cairn-[^/]+\.dist-info$")
 GENERIC_PATTERNS = (
     re.compile(r"DESKTOP-[A-Z0-9]+", re.IGNORECASE),
-    re.compile(r"\.local\b", re.IGNORECASE),
+    re.compile(r"\b[a-z0-9][a-z0-9-]*\.local\b", re.IGNORECASE),
     re.compile(r"/Users/", re.IGNORECASE),
     re.compile(r"/home/[a-z]", re.IGNORECASE),
     re.compile(r"C:\\+Users", re.IGNORECASE),
@@ -94,7 +111,11 @@ def line_matches(text: str, patterns: list[re.Pattern[str]]) -> bool:
         return True
     if is_private_ip(text):
         return True
-    return any(match.group(0).casefold() != ALLOWED_EMAIL.casefold() for match in EMAIL.finditer(text))
+    return any(
+        match.group(0).casefold() != ALLOWED_EMAIL.casefold()
+        and not URL_USERINFO_PREFIX.search(text, 0, match.start())
+        for match in EMAIL.finditer(text)
+    )
 
 
 def display_path(path: Path, root: Path) -> str:
@@ -186,13 +207,118 @@ def zip_local_extra(data: bytes, member: zipfile.ZipInfo, central_start: int) ->
     return data[extra_start:extra_end]
 
 
+def project_version(root: Path) -> str | None:
+    try:
+        with (root / "pyproject.toml").open("rb") as handle:
+            return str(tomllib.load(handle)["project"]["version"])
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+        return None
+
+
+def is_tracked(path: Path, root: Path) -> bool:
+    """True when git tracks the path, or when that cannot be ruled out."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", str(path.resolve())],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return True
+    return result.returncode != 1
+
+
+def release_root_for(path: Path, root: Path) -> str | None:
+    """Return the archive root for a packaged release artifact in `<repo>/dist`.
+
+    Only an untracked archive in the repository's dist directory named
+    `cairn-<version>-<target>.tar.gz` (or `.zip` for Windows), where the
+    version is the project version and the target is a packaged release
+    target, is trusted to carry bundled third-party files. Every other input
+    is scanned in full.
+    """
+    try:
+        if path.resolve().parent != (root / "dist").resolve():
+            return None
+    except OSError:
+        return None
+    version = project_version(root)
+    if version is None:
+        return None
+    for target in RELEASE_TARGETS:
+        suffix = ".zip" if target.endswith("windows-msvc") else ".tar.gz"
+        stem = f"cairn-{version}-{target}"
+        if path.name == stem + suffix:
+            return None if is_tracked(path, root) else stem
+    return None
+
+
+def is_vendored_member(name: str, release_root: str | None) -> bool:
+    """Return True for bundled third-party content in a packaged release archive.
+
+    The bundled Python runtime (`python/`) and every `app/` entry that is not
+    Cairn's own package, dist-info, or entry scripts are third-party files.
+    Their names and archive metadata are still scanned; only their contents
+    are skipped. Anything else, including unexpected layouts, is scanned.
+    """
+    if release_root is None:
+        return False
+    parts = PurePosixPath(name.replace("\\", "/")).parts
+    if len(parts) < 3 or ".." in parts or parts[0] != release_root:
+        return False
+    if parts[1] == "python":
+        return True
+    if parts[1] == "app":
+        return not (parts[2] in OWNED_APP_ENTRIES or OWNED_DIST_INFO.match(parts[2]))
+    return False
+
+
+def is_checksum_manifest(name: str, release_root: str | None) -> bool:
+    parts = PurePosixPath(name.replace("\\", "/")).parts
+    return release_root is not None and parts == (release_root, "SHA256SUMS")
+
+
+def scan_member(
+    data: bytes,
+    name: str,
+    label: str,
+    patterns: list[re.Pattern[str]],
+    findings: set[str],
+    depth: int,
+    release_root: str | None,
+) -> None:
+    """Scan one archive member; drop SHA256SUMS lines that name bundled third-party files."""
+    if depth == 0 and is_checksum_manifest(name, release_root):
+        root = release_root
+        lines = data.decode("utf-8", errors="replace").split("\n")
+        kept = [
+            "" if len(line.split("  ", 1)) == 2 and is_vendored_member(f"{root}/{line.split('  ', 1)[1]}", release_root) else line
+            for line in lines
+        ]
+        data = "\n".join(kept).encode("utf-8")
+    scan_blob(data, label, patterns, findings, depth + 1)
+
+
+def decompress(data: bytes) -> bytes:
+    try:
+        if data.startswith(b"\x1f\x8b"):
+            return gzip.decompress(data)
+        if data.startswith(b"BZh"):
+            return bz2.decompress(data)
+        return lzma.decompress(data)
+    except (OSError, EOFError, ValueError, lzma.LZMAError) as error:
+        raise ScanError from error
+
+
 def scan_blob(
     data: bytes,
     display: str,
     patterns: list[re.Pattern[str]],
     findings: set[str],
     depth: int = 0,
+    release_root: str | None = None,
 ) -> None:
+    """Scan data. `release_root` marks a trusted packaged release artifact (see release_root_for)."""
     looks_like_zip = data.startswith(ZIP_SIGNATURES)
     looks_like_tar = (
         len(data) > 262 and data[257:262] == TAR_SIGNATURE
@@ -206,36 +332,49 @@ def scan_blob(
                 scan_binary(archive.comment, f"{display}-comment", patterns, findings)
                 for index, member in enumerate(archive.infolist(), start=1):
                     label = safe_member_label(display, index)
-                    scan_text(member.filename, f"{label}-name", patterns, findings)
+                    vendored = depth == 0 and is_vendored_member(member.filename, release_root)
+                    if not vendored:
+                        scan_text(member.filename, f"{label}-name", patterns, findings)
                     scan_binary(member.comment, f"{label}-comment", patterns, findings)
                     scan_binary(member.extra, f"{label}-extra", patterns, findings)
                     local_extra = zip_local_extra(data, member, archive.start_dir)
                     if local_extra != member.extra:
                         scan_binary(local_extra, f"{label}-local-extra", patterns, findings)
-                    if member.is_dir():
+                    if member.is_dir() or vendored:
                         continue
-                    scan_blob(archive.read(member), label, patterns, findings, depth + 1)
+                    scan_member(archive.read(member), member.filename, label, patterns, findings, depth, release_root)
                 return
         except Exception as error:
             raise ScanError from error
 
     if looks_like_tar:
         try:
-            with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
+            archive = tarfile.open(fileobj=io.BytesIO(data), mode="r:*")  # noqa: SIM115 - closed by the with block below
+        except Exception as error:
+            if not data.startswith(COMPRESSED_TAR_SIGNATURES):
+                raise ScanError from error
+            # A compressed stream that is not a tar (such as a .pkl.gz data
+            # file): scan the decompressed payload instead.
+            scan_blob(decompress(data), f"{display}!stream", patterns, findings, depth + 1)
+            return
+        try:
+            with archive:
                 for index, member in enumerate(archive.getmembers(), start=1):
                     label = safe_member_label(display, index)
-                    scan_text(member.name, f"{label}-name", patterns, findings)
+                    vendored = depth == 0 and is_vendored_member(member.name, release_root)
+                    if not vendored:
+                        scan_text(member.name, f"{label}-name", patterns, findings)
                     scan_text(member.linkname, f"{label}-link", patterns, findings)
                     scan_text(member.uname, f"{label}-user", patterns, findings)
                     scan_text(member.gname, f"{label}-group", patterns, findings)
                     for key, value in member.pax_headers.items():
                         scan_text(key, f"{label}-pax-key", patterns, findings)
                         scan_text(value, f"{label}-pax-value", patterns, findings)
-                    if not member.isfile():
+                    if not member.isfile() or vendored:
                         continue
                     stream = archive.extractfile(member)
                     if stream is not None:
-                        scan_blob(stream.read(), label, patterns, findings, depth + 1)
+                        scan_member(stream.read(), member.name, label, patterns, findings, depth, release_root)
                 return
         except Exception as error:
             raise ScanError from error
@@ -269,7 +408,7 @@ def main() -> int:
     for path in sorted(files, key=lambda item: display_path(item, root)):
         display = display_path(path, root)
         try:
-            scan_blob(path.read_bytes(), display, patterns, findings)
+            scan_blob(path.read_bytes(), display, patterns, findings, release_root=release_root_for(path, root))
         except (OSError, ScanError):
             print(f"cannot scan {display}:1", file=sys.stderr)
             return 2
