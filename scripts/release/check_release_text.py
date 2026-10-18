@@ -5,17 +5,18 @@ from __future__ import annotations
 
 import bz2
 import gzip
-import ipaddress
 import io
+import ipaddress
 import lzma
 import os
 import re
 import struct
+import subprocess
 import sys
 import tarfile
+import tomllib
 import zipfile
 from pathlib import Path, PurePosixPath
-
 
 ALLOWED_EMAIL = "322824348+mb2090@users.noreply.github.com"
 PRIVATE_NETWORKS = (
@@ -40,6 +41,14 @@ ZIP_LOCAL_HEADER = struct.Struct("<IHHHHHIIIHH")
 ZIP_LOCAL_SIGNATURE = 0x04034B50
 # Top-level directory of a packaged release archive, e.g. cairn-0.15.4-x86_64-unknown-linux-gnu.
 RELEASE_ROOT = re.compile(r"^cairn-\d+\.\d+\.\d+(?:-[^/]+)?$")
+# Must match TARGETS in scripts/release/package.py.
+RELEASE_TARGETS = (
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+)
 OWNED_APP_ENTRIES = frozenset({"cairn", "entries", ".lock"})
 OWNED_DIST_INFO = re.compile(r"^cairn-[^/]+\.dist-info$")
 GENERIC_PATTERNS = (
@@ -198,22 +207,49 @@ def zip_local_extra(data: bytes, member: zipfile.ZipInfo, central_start: int) ->
     return data[extra_start:extra_end]
 
 
+def project_version(root: Path) -> str | None:
+    try:
+        with (root / "pyproject.toml").open("rb") as handle:
+            return str(tomllib.load(handle)["project"]["version"])
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+        return None
+
+
+def is_tracked(path: Path, root: Path) -> bool:
+    """True when git tracks the path, or when that cannot be ruled out."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", str(path.resolve())],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return True
+    return result.returncode != 1
+
+
 def release_root_for(path: Path, root: Path) -> str | None:
     """Return the archive root for a packaged release artifact in `<repo>/dist`.
 
-    Only archives the release build wrote to the repository's dist directory,
-    named `cairn-<version>-<target>.tar.gz` or `.zip`, are trusted to carry
-    bundled third-party files. Every other input is scanned in full.
+    Only an untracked archive in the repository's dist directory named
+    `cairn-<version>-<target>.tar.gz` (or `.zip` for Windows), where the
+    version is the project version and the target is a packaged release
+    target, is trusted to carry bundled third-party files. Every other input
+    is scanned in full.
     """
     try:
         if path.resolve().parent != (root / "dist").resolve():
             return None
     except OSError:
         return None
-    for suffix in (".tar.gz", ".zip"):
-        if path.name.endswith(suffix):
-            stem = path.name[: -len(suffix)]
-            return stem if RELEASE_ROOT.match(stem) and "-" in stem[len("cairn-"):] else None
+    version = project_version(root)
+    if version is None:
+        return None
+    for target in RELEASE_TARGETS:
+        suffix = ".zip" if target.endswith("windows-msvc") else ".tar.gz"
+        stem = f"cairn-{version}-{target}"
+        if path.name == stem + suffix:
+            return None if is_tracked(path, root) else stem
     return None
 
 
@@ -313,7 +349,7 @@ def scan_blob(
 
     if looks_like_tar:
         try:
-            archive = tarfile.open(fileobj=io.BytesIO(data), mode="r:*")
+            archive = tarfile.open(fileobj=io.BytesIO(data), mode="r:*")  # noqa: SIM115 - closed by the with block below
         except Exception as error:
             if not data.startswith(COMPRESSED_TAR_SIGNATURES):
                 raise ScanError from error

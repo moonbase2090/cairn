@@ -168,6 +168,9 @@ def build(repo: Path, out: Path, target: str) -> Path:
     version = project_version(repo)
     scripts = repo / "scripts" / "release"
     out.mkdir(parents=True, exist_ok=True)
+    # Never publish an archive left over from an earlier build.
+    for stale in [*out.glob("cairn-*.tar.gz"), *out.glob("cairn-*.zip"), out / "SHA256SUMS"]:
+        stale.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / f"cairn-{version}-{target}"
         root.mkdir()

@@ -336,20 +336,58 @@ def test_is_vendored_member_matches_only_bundled_third_party_paths() -> None:
     assert not scanner.is_vendored_member("python/lib/os.py", root)
 
 
-def test_release_root_for_trusts_only_packaged_artifacts_in_dist(tmp_path: Path) -> None:
-    dist = tmp_path / "dist"
-    dist.mkdir()
+def release_repo(tmp_path: Path, version: str = "0.15.5") -> Path:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "pyproject.toml").write_text(f'[project]\nname = "cairn"\nversion = "{version}"\n')
+    (tmp_path / "dist").mkdir()
     (tmp_path / "docs").mkdir()
+    return tmp_path
+
+
+def test_release_targets_match_packaging_targets() -> None:
+    spec = importlib.util.spec_from_file_location("package_release", SCANNER_PATH.parent / "package.py")
+    assert spec is not None and spec.loader is not None
+    package = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(package)
+    assert scanner.RELEASE_TARGETS == package.TARGETS
+
+
+def test_release_root_for_trusts_only_current_packaged_artifacts_in_dist(tmp_path: Path) -> None:
+    repo = release_repo(tmp_path)
+    dist = repo / "dist"
     linux = dist / "cairn-0.15.5-x86_64-unknown-linux-gnu.tar.gz"
     windows = dist / "cairn-0.15.5-x86_64-pc-windows-msvc.zip"
-    for path in (linux, windows):
+    others = [
+        repo / "docs" / linux.name,
+        dist / "cairn-0.15.4-x86_64-unknown-linux-gnu.tar.gz",
+        dist / "cairn-0.15.5-x86_64-unknown-plan9.tar.gz",
+        dist / "cairn-0.15.5-x86_64-unknown-linux-gnu.zip",
+        dist / "cairn-0.15.5-x86_64-pc-windows-msvc.tar.gz",
+        dist / "cairn-0.15.5.tar.gz",
+        dist / "SHA256SUMS",
+    ]
+    for path in (linux, windows, *others):
         path.write_bytes(b"")
-    assert scanner.release_root_for(linux, tmp_path) == "cairn-0.15.5-x86_64-unknown-linux-gnu"
-    assert scanner.release_root_for(windows, tmp_path) == "cairn-0.15.5-x86_64-pc-windows-msvc"
-    assert scanner.release_root_for(tmp_path / "docs" / linux.name, tmp_path) is None
-    assert scanner.release_root_for(dist / "cairn-0.15.5.tar.gz", tmp_path) is None
-    assert scanner.release_root_for(dist / "notes-0.15.5-x86_64.tar.gz", tmp_path) is None
-    assert scanner.release_root_for(dist / "SHA256SUMS", tmp_path) is None
+    assert scanner.release_root_for(linux, repo) == "cairn-0.15.5-x86_64-unknown-linux-gnu"
+    assert scanner.release_root_for(windows, repo) == "cairn-0.15.5-x86_64-pc-windows-msvc"
+    for path in others:
+        assert scanner.release_root_for(path, repo) is None, path.name
+
+
+def test_release_root_for_rejects_tracked_archives_and_non_repositories(tmp_path: Path) -> None:
+    repo = release_repo(tmp_path / "repo")
+    tracked = repo / "dist" / "cairn-0.15.5-x86_64-unknown-linux-gnu.tar.gz"
+    tracked.write_bytes(b"")
+    subprocess.run(["git", "-C", str(repo), "add", "-f", str(tracked)], check=True)
+    assert scanner.release_root_for(tracked, repo) is None
+
+    plain = tmp_path / "plain"
+    (plain / "dist").mkdir(parents=True)
+    (plain / "pyproject.toml").write_text('[project]\nname = "cairn"\nversion = "0.15.5"\n')
+    archive = plain / "dist" / tracked.name
+    archive.write_bytes(b"")
+    assert scanner.release_root_for(archive, plain) is None
+    assert scanner.release_root_for(archive, tmp_path / "missing") is None
 
 
 def bundled_release_archive(root: str) -> bytes:
@@ -394,20 +432,21 @@ def test_untrusted_archives_are_scanned_in_full() -> None:
 
 
 def test_main_trusts_only_dist_release_artifacts(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = release_repo(tmp_path)
     root = "cairn-0.15.5-x86_64-unknown-linux-gnu"
-    (tmp_path / "dist").mkdir()
-    (tmp_path / "dist" / f"{root}.tar.gz").write_bytes(release_archive({
-        f"{root}/python/lib/python3.12/smtplib.py": b"example: user@example.invalid",
-    }))
-    (tmp_path / "bundle").mkdir()
-    (tmp_path / "bundle" / f"{root}.tar.gz").write_bytes(release_archive({
-        f"{root}/python/lib/python3.12/smtplib.py": b"example: user@example.invalid",
-    }))
+    payload = release_archive({f"{root}/python/lib/python3.12/smtplib.py": b"example: user@example.invalid"})
+    (repo / "dist" / f"{root}.tar.gz").write_bytes(payload)
+    (repo / "dist" / "cairn-0.15.5-x86_64-unknown-plan9.tar.gz").write_bytes(payload)
+    (repo / "bundle").mkdir()
+    (repo / "bundle" / f"{root}.tar.gz").write_bytes(payload)
     monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
     monkeypatch.delenv("RELEASE_DENYLIST", raising=False)
-    monkeypatch.setattr(sys, "argv", ["check_release_text.py", str(tmp_path), "dist", "bundle"])
+    monkeypatch.setattr(sys, "argv", ["check_release_text.py", str(repo), "dist", "bundle"])
     assert scanner.main() == 1
-    assert capsys.readouterr().out.split() == [f"bundle/{root}.tar.gz!member-1:1"]
+    assert sorted(capsys.readouterr().out.split()) == [
+        f"bundle/{root}.tar.gz!member-1:1",
+        "dist/cairn-0.15.5-x86_64-unknown-plan9.tar.gz!member-1:1",
+    ]
 
 
 def test_scan_blob_scans_vendored_paths_inside_nested_archives() -> None:
