@@ -116,6 +116,7 @@ jobs:
               -f "target_commitish=$GITHUB_SHA" > "$metadata/release.json"
             jq -r '.name // ""' "$metadata/release.json" > "$metadata/release-title.txt"
             jq -r '.body // ""' "$metadata/release.json" > "$metadata/release-body.txt"
+            python3 scripts/release/clean_release_notes.py "$metadata/release-body.txt"
           fi
 
           scripts/check-release-text.sh \
