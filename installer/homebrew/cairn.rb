@@ -5,7 +5,7 @@ class Cairn < Formula
   # versioned tarball with sha256. No sha256 stanza: not used for git urls.
   url "https://github.com/moonbase2090/cairn.git", branch: "main"
   version "0.3.2"
-  license "MPL-2.0"
+  license "MIT"
 
   depends_on "uv" => :build
   depends_on "python@3.12"
