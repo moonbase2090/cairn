@@ -14,7 +14,7 @@ import struct
 import sys
 import tarfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 ALLOWED_EMAIL = "322824348+mb2090@users.noreply.github.com"
@@ -29,6 +29,7 @@ IPV6_CANDIDATE = re.compile(
     r"(?<![0-9a-f:])(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(?![0-9a-f:])",
     re.IGNORECASE,
 )
+URL_USERINFO_PREFIX = re.compile(r"://[^\s/@:]*:$")
 EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 ASCII_STRINGS = re.compile(rb"[\x20-\x7e\t]{4,}")
 UTF16_STRINGS = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
@@ -37,9 +38,13 @@ TAR_SIGNATURE = b"ustar"
 COMPRESSED_TAR_SIGNATURES = (b"\x1f\x8b", b"BZh", b"\xfd7zXZ\x00")
 ZIP_LOCAL_HEADER = struct.Struct("<IHHHHHIIIHH")
 ZIP_LOCAL_SIGNATURE = 0x04034B50
+# Top-level directory of a packaged release archive, e.g. cairn-0.15.4-x86_64-unknown-linux-gnu.
+RELEASE_ROOT = re.compile(r"^cairn-\d+\.\d+\.\d+(?:-[^/]+)?$")
+OWNED_APP_ENTRIES = frozenset({"cairn", "entries", ".lock"})
+OWNED_DIST_INFO = re.compile(r"^cairn-[^/]+\.dist-info$")
 GENERIC_PATTERNS = (
     re.compile(r"DESKTOP-[A-Z0-9]+", re.IGNORECASE),
-    re.compile(r"\.local\b", re.IGNORECASE),
+    re.compile(r"\b[a-z0-9][a-z0-9-]*\.local\b", re.IGNORECASE),
     re.compile(r"/Users/", re.IGNORECASE),
     re.compile(r"/home/[a-z]", re.IGNORECASE),
     re.compile(r"C:\\+Users", re.IGNORECASE),
@@ -97,7 +102,11 @@ def line_matches(text: str, patterns: list[re.Pattern[str]]) -> bool:
         return True
     if is_private_ip(text):
         return True
-    return any(match.group(0).casefold() != ALLOWED_EMAIL.casefold() for match in EMAIL.finditer(text))
+    return any(
+        match.group(0).casefold() != ALLOWED_EMAIL.casefold()
+        and not URL_USERINFO_PREFIX.search(text, 0, match.start())
+        for match in EMAIL.finditer(text)
+    )
 
 
 def display_path(path: Path, root: Path) -> str:
@@ -189,6 +198,49 @@ def zip_local_extra(data: bytes, member: zipfile.ZipInfo, central_start: int) ->
     return data[extra_start:extra_end]
 
 
+def is_vendored_member(name: str) -> bool:
+    """Return True for bundled third-party content in a packaged release archive.
+
+    The bundled Python runtime (`python/`) and every `app/` entry that is not
+    Cairn's own package, dist-info, or entry scripts are third-party files.
+    Their names and archive metadata are still scanned; only their contents
+    are skipped. Anything else, including unexpected layouts, is scanned.
+    """
+    parts = PurePosixPath(name.replace("\\", "/")).parts
+    if len(parts) < 3 or ".." in parts or not RELEASE_ROOT.match(parts[0]):
+        return False
+    if parts[1] == "python":
+        return True
+    if parts[1] == "app":
+        return not (parts[2] in OWNED_APP_ENTRIES or OWNED_DIST_INFO.match(parts[2]))
+    return False
+
+
+def is_checksum_manifest(name: str) -> bool:
+    parts = PurePosixPath(name.replace("\\", "/")).parts
+    return len(parts) == 2 and parts[1] == "SHA256SUMS" and bool(RELEASE_ROOT.match(parts[0]))
+
+
+def scan_member(
+    data: bytes,
+    name: str,
+    label: str,
+    patterns: list[re.Pattern[str]],
+    findings: set[str],
+    depth: int,
+) -> None:
+    """Scan one archive member; drop SHA256SUMS lines that name bundled third-party files."""
+    if depth == 0 and is_checksum_manifest(name):
+        root = PurePosixPath(name.replace("\\", "/")).parts[0]
+        lines = data.decode("utf-8", errors="replace").split("\n")
+        kept = [
+            "" if len(line.split("  ", 1)) == 2 and is_vendored_member(f"{root}/{line.split('  ', 1)[1]}") else line
+            for line in lines
+        ]
+        data = "\n".join(kept).encode("utf-8")
+    scan_blob(data, label, patterns, findings, depth + 1)
+
+
 def decompress(data: bytes) -> bytes:
     try:
         if data.startswith(b"\x1f\x8b"):
@@ -220,15 +272,17 @@ def scan_blob(
                 scan_binary(archive.comment, f"{display}-comment", patterns, findings)
                 for index, member in enumerate(archive.infolist(), start=1):
                     label = safe_member_label(display, index)
-                    scan_text(member.filename, f"{label}-name", patterns, findings)
+                    vendored = depth == 0 and is_vendored_member(member.filename)
+                    if not vendored:
+                        scan_text(member.filename, f"{label}-name", patterns, findings)
                     scan_binary(member.comment, f"{label}-comment", patterns, findings)
                     scan_binary(member.extra, f"{label}-extra", patterns, findings)
                     local_extra = zip_local_extra(data, member, archive.start_dir)
                     if local_extra != member.extra:
                         scan_binary(local_extra, f"{label}-local-extra", patterns, findings)
-                    if member.is_dir():
+                    if member.is_dir() or vendored:
                         continue
-                    scan_blob(archive.read(member), label, patterns, findings, depth + 1)
+                    scan_member(archive.read(member), member.filename, label, patterns, findings, depth)
                 return
         except Exception as error:
             raise ScanError from error
@@ -247,18 +301,20 @@ def scan_blob(
             with archive:
                 for index, member in enumerate(archive.getmembers(), start=1):
                     label = safe_member_label(display, index)
-                    scan_text(member.name, f"{label}-name", patterns, findings)
+                    vendored = depth == 0 and is_vendored_member(member.name)
+                    if not vendored:
+                        scan_text(member.name, f"{label}-name", patterns, findings)
                     scan_text(member.linkname, f"{label}-link", patterns, findings)
                     scan_text(member.uname, f"{label}-user", patterns, findings)
                     scan_text(member.gname, f"{label}-group", patterns, findings)
                     for key, value in member.pax_headers.items():
                         scan_text(key, f"{label}-pax-key", patterns, findings)
                         scan_text(value, f"{label}-pax-value", patterns, findings)
-                    if not member.isfile():
+                    if not member.isfile() or vendored:
                         continue
                     stream = archive.extractfile(member)
                     if stream is not None:
-                        scan_blob(stream.read(), label, patterns, findings, depth + 1)
+                        scan_member(stream.read(), member.name, label, patterns, findings, depth)
                 return
         except Exception as error:
             raise ScanError from error

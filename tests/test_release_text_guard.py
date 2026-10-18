@@ -309,6 +309,80 @@ def test_scan_blob_scans_compressed_streams_that_are_not_tar() -> None:
         scanner.scan_blob(b"\x1f\x8b\x08broken", "broken.gz", scanner.GENERIC_PATTERNS, set())
 
 
+def release_archive(files: dict[str, bytes]) -> bytes:
+    archive_bytes = io.BytesIO()
+    with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+        for name, content in files.items():
+            member = tarfile.TarInfo(name)
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+    return archive_bytes.getvalue()
+
+
+def test_is_vendored_member_matches_only_bundled_third_party_paths() -> None:
+    root = "cairn-0.15.5-x86_64-unknown-linux-gnu"
+    assert scanner.is_vendored_member(f"{root}/python/lib/python3.12/smtplib.py")
+    assert scanner.is_vendored_member(f"{root}/app/numpy/lib/_datasource.py")
+    assert scanner.is_vendored_member(f"{root}/app/numpy-2.5.4.dist-info/METADATA")
+    assert scanner.is_vendored_member(f"{root}\\python\\Lib\\site.py")
+
+    assert not scanner.is_vendored_member(f"{root}/app/cairn/cli.py")
+    assert not scanner.is_vendored_member(f"{root}/app/cairn-0.15.5.dist-info/METADATA")
+    assert not scanner.is_vendored_member(f"{root}/app/entries/run_cairn.py")
+    assert not scanner.is_vendored_member(f"{root}/install.sh")
+    assert not scanner.is_vendored_member(f"{root}/python/../install.sh")
+    assert not scanner.is_vendored_member("other-1.0.0/python/lib/os.py")
+    assert not scanner.is_vendored_member("python/lib/os.py")
+
+
+def test_scan_blob_skips_bundled_third_party_content_but_scans_cairn_files() -> None:
+    root = "cairn-0.15.5-x86_64-unknown-linux-gnu"
+    archive = release_archive({
+        f"{root}/python/lib/python3.12/smtplib.py": b"example: user@example.invalid",
+        f"{root}/python/lib/config/Setup.local": b"",
+        f"{root}/app/numpy/lib/_datasource.py": b"cache under /home/fixture/data",
+        f"{root}/app/cairn/cli.py": b"built in /home/fixture/checkout",
+        f"{root}/app/cairn-0.15.5.dist-info/direct_url.json": b'{"url": "file:///Users/fixture/cairn"}',
+        f"{root}/install.sh": b"contact someone@example.invalid",
+        f"{root}/SHA256SUMS": (
+            b"aa  python/lib/config/Setup.local\n"
+            b"bb  app/cairn/notes.local\n"
+        ),
+    })
+
+    findings: set[str] = set()
+    scanner.scan_blob(archive, "release.tar.gz", scanner.GENERIC_PATTERNS, findings)
+
+    assert findings == {
+        "release.tar.gz!member-4:1",
+        "release.tar.gz!member-5:1",
+        "release.tar.gz!member-6:1",
+        "release.tar.gz!member-7:2",
+    }
+
+
+def test_scan_blob_scans_vendored_paths_inside_nested_archives() -> None:
+    root = "cairn-0.15.5-x86_64-unknown-linux-gnu"
+    inner = release_archive({f"{root}/python/leak.txt": b"/Users/fixture/private"})
+    findings: set[str] = set()
+    scanner.scan_blob(inner, "outer.tar.gz", scanner.GENERIC_PATTERNS, findings, depth=1)
+    assert findings == {"outer.tar.gz!member-1:1"}
+
+
+def test_local_pattern_flags_hostnames_not_dot_local_directories() -> None:
+    patterns = list(scanner.GENERIC_PATTERNS)
+    assert scanner.line_matches("ssh build-host.local", patterns)
+    assert not scanner.line_matches("prefix=${HOME}/.local", patterns)
+    assert not scanner.line_matches('(Join-Path $env:USERPROFILE ".local")', patterns)
+
+
+def test_url_userinfo_is_not_an_email_address() -> None:
+    patterns = list(scanner.GENERIC_PATTERNS)
+    assert not scanner.line_matches('url = "postgresql://cairn:password@db.example/cairn"', patterns)
+    assert scanner.line_matches("mail someone@example.invalid", patterns)
+    assert scanner.line_matches("mailto:someone@example.invalid", patterns)
+
+
 def test_main_reports_findings_usage_and_missing_inputs(tmp_path: Path, monkeypatch, capsys) -> None:
     root = tmp_path / "repo"
     root.mkdir()
