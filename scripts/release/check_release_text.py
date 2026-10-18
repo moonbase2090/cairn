@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import bz2
+import gzip
 import ipaddress
 import io
+import lzma
 import os
 import re
 import struct
@@ -186,6 +189,17 @@ def zip_local_extra(data: bytes, member: zipfile.ZipInfo, central_start: int) ->
     return data[extra_start:extra_end]
 
 
+def decompress(data: bytes) -> bytes:
+    try:
+        if data.startswith(b"\x1f\x8b"):
+            return gzip.decompress(data)
+        if data.startswith(b"BZh"):
+            return bz2.decompress(data)
+        return lzma.decompress(data)
+    except (OSError, EOFError, ValueError, lzma.LZMAError) as error:
+        raise ScanError from error
+
+
 def scan_blob(
     data: bytes,
     display: str,
@@ -221,7 +235,16 @@ def scan_blob(
 
     if looks_like_tar:
         try:
-            with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
+            archive = tarfile.open(fileobj=io.BytesIO(data), mode="r:*")
+        except Exception as error:
+            if not data.startswith(COMPRESSED_TAR_SIGNATURES):
+                raise ScanError from error
+            # A compressed stream that is not a tar (such as a .pkl.gz data
+            # file): scan the decompressed payload instead.
+            scan_blob(decompress(data), f"{display}!stream", patterns, findings, depth + 1)
+            return
+        try:
+            with archive:
                 for index, member in enumerate(archive.getmembers(), start=1):
                     label = safe_member_label(display, index)
                     scan_text(member.name, f"{label}-name", patterns, findings)

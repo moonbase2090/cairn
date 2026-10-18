@@ -289,6 +289,26 @@ def test_scan_blob_handles_utf8_binary_and_fail_closed_archives() -> None:
         scanner.scan_blob(b"PK\x03\x04", "too-deep.zip", scanner.GENERIC_PATTERNS, set(), depth=16)
 
 
+def test_scan_blob_scans_compressed_streams_that_are_not_tar() -> None:
+    import bz2
+    import gzip
+    import lzma
+
+    clean: set[str] = set()
+    scanner.scan_blob(gzip.compress(b"\x80\x04public pickle"), "data.pkl.gz", scanner.GENERIC_PATTERNS, clean)
+    assert clean == set()
+
+    findings: set[str] = set()
+    payload = b"release from /Users/fixture/private"
+    scanner.scan_blob(gzip.compress(payload), "notes.gz", scanner.GENERIC_PATTERNS, findings)
+    scanner.scan_blob(bz2.compress(payload), "notes.bz2", scanner.GENERIC_PATTERNS, findings)
+    scanner.scan_blob(lzma.compress(payload), "notes.xz", scanner.GENERIC_PATTERNS, findings)
+    assert findings == {"notes.gz!stream:1", "notes.bz2!stream:1", "notes.xz!stream:1"}
+
+    with pytest.raises(scanner.ScanError):
+        scanner.scan_blob(b"\x1f\x8b\x08broken", "broken.gz", scanner.GENERIC_PATTERNS, set())
+
+
 def test_main_reports_findings_usage_and_missing_inputs(tmp_path: Path, monkeypatch, capsys) -> None:
     root = tmp_path / "repo"
     root.mkdir()
