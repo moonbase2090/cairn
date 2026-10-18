@@ -7,7 +7,9 @@ must pass unchanged. Nothing in the contract may touch a database driver.
 from __future__ import annotations
 
 import os
+import tomllib
 import uuid
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -26,8 +28,9 @@ from cairn.storage import (
 )
 from cairn.store import Vault
 
-CONTRACT_BACKENDS = ["sqlite", "postgres"]
+CONTRACT_BACKENDS = ["sqlite", "postgres", "aws"]
 POSTGRES_URL = os.environ.get("CAIRN_TEST_POSTGRES_URL")
+AWS_CONFIG_PATH = os.environ.get("CAIRN_TEST_AWS_CONFIG")
 
 DIMS = 8
 EMBED = "contract-embed"
@@ -90,7 +93,16 @@ def interface_members():
 
 
 class TestStorageContract:
-    @pytest.fixture(params=CONTRACT_BACKENDS)
+    @pytest.fixture(params=[
+        pytest.param(
+            backend_name,
+            marks=pytest.mark.skipif(
+                backend_name == "aws" and not AWS_CONFIG_PATH,
+                reason="CAIRN_TEST_AWS_CONFIG is not set",
+            ),
+        )
+        for backend_name in CONTRACT_BACKENDS
+    ])
     def backend_name(self, request):
         return request.param
 
@@ -111,6 +123,17 @@ class TestStorageContract:
                 conn.execute(SQL("CREATE SCHEMA {}").format(Identifier(schema)))
             url = make_conninfo(POSTGRES_URL, options=f"-c search_path={schema},public")
             config = StorageConfig(backend=backend_name, url=url)
+        elif backend_name == "aws":
+            if not AWS_CONFIG_PATH:
+                pytest.skip("CAIRN_TEST_AWS_CONFIG is not set")
+            with Path(AWS_CONFIG_PATH).expanduser().open("rb") as config_file:
+                aws_config = tomllib.load(config_file).get("storage")
+            if not isinstance(aws_config, dict) or aws_config.get("backend") != "aws":
+                pytest.fail(
+                    "CAIRN_TEST_AWS_CONFIG must point to a TOML file with "
+                    "[storage] backend = 'aws'"
+                )
+            config = StorageConfig(**aws_config)
         else:
             config = StorageConfig(backend=backend_name)
 
@@ -162,6 +185,32 @@ class TestStorageContract:
         again = open_vault()
         assert again.get("k1")["content"] == "persisted fact"
 
+    def test_sync_events_and_peer_cursors_are_persistent(self, vault, open_vault):
+        vault.insert(record("sync-k1", "durable sync event"), unit(0))
+        pack = vault.export_sync_events()
+        assert len(pack["events"]) == 1
+        assert pack["events"][0]["kind"] == "snapshot"
+        assert pack["events"][0]["snapshot"]["key"] == "sync-k1"
+        vault.set_sync_cursor("peer-a", "pull", pack["cursor"], NOW)
+        vault.set_sync_cursor("peer-a", "pull", pack["cursor"] + 1, NOW + 1,
+                              token_id="ct-other")
+        vault.close()
+        again = open_vault()
+        assert again.get_sync_cursor("peer-a", "pull") == pack["cursor"]
+        assert again.get_sync_cursor("peer-a", "pull", "ct-other") == pack["cursor"] + 1
+        assert again.list_sync_cursors() == [
+            {
+                "vault_id": again.vault_identity.vault_id,
+                "peer": "peer-a", "token_id": "", "direction": "pull",
+                "cursor": pack["cursor"], "updated_at": NOW,
+            },
+            {
+                "vault_id": again.vault_identity.vault_id,
+                "peer": "peer-a", "token_id": "ct-other", "direction": "pull",
+                "cursor": pack["cursor"] + 1, "updated_at": NOW + 1,
+            },
+        ]
+
     def test_initialization_is_idempotent(self, vault, open_vault):
         vault.insert(record("k1", "persisted fact"), unit(0))
         again = open_vault(create=True)
@@ -175,6 +224,8 @@ class TestStorageContract:
         v = open_vault(create=True)
         v.close()
         v.close()
+        with pytest.raises(Exception, match="(?i)closed"):
+            v.count()
 
     def test_reopen_handle_sees_same_data(self, vault):
         vault.insert(record("k1", "shared fact"), unit(0))
@@ -192,7 +243,12 @@ class TestStorageContract:
         vault.insert(rec, unit(0))
         row = vault.get("k1")
         for f in MEMORY_FIELDS:
+            if f in {"state_revision", "state_origin", "state_event_id"}:
+                continue
             assert row[f] == rec[f], f
+        assert row["state_revision"] == 1
+        assert row["state_origin"]
+        assert row["state_event_id"]
         assert dict(row)["key"] == "k1"
 
     def test_get_missing_is_none(self, vault):
@@ -208,14 +264,17 @@ class TestStorageContract:
     def test_server_token_lifecycle(self, vault):
         with vault.transaction():
             vault.create_server_token("ct_a", "digest-a", "agent-a", NOW)
-            vault.create_server_token("ct_b", "digest-b", "agent-b", NOW + 1)
+            vault.create_server_token("ct_b", "digest-b", "agent-b", NOW + 1, curator=True)
 
         token = vault.get_server_token("digest-a")
-        assert dict(token) == {"token_id": "ct_a", "agent_id": "agent-a", "created_at": NOW}
+        assert dict(token) == {"token_id": "ct_a", "agent_id": "agent-a",
+                               "curator": False, "created_at": NOW}
         listed = [dict(row) for row in vault.list_server_tokens()]
         assert listed == [
-            {"token_id": "ct_a", "agent_id": "agent-a", "created_at": NOW},
-            {"token_id": "ct_b", "agent_id": "agent-b", "created_at": NOW + 1},
+            {"token_id": "ct_a", "agent_id": "agent-a", "curator": False,
+             "created_at": NOW},
+            {"token_id": "ct_b", "agent_id": "agent-b", "curator": True,
+             "created_at": NOW + 1},
         ]
         assert vault.get_server_token("unknown") is None
         assert vault.get_agent_ids(["missing"]) == {}
@@ -373,7 +432,7 @@ class TestStorageContract:
 
     def test_vec_status_reports_sync(self, vault):
         vault.insert(record("a", "alpha"), unit(0))
-        assert isinstance(vault.vec_status()["vec_in_sync"], bool)
+        assert vault.vec_status()["vec_in_sync"] is True
 
     # -- documents ---------------------------------------------------------------------------
     def test_small_content_stays_inline(self, vault):
@@ -390,7 +449,7 @@ class TestStorageContract:
         assert vault.read_content(vault.get("b")) == big
         assert vault.doc_stats()["files"] == 1
 
-    def test_documents_are_refcounted(self, vault):
+    def test_documents_are_refcounted(self, vault, backend_name):
         big = "y" * 200
         vault.insert(record("a", big), unit(0))
         vault.insert(record("b", big, task_id="t2"), unit(1))
@@ -399,6 +458,9 @@ class TestStorageContract:
         assert vault.read_content(vault.get("b")) == big
         vault.delete_by_keys(["b"])
         assert vault.doc_stats()["files"] == 0
+        # AWS document objects remain until the explicit orphan sweep or the
+        # scheduled tombstone cleaner removes them from the versioned bucket.
+        assert vault.sweep_orphan_docs() == (1 if backend_name == "aws" else 0)
         assert vault.sweep_orphan_docs() == 0
 
     def test_missing_document_is_loud(self, vault):

@@ -11,15 +11,23 @@ cairn_whoami, cairn_gc, cairn_export, cairn_import, cairn_ingest.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import signal
+import secrets
+import subprocess
 import sys
+import time
 from pathlib import Path
+from urllib.error import URLError
 
 from cairn import __version__ as CAIRN_VERSION
 from cairn.client import CairnClient
 from cairn.embed import format_embedder_hint, get_embedder, parse_embedder_hint
 from cairn.storage import open_backend
 from cairn.tutorial import howto_text
+from cairn.models import now_epoch
+from cairn.serve import health_from, pull_from, push_to, resolve_conflict_to, sync_handshake
 
 SERVER_NAME = "cairn"
 SERVER_VERSION = CAIRN_VERSION
@@ -55,6 +63,18 @@ TOOL_DEFS = [
      "inputSchema": {"type": "object", "properties": {"topic": {"type": "string"}}}},
     {"name": "cairn_whoami", "description": "This seat's identity, embedder, and vault size.",
      "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "cairn_secret_scan",
+     "description": "Read-only preflight scan of existing vault content; returns category counts without content or memory identifiers.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "cairn_aws_storage",
+     "description": "Check AWS tool versions, preview an AWS plan, inspect deployment status, explicitly apply a reviewed plan, or tear down its stack while retaining vault data. Plan uses the configured AWS region unless you pass one. Apply and teardown require the exact confirmation phrase returned by a prior call. Credentials stay in the signed-in AWS CLI profile.",
+     "inputSchema": {"type": "object", "properties": {
+         "action": {"type": "string", "enum": ["check", "plan", "apply", "status", "teardown"]},
+         "region": {"type": "string", "description": "Optional region override; otherwise Cairn reads the selected AWS CLI profile's configured region."},
+         "profile": {"type": "string", "description": "Optional AWS CLI profile; defaults to the standard signed-in CLI identity."},
+         "enable_sync_endpoint": {"type": "boolean", "default": False, "description": "Opt in to a public API Gateway sync endpoint protected by per-agent Cairn tokens."},
+         "plan_id": {"type": "string"}, "confirm": {"type": "string"}},
+         "required": ["action"]}},
     {"name": "cairn_gc", "description": "Lifecycle sweep. Dry-run unless apply=true (promote stale superseded, delete archived/expired, circuit-breaker capped).",
      "inputSchema": {"type": "object", "properties": {"apply": {"type": "boolean", "default": False}}}},
     {"name": "cairn_export", "description": "Export a sync pack (merge it elsewhere with cairn_import).",
@@ -66,7 +86,35 @@ TOOL_DEFS = [
          "dir": {"type": "string"}, "team": {"type": "string"},
          "memory_type": {"type": "string", "default": "document"}},
          "required": ["dir", "team"]}},
+    {"name": "cairn_sync", "description": "Push or pull resumable sync deltas, inspect peer cursors and conflicts, or check server health.",
+     "inputSchema": {"type": "object", "properties": {
+         "action": {"type": "string", "enum": ["push", "pull", "status", "health"]},
+         "url": {"type": "string"}, "token": {"type": "string"},
+         "tls_ca": {"type": "string"}}, "required": ["action"]}},
+    {"name": "cairn_serve", "description": "Start, inspect, health-check, or stop this vault's sync server.",
+     "inputSchema": {"type": "object", "properties": {
+         "action": {"type": "string", "enum": ["start", "status", "health", "stop"]},
+         "host": {"type": "string", "default": "127.0.0.1"},
+         "port": {"type": "integer", "default": 8778},
+         "token_mode": {"type": "string", "enum": ["shared", "per-agent"], "default": "per-agent"},
+         "token": {"type": "string"}, "tls_cert": {"type": "string"},
+         "tls_key": {"type": "string"}, "url": {"type": "string"},
+         "tls_ca": {"type": "string"}}, "required": ["action"]}},
+    {"name": "cairn_token", "description": "Create, list, or revoke per-agent server tokens. A created token is shown once.",
+     "inputSchema": {"type": "object", "properties": {
+         "action": {"type": "string", "enum": ["create", "list", "revoke"]},
+         "agent": {"type": "string"}, "curator": {"type": "boolean", "default": False},
+         "token_id": {"type": "string"}}, "required": ["action"]}},
+    {"name": "cairn_conflicts", "description": "List competing corrections or resolve one by selecting its active winner.",
+     "inputSchema": {"type": "object", "properties": {
+         "action": {"type": "string", "enum": ["list", "resolve"]},
+         "base_key": {"type": "string"}, "winner_key": {"type": "string"},
+         "url": {"type": "string"}, "token": {"type": "string"},
+         "tls_ca": {"type": "string"}},
+         "required": ["action"]}},
 ]
+
+_SERVERS: dict[str, subprocess.Popen] = {}
 
 
 def make_client() -> CairnClient:
@@ -94,12 +142,22 @@ def _dump(obj) -> str:
     return json.dumps(obj, indent=2, default=str)
 
 
+def _with_vault_identity(client: CairnClient, value):
+    identity = client.vault.vault_identity
+    fields = {"vault_name": identity.name, "vault_id": identity.vault_id}
+    if isinstance(value, dict):
+        return {**value, **fields}
+    if isinstance(value, list):
+        return [{**item, **fields} for item in value]
+    return value
+
+
 def _tool_retrieve(client: CairnClient, args: dict) -> str:
     filters = {k: args[k] for k in ("task_id", "team_id", "memory_type") if args.get(k)}
     recs = client.retrieve_memory(
         args["query"], filters or None, int(args.get("top_k", 5)), args.get("min_sim"),
     )
-    return _dump([m.to_dict() for m in recs])
+    return _dump(_with_vault_identity(client, [m.to_dict() for m in recs]))
 
 
 def _tool_store(client: CairnClient, args: dict) -> str:
@@ -108,7 +166,7 @@ def _tool_store(client: CairnClient, args: dict) -> str:
         args.get("memory_type", "semantic"), args.get("origin", "agent"),
         args.get("supersedes_key"), args.get("mode", "auto"),
     )
-    return _dump(res.to_dict())
+    return _dump(_with_vault_identity(client, res.to_dict()))
 
 
 def _tool_list(client: CairnClient, args: dict) -> str:
@@ -119,7 +177,7 @@ def _tool_list(client: CairnClient, args: dict) -> str:
     if not filters:
         raise ValueError("list_memories needs task_id, canonical_id, or search")
     recs = client.list_memories(filters, int(args.get("limit", 100)))
-    return _dump([m.to_dict() for m in recs])
+    return _dump(_with_vault_identity(client, [m.to_dict() for m in recs]))
 
 
 def _tool_get(client: CairnClient, args: dict) -> str:
@@ -140,10 +198,27 @@ def _tool_howto(_client: CairnClient, args: dict) -> str:
 
 
 def _tool_whoami(client: CairnClient, _args: dict) -> str:
+    identity = client.vault.vault_identity
+    role = "curator" if any(
+        token["agent_id"] == client.agent_id and bool(token["curator"])
+        for token in client.vault.list_server_tokens()
+    ) else "member"
     return json.dumps({
-        "agent": client.agent_id, "embedder": client.embedder.name,
-        "dims": client.embedder.dims, "memories": client.vault.count(),
+        "vault_name": identity.name, "vault_id": identity.vault_id,
+        "agent": client.agent_id, "storage": client.vault.name, "role": role,
+        "embedder": client.embedder.name, "dims": client.embedder.dims,
+        "memories": client.vault.count(),
     }, default=str)
+
+
+def _tool_secret_scan(client: CairnClient, _args: dict) -> str:
+    return _dump(client.preflight_secret_scan())
+
+
+def _tool_aws_storage(client: CairnClient, args: dict) -> str:
+    from cairn.aws_control import run_action
+
+    return _dump(run_action(client, args))
 
 
 def _tool_gc(client: CairnClient, args: dict) -> str:
@@ -168,6 +243,226 @@ def _tool_ingest(client: CairnClient, args: dict) -> str:
     ), default=str)
 
 
+def _tool_sync(client: CairnClient, args: dict) -> str:
+    action = args.get("action")
+    from cairn.cli import storage_config
+
+    url = (args.get("url") or os.environ.get("CAIRN_URL")
+           or storage_config(client.vault.vault_dir).sync_endpoint)
+    if action == "status":
+        if not url:
+            return _dump(client.sync_status())
+        token = args.get("token") or os.environ.get("CAIRN_TOKEN", "")
+        handshake = sync_handshake(
+            url, client.vault.vault_identity.vault_id, token=token,
+            cafile=args.get("tls_ca"),
+        )
+        return _dump(client.sync_status(handshake["origin_id"]))
+    if action == "health":
+        if not url:
+            raise ValueError("cairn_sync health needs url or CAIRN_URL")
+        return _dump(health_from(url, cafile=args.get("tls_ca")))
+    if action not in {"push", "pull"}:
+        raise ValueError("cairn_sync action must be push, pull, status, or health")
+    if not url:
+        raise ValueError("cairn_sync push/pull needs url or CAIRN_URL")
+    token = args.get("token") or os.environ.get("CAIRN_TOKEN", "")
+    handshake = sync_handshake(
+        url, client.vault.vault_identity.vault_id, token=token,
+        cafile=args.get("tls_ca"),
+    )
+    token_id = handshake["token_id"]
+    peer = handshake["origin_id"]
+    if action == "push":
+        after = client.vault.get_sync_cursor(peer, "push", token_id)
+        pack = client.export_delta(after)
+        result = push_to(url, pack, token=token, cafile=args.get("tls_ca"))
+        cursor = int(result.get("cursor", after))
+        if cursor < after or cursor > pack["cursor"]:
+            raise ValueError("server returned an invalid push cursor")
+        with client.vault.transaction():
+            client.vault.set_sync_cursor(peer, "push", cursor, now_epoch(), token_id)
+        return _dump(result)
+    after = client.vault.get_sync_cursor(peer, "pull", token_id)
+    pack = pull_from(url, token=token, cafile=args.get("tls_ca"), after=after,
+                     peer=client.vault.sync_origin_id())
+    return _dump(client.import_sync_pack(
+        pack, peer=peer, direction="pull", token_id=token_id,
+    ))
+
+
+def _serve_state_path(client: CairnClient) -> Path:
+    return client.vault.vault_dir / "sync-server.pid"
+
+
+def _tool_serve(client: CairnClient, args: dict) -> str:
+    action = args.get("action")
+    state_path = _serve_state_path(client)
+    if action == "start":
+        host = str(args.get("host", "127.0.0.1"))
+        port = int(args.get("port", 8778))
+        mode = args.get("token_mode", "per-agent")
+        if mode not in {"shared", "per-agent"}:
+            raise ValueError("token_mode must be shared or per-agent")
+        existing = _read_serve_state(state_path)
+        if existing and _process_running(existing["pid"]):
+            return _dump({"running": True, "pid": existing["pid"], "url": existing["url"],
+                          "already_running": True})
+        tls_cert, tls_key = args.get("tls_cert"), args.get("tls_key")
+        if bool(tls_cert) != bool(tls_key):
+            raise ValueError("HTTPS needs both tls_cert and tls_key")
+        token = args.get("token") or os.environ.get("CAIRN_TOKEN")
+        child_env = dict(os.environ)
+        if mode == "per-agent":
+            child_env.pop("CAIRN_TOKEN", None)
+        elif not token:
+            raise ValueError("shared token mode needs token or CAIRN_TOKEN")
+        else:
+            child_env["CAIRN_TOKEN"] = token
+        logfile = client.vault.vault_dir / "sync-server.log"
+        command = [sys.executable, "-m", "cairn.cli", "--vault",
+                   str(client.vault.vault_dir), "--agent-id", client.agent_id,
+                   "serve", "--host", host, "--port", str(port), "--token-mode", mode]
+        if tls_cert:
+            command.extend(["--tls-cert", str(tls_cert), "--tls-key", str(tls_key)])
+        with open(logfile, "ab") as log:
+            proc = subprocess.Popen(
+                command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                env=child_env, start_new_session=True,
+            )
+        _SERVERS[str(state_path)] = proc
+        scheme = "https" if tls_cert else "http"
+        url = f"{scheme}://{host}:{port}"
+        deadline = time.monotonic() + 5
+        while True:
+            if proc.poll() is not None:
+                _SERVERS.pop(str(state_path), None)
+                raise RuntimeError(f"sync server exited during startup; inspect {logfile}")
+            try:
+                if health_from(url, cafile=args.get("tls_ca")).get("ok") is True:
+                    break
+            except (URLError, OSError, TimeoutError):
+                pass
+            if time.monotonic() >= deadline:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                _SERVERS.pop(str(state_path), None)
+                raise RuntimeError(f"sync server did not become healthy; inspect {logfile}")
+            time.sleep(0.05)
+        state_path.write_text(json.dumps({"pid": proc.pid, "url": url, "mode": mode}))
+        return _dump({"running": True, "pid": proc.pid, "url": url, "token_mode": mode})
+    if action == "status":
+        state = _read_serve_state(state_path)
+        proc = _SERVERS.get(str(state_path))
+        running = bool(state and (proc.poll() is None if proc else _process_running(state["pid"])))
+        return _dump({"running": running, **(state or {})})
+    if action == "health":
+        url = args.get("url")
+        if not url:
+            state = _read_serve_state(state_path)
+            url = state["url"] if state else None
+        if not url:
+            raise ValueError("cairn_serve health needs url or a running server")
+        return _dump(health_from(url, cafile=args.get("tls_ca")))
+    if action == "stop":
+        state = _read_serve_state(state_path)
+        proc = _SERVERS.get(str(state_path))
+        running = proc.poll() is None if proc else bool(state and _process_running(state["pid"]))
+        if not state or not running:
+            state_path.unlink(missing_ok=True)
+            return _dump({"running": False, "stopped": False})
+        pid = int(state["pid"])
+        if proc:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+        else:
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and _process_running(pid):
+                time.sleep(0.05)
+            if _process_running(pid):
+                raise RuntimeError(f"sync server process {pid} did not stop")
+        _SERVERS.pop(str(state_path), None)
+        state_path.unlink(missing_ok=True)
+        return _dump({"running": False, "stopped": True})
+    raise ValueError("cairn_serve action must be start, status, health, or stop")
+
+
+def _read_serve_state(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) and isinstance(data.get("pid"), int) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _process_running(pid: int) -> bool:
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _tool_token(client: CairnClient, args: dict) -> str:
+    action = args.get("action")
+    if action == "create":
+        agent_id = str(args.get("agent", "")).strip()
+        if not agent_id:
+            raise ValueError("cairn_token create needs a non-empty agent")
+        token_id = "ct_" + secrets.token_hex(6)
+        token = "cairn_" + secrets.token_urlsafe(32)
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        curator = bool(args.get("curator", False))
+        with client.vault.transaction():
+            client.vault.create_server_token(token_id, digest, agent_id, now_epoch(), curator)
+        return _dump({"token_id": token_id, "agent_id": agent_id,
+                      "curator": curator, "token": token})
+    if action == "list":
+        return _dump([dict(row) for row in client.vault.list_server_tokens()])
+    if action == "revoke":
+        token_id = str(args.get("token_id", ""))
+        if not token_id:
+            raise ValueError("cairn_token revoke needs token_id")
+        with client.vault.transaction():
+            revoked = client.vault.delete_server_token(token_id)
+        if not revoked:
+            raise ValueError(f"no active token with id {token_id!r}")
+        return _dump({"token_id": token_id, "revoked": True})
+    raise ValueError("cairn_token action must be create, list, or revoke")
+
+
+def _tool_conflicts(client: CairnClient, args: dict) -> str:
+    action = args.get("action")
+    if action == "list":
+        return _dump(client.sync_status()["conflicts"])
+    if action == "resolve":
+        if not args.get("base_key") or not args.get("winner_key"):
+            raise ValueError("cairn_conflicts resolve needs base_key and winner_key")
+        url = args.get("url") or os.environ.get("CAIRN_URL")
+        token = args.get("token") or os.environ.get("CAIRN_TOKEN", "")
+        if url:
+            return _dump(resolve_conflict_to(
+                url, args["base_key"], args["winner_key"], token=token,
+                agent_id=client.agent_id, cafile=args.get("tls_ca"),
+            ))
+        return _dump(client.resolve_competing_correction(args["base_key"], args["winner_key"]))
+    raise ValueError("cairn_conflicts action must be list or resolve")
+
+
 _TOOLS = {
     "retrieve_memory": _tool_retrieve,
     "store_memory": _tool_store,
@@ -177,10 +472,16 @@ _TOOLS = {
     "restore_memory": _tool_restore,
     "cairn_howto": _tool_howto,
     "cairn_whoami": _tool_whoami,
+    "cairn_secret_scan": _tool_secret_scan,
+    "cairn_aws_storage": _tool_aws_storage,
     "cairn_gc": _tool_gc,
     "cairn_export": _tool_export,
     "cairn_import": _tool_import,
     "cairn_ingest": _tool_ingest,
+    "cairn_sync": _tool_sync,
+    "cairn_serve": _tool_serve,
+    "cairn_token": _tool_token,
+    "cairn_conflicts": _tool_conflicts,
 }
 
 

@@ -25,10 +25,13 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
+import stat
 import sys
 import tomllib
+from dataclasses import asdict
 from pathlib import Path
 
 from cairn import __version__
@@ -42,8 +45,15 @@ from cairn.galaxy import galaxy as render_galaxy
 from cairn.galaxy import galaxy_alive, galaxy_url
 from cairn.ingest import ingest_dir
 from cairn.models import now_epoch
-from cairn.serve import pull_from, push_to, serve_forever
+from cairn.serve import (
+    pull_from,
+    push_to,
+    resolve_conflict_to,
+    serve_forever,
+    sync_handshake,
+)
 from cairn.storage import SpaceMismatchError, StorageConfig, open_backend
+from cairn.skill_install import SkillInstallError, install_skill
 
 DEFAULT_EMBED = "hash"
 
@@ -91,25 +101,40 @@ def _config_storage(path: Path) -> StorageConfig | None:
     if not isinstance(storage, dict):
         # ValueError, not TypeError: the CLI and cairn-mcp report ValueErrors cleanly.
         raise ValueError(f"{path}: [storage] must be a table")  # noqa: TRY004
+    allowed = {
+        "backend", "url", "region", "profile", "vault_id", "vault_name", "table", "cache_table",
+        "content_bucket", "vector_bucket", "vector_index", "vector_index_arn", "sync_endpoint",
+    }
+    unknown = set(storage) - allowed
+    if unknown:
+        raise ValueError(f"{path}: unknown [storage] setting(s): {', '.join(sorted(unknown))}")
     backend = storage.get("backend")
     if backend is not None and not isinstance(backend, str):
         raise ValueError(f"{path}: [storage] backend must be a string")
-    url = storage.get("url")
-    if url is not None and not isinstance(url, str):
-        raise ValueError(f"{path}: [storage] url must be a string")
+    values = {key: storage.get(key) for key in allowed - {"backend"}}
+    for key, value in values.items():
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{path}: [storage] {key} must be a string")
     if backend is None:
-        if url is not None:
-            raise ValueError(f"{path}: [storage] url requires backend = 'postgres'")
+        configured = sorted(key for key, value in values.items() if value is not None)
+        if configured:
+            if configured == ["url"]:
+                raise ValueError(f"{path}: [storage] url requires backend = 'postgres'")
+            raise ValueError(f"{path}: [storage] {configured[0]} requires a backend setting")
         return None
     try:
-        return StorageConfig(backend=backend, url=url)
+        return StorageConfig(backend=backend, **values)
     except ValueError as e:
         raise ValueError(f"{path}: {e}") from e
 
 
 def storage_config(vdir: Path) -> StorageConfig:
-    """Use the vault's [storage] settings, then ~/.cairn/config.toml, then sqlite."""
-    for path in (vdir / "config.toml", Path.home() / ".cairn" / "config.toml"):
+    """Use vault settings, generated AWS settings, then the home config or SQLite."""
+    for path in (
+        vdir / "config.toml",
+        vdir / "aws" / "storage.toml",
+        Path.home() / ".cairn" / "config.toml",
+    ):
         config = _config_storage(path)
         if config is not None:
             return config
@@ -310,6 +335,8 @@ def build_parser() -> argparse.ArgumentParser:
     tk_sub = tk.add_subparsers(dest="token_action", required=True)
     tk_create = tk_sub.add_parser("create", help="Create a token for one agent.")
     tk_create.add_argument("--agent", required=True, help="Agent identity allowed to push memories.")
+    tk_create.add_argument("--curator", action="store_true",
+                           help="Allow cross-agent state changes and conflict resolution.")
     tk_sub.add_parser("list", help="List active server tokens.")
     tk_revoke = tk_sub.add_parser("revoke", help="Revoke a server token.")
     tk_revoke.add_argument("token_id")
@@ -336,6 +363,23 @@ def build_parser() -> argparse.ArgumentParser:
     sub.choices["pull"].add_argument("--since", type=int, default=None)
     sub.choices["pull"].add_argument("--out", default=None, help="Save pack instead of importing.")
 
+    sy = sub.add_parser("sync", help="Inspect resumable sync state.")
+    sy_sub = sy.add_subparsers(dest="sync_action", required=True)
+    sy_status = sy_sub.add_parser("status", help="Show peer cursors and competing corrections.")
+    sy_status.add_argument("url", nargs="?", help="Limit status to this peer URL.")
+    sy_status.add_argument("--token", default=None, help="Bearer token (default: $CAIRN_TOKEN).")
+    sy_status.add_argument("--tls-ca", default=None, help="CA bundle PEM for an https:// peer.")
+
+    cf = sub.add_parser("conflicts", help="List or resolve competing corrections.")
+    cf_sub = cf.add_subparsers(dest="conflicts_action", required=True)
+    cf_sub.add_parser("list", help="List unresolved competing corrections.")
+    cf_resolve = cf_sub.add_parser("resolve", help="Choose the winning correction.")
+    cf_resolve.add_argument("base_key")
+    cf_resolve.add_argument("winner_key")
+    cf_resolve.add_argument("--url", default=None)
+    cf_resolve.add_argument("--token", default=None)
+    cf_resolve.add_argument("--tls-ca", default=None)
+
     gx = sub.add_parser("galaxy", help="Host the vault starfield on a local HTTP server.")
     gx.add_argument("--out", default=None, help="Also write the HTML to this path.")
     gx.add_argument("--limit", type=int, default=2000)
@@ -346,12 +390,20 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Write --out only; do not start the HTTP server.")
 
     sub.add_parser("whoami", help="Show effective identity + vault + embedder.")
+    sub.add_parser(
+        "secret-scan",
+        help="Read-only preflight scan of existing vault content; reports categories only.",
+    )
     doc = sub.add_parser("doctor", help="Diagnose the vault and environment.")
     doc.add_argument("--repair-vec", action="store_true",
                      help="Rebuild mem_vec from stored embeddings when the index is incomplete.")
     bg = sub.add_parser("bootstrap", help="Wire this project for agents: .mcp.json + AGENTS.md + onboarding pack.")
     bg.add_argument("--no-seed", action="store_true", help="Skip seeding the onboarding pack.")
     bg.add_argument("--server", default="cairn-mcp", help="MCP server command for .mcp.json.")
+    bg.add_argument(
+        "--name", default="cairn",
+        help="MCP entry to add or update (default: cairn; use cairn-personal for another vault).",
+    )
     bg.add_argument("--agent-id", default=None, help="Seat identity (<harness>-<slug>); updates project.json and .mcp.json.")
     lg = sub.add_parser("log", help="Show the audit trail.")
     lg.add_argument("--limit", type=int, default=20)
@@ -360,6 +412,37 @@ def build_parser() -> argparse.ArgumentParser:
     ed.add_argument("--sock", default=None)
     ed.add_argument("--idle", type=int, default=900)
     ed.add_argument("--dims", type=int, default=None)
+
+    skills = sub.add_parser(
+        "skills",
+        help="Install the Cairn Agent Skill for coding agents.",
+        description="Manage the bundled Cairn Agent Skill.",
+        epilog="Enable install with CAIRN_EXPERIMENTAL_SKILLS=1.",
+    )
+    skills_sub = skills.add_subparsers(dest="skills_action", required=True)
+    skill_install = skills_sub.add_parser(
+        "install",
+        help="Install the skill in user-level agent skill directories.",
+        description=(
+            "Install the Cairn Agent Skill. Different existing files are preserved "
+            "unless --force is set."
+        ),
+        epilog="Enable this experimental command with CAIRN_EXPERIMENTAL_SKILLS=1.",
+    )
+    skill_install.add_argument(
+        "--agent",
+        choices=[
+            "all", "codex", "claude", "cursor", "kiro", "muse", "shared", "detected",
+        ],
+        default="all",
+        help="Target agent (default: all).",
+    )
+    skill_install.add_argument(
+        "--check", action="store_true", help="Report destination state without writing files."
+    )
+    skill_install.add_argument(
+        "--force", action="store_true", help="Replace an existing skill file."
+    )
     return p
 
 
@@ -383,7 +466,14 @@ AGENTS_BEGIN = "<!-- cairn:begin -->"
 AGENTS_END = "<!-- cairn:end -->"
 
 
+def _validate_identity_token(label: str, value: str) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+        raise ValueError(f"{label} must be a single token containing only letters, numbers, '.', '_' or '-'")
+
+
 def agents_section(project: str, team: str, agent: str) -> str:
+    _validate_identity_token("team", team)
+    _validate_identity_token("agent id", agent)
     return f"""{AGENTS_BEGIN}
 ## Shared memory (cairn)
 
@@ -403,8 +493,10 @@ no API keys). Your seat: `{agent}` (one session, one project, one id).
 
 ### MCP setup
 
-`cairn bootstrap` registers the `cairn` MCP server in `.mcp.json` (stdio, no keys —
-it reads `$CAIRN_DIR`). Each seat overrides its identity:
+`cairn bootstrap` adds or updates only the named MCP server in `.mcp.json`
+(stdio, no keys — it reads `$CAIRN_DIR`). The project vault stays the default;
+use a descriptive name for another vault and add only approved entries to each
+agent host. Each seat overrides its identity:
 
 ```json
 {{"mcpServers": {{"cairn": {{"command": "cairn-mcp", "env": {{
@@ -440,7 +532,12 @@ def resolve_init_embedder(spec: str):
     except ImportError:
         if spec != "fastembed":
             raise
-        notice = 'fastembed not installed — using hash (run `pip install -e ".[embed]"` to upgrade later)'
+        notice = (
+            "fastembed not installed — this new vault will use hash. To create a "
+            "fastembed vault, rerun the Cairn installer with "
+            "`CAIRN_INSTALL_EMBED=fastembed`, then initialize with "
+            "`--embed-spec fastembed`."
+        )
         return get_embedder("hash"), "hash", notice
 
 
@@ -485,11 +582,16 @@ def _cmd_init(args, flag_agent_id) -> int:
         agent = seat
     spec = args.embed_spec or "fastembed"
     try:
+        _validate_identity_token("team", team)
+        _validate_identity_token("agent id", agent)
         config = storage_config(vdir)
         if config.backend == "sqlite" and (vdir / "vault.db").exists():
             emit({"initialized": str(vdir / "vault.db"), "note": "already exists"}, args.json)
             return 0
         embedder, effective, notice = resolve_init_embedder(spec)
+        vdir.mkdir(parents=True, exist_ok=True)
+        (vdir / "project.json").write_text(json.dumps(
+            {"project": project, "slug": slug, "team": team, "agent_id": agent}, indent=2))
         open_backend(
             vdir, embedder.name, embedder.dims, config=config,
             create=True, doc_threshold=args.doc_threshold,
@@ -499,8 +601,6 @@ def _cmd_init(args, flag_agent_id) -> int:
         return 2
     write_embedder_hint(vdir, effective, embedder.dims)
     ensure_vault_gitignore(vdir)
-    (vdir / "project.json").write_text(json.dumps(
-        {"project": project, "slug": slug, "team": team, "agent_id": agent}, indent=2))
     out = {
         "initialized": (str(vdir / "vault.db") if config.backend == "sqlite" else config.backend),
         "storage": config.backend, "embedder": embedder.name,
@@ -635,12 +735,14 @@ def _cmd_token(args, client) -> int:
         token = "cairn_" + secrets.token_urlsafe(32)
         digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
         with client.vault.transaction():
-            client.vault.create_server_token(token_id, digest, agent_id, now_epoch())
+            client.vault.create_server_token(token_id, digest, agent_id, now_epoch(), args.curator)
         if args.json:
-            emit({"token_id": token_id, "agent_id": agent_id, "token": token}, True)
+            emit({"token_id": token_id, "agent_id": agent_id, "curator": args.curator,
+                  "token": token}, True)
         else:
             print(f"token_id: {token_id}")
             print(f"agent_id: {agent_id}")
+            print(f"curator: {str(args.curator).lower()}")
             print(f"token: {token}")
             print("Save this token now; it will not be shown again.")
         return 0
@@ -651,7 +753,8 @@ def _cmd_token(args, client) -> int:
             emit(tokens, True)
         elif tokens:
             for item in tokens:
-                print(f"{item['token_id']}  {item['agent_id']}  created {item['created_at']}")
+                role = "curator" if item["curator"] else "agent"
+                print(f"{item['token_id']}  {item['agent_id']}  {role}  created {item['created_at']}")
         else:
             print("(no active tokens)")
         return 0
@@ -685,17 +788,75 @@ def _cmd_serve(args, client) -> int:
 
 
 def _cmd_push(args, client) -> int:
-    emit(push_to(args.url, client.export(), token_for(args), cafile=args.tls_ca), args.json)
+    token = token_for(args)
+    handshake = sync_handshake(
+        args.url, client.vault.vault_identity.vault_id, token=token, cafile=args.tls_ca,
+    )
+    token_id = handshake["token_id"]
+    peer = handshake["origin_id"]
+    after = client.vault.get_sync_cursor(peer, "push", token_id)
+    pack = client.export_delta(after)
+    result = push_to(args.url, pack, token, cafile=args.tls_ca)
+    cursor = int(result.get("cursor", after))
+    if cursor < after or cursor > pack["cursor"]:
+        raise ValueError("server returned an invalid push cursor")
+    with client.vault.transaction():
+        client.vault.set_sync_cursor(peer, "push", cursor, now_epoch(), token_id)
+    emit(result, args.json)
     return 0
 
 
 def _cmd_pull(args, client) -> int:
-    pack = pull_from(args.url, token_for(args), args.since, cafile=args.tls_ca)
+    token_id = ""
+    peer = args.url
+    if args.since is not None:
+        pack = pull_from(args.url, token_for(args), args.since, cafile=args.tls_ca)
+    else:
+        token = token_for(args)
+        handshake = sync_handshake(
+            args.url, client.vault.vault_identity.vault_id, token=token,
+            cafile=args.tls_ca,
+        )
+        token_id = handshake["token_id"]
+        peer = handshake["origin_id"]
+        after = client.vault.get_sync_cursor(peer, "pull", token_id)
+        pack = pull_from(args.url, token, cafile=args.tls_ca, after=after,
+                         peer=client.vault.sync_origin_id())
     if args.out:
         Path(args.out).write_text(json.dumps(pack, default=str))
-        emit({"pulled": len(pack["memories"]), "out": args.out}, args.json)
+        count = len(pack.get("events", pack.get("memories", [])))
+        emit({"pulled": count, "out": args.out}, args.json)
+    elif pack.get("pack") == "cairn-sync-2":
+        emit(client.import_sync_pack(
+            pack, peer=peer, direction="pull", token_id=token_id,
+        ), args.json)
     else:
         emit(client.import_pack(pack), args.json)
+    return 0
+
+
+def _cmd_sync(args, client) -> int:
+    peer = None
+    if args.url:
+        handshake = sync_handshake(
+            args.url, client.vault.vault_identity.vault_id,
+            token=token_for(args), cafile=args.tls_ca,
+        )
+        peer = handshake["origin_id"]
+    emit(client.sync_status(peer), args.json)
+    return 0
+
+
+def _cmd_conflicts(args, client) -> int:
+    if args.conflicts_action == "list":
+        emit(client.sync_status()["conflicts"], args.json)
+    else:
+        if args.url:
+            emit(resolve_conflict_to(args.url, args.base_key, args.winner_key,
+                                     token_for(args), agent_id=client.agent_id,
+                                     cafile=args.tls_ca), args.json)
+        else:
+            emit(client.resolve_competing_correction(args.base_key, args.winner_key), args.json)
     return 0
 
 
@@ -705,8 +866,52 @@ def _open_browser(url: str) -> None:
     webbrowser.open(url)
 
 
-def _galaxy_reuse(args, html_info) -> int:
-    url = galaxy_url(args.host, args.port)
+def _galaxy_token_path(client) -> Path:
+    return Path(client.vault.vault_dir) / ".galaxy-access"
+
+
+def _read_galaxy_token(client) -> str | None:
+    path = _galaxy_token_path(client)
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            token = stream.read().strip()
+    except OSError:
+        return None
+    return token or None
+
+
+def _write_galaxy_token(client, token: str) -> None:
+    path = _galaxy_token_path(client)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise OSError("galaxy token path is not a regular file")
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write(token)
+
+
+def _remove_galaxy_token(client, token: str) -> None:
+    path = _galaxy_token_path(client)
+    if _read_galaxy_token(client) == token:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def _galaxy_reuse(args, html_info, client) -> int:
+    token = _read_galaxy_token(client)
+    if token is None:
+        print("error: running galaxy has no readable access token; stop it and restart", file=sys.stderr)
+        return 1
+    url = galaxy_url(args.host, args.port, token)
     html_info.update({"url": url, "host": args.host, "port": args.port, "reused": True})
     emit(html_info, args.json)
     if not args.json:
@@ -727,8 +932,14 @@ def _galaxy_serve(args, client, html_info) -> int:
             file=sys.stderr,
         )
         return 1
+    try:
+        _write_galaxy_token(client, srv.access_token)
+    except OSError as error:
+        srv.server_close()
+        print(f"error: cannot protect galaxy access token: {error}", file=sys.stderr)
+        return 1
     host, port = srv.server_address[:2]
-    url = galaxy_url(str(host), int(port))
+    url = galaxy_url(str(host), int(port), srv.access_token)
     html_info["url"] = url
     html_info["host"] = host
     html_info["port"] = port
@@ -743,6 +954,7 @@ def _galaxy_serve(args, client, html_info) -> int:
         pass
     finally:
         srv.server_close()
+        _remove_galaxy_token(client, srv.access_token)
     return 0
 
 
@@ -755,19 +967,30 @@ def _cmd_galaxy(args, client) -> int:
         return 0
     html_info = render_galaxy(client, args.out, args.limit)
     if args.port and galaxy_alive(args.host, args.port):
-        return _galaxy_reuse(args, html_info)
+        return _galaxy_reuse(args, html_info, client)
     return _galaxy_serve(args, client, html_info)
 
 
 def _cmd_whoami(args, client) -> int:
-    vdir = vault_dir(args)
+    identity = client.vault.vault_identity
+    role = "curator" if any(
+        token["agent_id"] == client.agent_id and bool(token["curator"])
+        for token in client.vault.list_server_tokens()
+    ) else "member"
     emit({
         "agent": client.agent_id,
-        "vault": str(vdir / "vault.db") if client.vault.name == "sqlite" else str(vdir),
+        "vault_name": identity.name,
+        "vault_id": identity.vault_id,
+        "role": role,
         "storage": client.vault.name,
         "embedder": client.embedder.name,
         "dims": client.embedder.dims,
     }, args.json)
+    return 0
+
+
+def _cmd_secret_scan(args, client) -> int:
+    emit(client.preflight_secret_scan(), args.json)
     return 0
 
 
@@ -783,6 +1006,7 @@ def _cmd_doctor(args, client) -> int:
     vec_status = client.vault.vec_status()
     vec = client.vault.name == "sqlite" and vec_status.get("vec_extension", False)
     st = client.stats()
+    conflicts = client.sync_status()["conflicts"]
     info = {
         "vault": str(vdir / "vault.db") if client.vault.name == "sqlite" else str(vdir),
         "storage": client.vault.name,
@@ -790,6 +1014,7 @@ def _cmd_doctor(args, client) -> int:
         "embedder": f"{st['embedder']}/{st['dims']}d",
         "sqlite_vec": vec,
         "docs": st["docs"],
+        "competing_corrections": conflicts,
         "doc_threshold": client.vault.doc_threshold,
         **vec_status,
     }
@@ -808,6 +1033,8 @@ def _bootstrap_project(vdir, flag_agent_id, client):
         proj = {}
     team = proj.get("team") or "main"
     agent = flag_agent_id or proj.get("agent_id") or client.agent_id
+    _validate_identity_token("team", team)
+    _validate_identity_token("agent id", agent)
     if flag_agent_id:
         proj.update({
             "agent_id": agent,
@@ -833,10 +1060,55 @@ def _write_agents_section(path: Path, section: str) -> None:
     path.write_text(text)
 
 
+def _load_mcp_config(path: Path) -> dict:
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return {"mcpServers": {}}
+    try:
+        config = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{path.name} is not valid JSON; refusing to overwrite it") from error
+    if not isinstance(config, dict):
+        raise ValueError(f"{path.name} must contain a JSON object")
+    servers = config.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise ValueError(f"{path.name} mcpServers must be a JSON object")
+    return config
+
+
+def _validate_bootstrap_name(name: str) -> None:
+    if not re.fullmatch(r"cairn(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?", name):
+        raise ValueError("MCP entry name must be `cairn` or `cairn-<lowercase-name>`")
+
+
+def _check_bootstrap_name_available(servers: dict, name: str, vdir: Path) -> None:
+    if name not in servers:
+        return
+    existing = servers[name]
+    env = existing.get("env") if isinstance(existing, dict) else None
+    configured_dir = env.get("CAIRN_DIR") if isinstance(env, dict) else None
+    if not isinstance(configured_dir, str) or not configured_dir.strip():
+        raise ValueError(
+            f"MCP entry {name!r} already exists without a verifiable CAIRN_DIR; "
+            "choose another --name"
+        )
+    if Path(configured_dir).expanduser().resolve() != vdir.expanduser().resolve():
+        raise ValueError(
+            f"MCP entry {name!r} already points at a different vault; choose another --name"
+        )
+
+
 def _cmd_bootstrap(args, client, flag_agent_id) -> int:
     from cairn.tutorial import ONBOARDING_TASK, seed_onboarding
 
     vdir = vault_dir(args)
+    _validate_bootstrap_name(args.name)
+    mcp_path = Path.cwd() / ".mcp.json"
+    mcp = _load_mcp_config(mcp_path)
+    servers = mcp["mcpServers"]
+    _check_bootstrap_name_available(servers, args.name, vdir)
+
     proj, team, agent = _bootstrap_project(vdir, flag_agent_id, client)
     project = proj.get("project") or Path.cwd().name
     warnings = []
@@ -847,12 +1119,7 @@ def _cmd_bootstrap(args, client, flag_agent_id) -> int:
         )
     ensure_vault_gitignore(vdir)
     seeded = {} if args.no_seed else seed_onboarding(client, team)
-    mcp_path = Path.cwd() / ".mcp.json"
-    try:
-        mcp = json.loads(mcp_path.read_text())
-    except (OSError, ValueError):
-        mcp = {}
-    mcp.setdefault("mcpServers", {})["cairn"] = {
+    servers[args.name] = {
         "command": args.server,
         "env": {"CAIRN_DIR": str(vdir.resolve()), "CAIRN_AGENT": agent},
     }
@@ -861,6 +1128,7 @@ def _cmd_bootstrap(args, client, flag_agent_id) -> int:
     _write_agents_section(agents_path, agents_section(project, team, agent))
     emit({
         "project": project, "team": team, "agent_id": agent,
+        "mcp_server_name": args.name,
         "mcp_json": str(mcp_path), "agents_md": str(agents_path),
         "onboarding_task": ONBOARDING_TASK, "seeded": seeded, "warnings": warnings,
     }, args.json)
@@ -909,6 +1177,40 @@ def _run_backup_command(args) -> int:
         return 2
 
 
+def _cmd_skills(args) -> int:
+    if os.environ.get("CAIRN_EXPERIMENTAL_SKILLS", "").strip().lower() not in {
+        "1", "true", "on", "yes",
+    }:
+        print(
+            "error: cairn skills install is off by default; "
+            "set CAIRN_EXPERIMENTAL_SKILLS=1 to enable it",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        results = install_skill(
+            Path.home(),
+            args.agent,
+            check=args.check,
+            force=args.force,
+        )
+    except (SkillInstallError, OSError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    if args.json:
+        emit([asdict(result) for result in results], True)
+    else:
+        for result in results:
+            if result.status == "no supported agents detected":
+                print(
+                    "no supported agents detected; install an agent or create its config "
+                    "directory, then run cairn skills install --agent detected"
+                )
+            else:
+                print(f"{result.agent}: {result.status} ({result.path})")
+    return 0
+
+
 def _restore_backup_command(args) -> int:
     vdir = vault_dir(args)
     try:
@@ -941,8 +1243,10 @@ _COMMANDS = {
     "serve": _cmd_serve,
     "push": _cmd_push,
     "pull": _cmd_pull,
+    "sync": _cmd_sync,
     "galaxy": _cmd_galaxy,
     "whoami": _cmd_whoami,
+    "secret-scan": _cmd_secret_scan,
     "doctor": _cmd_doctor,
     "log": _cmd_log,
 }
@@ -954,6 +1258,8 @@ def _run_command(args, client, flag_agent_id) -> int:
             return _cmd_bootstrap(args, client, flag_agent_id)
         if args.cmd == "token":
             return _cmd_token(args, client)
+        if args.cmd == "conflicts":
+            return _cmd_conflicts(args, client)
         return _COMMANDS[args.cmd](args, client)
     except KeyError as e:
         if args.cmd not in _COMMANDS:
@@ -974,16 +1280,26 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     args.json = as_json or args.json
+    def configured_sync_url() -> str | None:
+        try:
+            return storage_config(vault_dir(args)).sync_endpoint
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+
     if args.cmd in {"push", "pull"}:
-        args.url = args.url or os.environ.get("CAIRN_URL")
+        args.url = args.url or os.environ.get("CAIRN_URL") or configured_sync_url()
         if not args.url:
-            parser.error("push and pull need a server URL; pass one or set CAIRN_URL")
+            parser.error("push and pull need a server URL; pass one, set CAIRN_URL, or configure AWS sync_endpoint")
+    if args.cmd == "sync" and args.sync_action == "status":
+        args.url = args.url or os.environ.get("CAIRN_URL") or configured_sync_url()
     # explicit --agent-id only; captured BEFORE env/config pre-fill below
     flag_agent_id = args.agent_id
-    if args.agent_id is None and args.cmd != "init":
+    if args.agent_id is None and args.cmd not in {"init", "skills"}:
         args.agent_id = default_agent_id(vault_dir(args))
     if args.cmd == "init":
         return _cmd_init(args, flag_agent_id)
+    if args.cmd == "skills":
+        return _cmd_skills(args)
     if args.cmd == "embedd":
         return _cmd_embedd(args)
     if args.cmd == "backup":

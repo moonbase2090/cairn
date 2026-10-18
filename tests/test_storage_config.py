@@ -1,4 +1,4 @@
-"""[storage] backend selection from config.toml (vault, then home, then sqlite)."""
+"""[storage] backend selection from vault, generated AWS, and home settings."""
 import json
 
 import pytest
@@ -50,6 +50,27 @@ def test_config_without_storage_table_falls_through(dirs):
     assert storage_config(vdir) == StorageConfig(backend="from-home")
 
 
+def test_generated_aws_settings_fall_after_vault_and_before_home(dirs):
+    home_cfg, vdir = dirs
+    home_cfg.write_text('[storage]\nbackend = "from-home"\n')
+    generated = vdir / "aws" / "storage.toml"
+    generated.parent.mkdir()
+    generated.write_text(
+        '[storage]\nbackend = "aws"\nregion = "us-west-2"\n'
+        'vault_id = "0123456789abcdef0123456789abcdef"\n'
+        'vault_name = "work-vault"\n'
+        'table = "cairn-memory"\ncache_table = "cairn-cache"\n'
+        'content_bucket = "cairn-content"\nvector_bucket = "cairn-vectors"\n'
+        'vector_index = "cairn-index"\n'
+        'vector_index_arn = "arn:aws:s3vectors:us-west-2:123456789012:index/example"\n'
+        'sync_endpoint = "https://abc123.execute-api.us-west-2.amazonaws.com"\n'
+    )
+
+    assert storage_config(vdir).backend == "aws"
+    (vdir / "config.toml").write_text('[storage]\nbackend = "sqlite"\n')
+    assert storage_config(vdir) == StorageConfig()
+
+
 @pytest.mark.parametrize("body", [
     pytest.param("[storage\n", id="bad-toml"),
     pytest.param('storage = "sqlite"\n', id="not-a-table"),
@@ -73,6 +94,62 @@ def test_postgres_config_requires_url(dirs):
     _, vdir = dirs
     (vdir / "config.toml").write_text('[storage]\nbackend = "postgres"\n')
     with pytest.raises(ValueError, match="url is required"):
+        storage_config(vdir)
+
+
+def test_aws_config_reads_resource_names_without_credentials(dirs):
+    home_cfg, _ = dirs
+    home_cfg.write_text(
+        '[storage]\n'
+        'backend = "aws"\n'
+        'region = "us-west-2"\n'
+        'profile = "work"\n'
+        'vault_id = "0123456789abcdef0123456789abcdef"\n'
+        'vault_name = "work-vault"\n'
+        'table = "cairn-memory"\n'
+        'cache_table = "cairn-cache"\n'
+        'content_bucket = "cairn-content"\n'
+        'vector_bucket = "cairn-vectors"\n'
+        'vector_index = "cairn-index"\n'
+        'vector_index_arn = "arn:aws:s3vectors:us-west-2:123456789012:index/example"\n'
+        'sync_endpoint = "https://abc123.execute-api.us-west-2.amazonaws.com"\n'
+    )
+    assert storage_config(dirs[1]) == StorageConfig(
+        backend="aws", region="us-west-2", profile="work",
+        vault_id="0123456789abcdef0123456789abcdef", vault_name="work-vault",
+        table="cairn-memory",
+        cache_table="cairn-cache", content_bucket="cairn-content",
+        vector_bucket="cairn-vectors", vector_index="cairn-index",
+        vector_index_arn="arn:aws:s3vectors:us-west-2:123456789012:index/example",
+        sync_endpoint="https://abc123.execute-api.us-west-2.amazonaws.com",
+    )
+
+
+def test_aws_sync_endpoint_requires_https_base_url(dirs):
+    _, vdir = dirs
+    (vdir / "config.toml").write_text(
+        '[storage]\nbackend = "aws"\nregion = "us-west-2"\n'
+        'vault_id = "0123456789abcdef0123456789abcdef"\n'
+        'vault_name = "work-vault"\ntable = "memory"\ncache_table = "cache"\n'
+        'content_bucket = "content"\nvector_bucket = "vectors"\n'
+        'vector_index = "index"\nvector_index_arn = "arn:aws:s3vectors:us-west-2:123456789012:index/mock"\n'
+        'sync_endpoint = "http://example.test"\n'
+    )
+    with pytest.raises(ValueError, match="HTTPS API base URL"):
+        storage_config(vdir)
+
+
+def test_aws_config_requires_all_deployed_resources(dirs):
+    _, vdir = dirs
+    (vdir / "config.toml").write_text('[storage]\nbackend = "aws"\n')
+    with pytest.raises(ValueError, match="AWS backend requires region"):
+        storage_config(vdir)
+
+
+def test_aws_resource_setting_without_backend_is_an_error(dirs):
+    _, vdir = dirs
+    (vdir / "config.toml").write_text('[storage]\nregion = "us-west-2"\n')
+    with pytest.raises(ValueError, match="region requires a backend"):
         storage_config(vdir)
 
 

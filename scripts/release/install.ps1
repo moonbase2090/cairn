@@ -1,7 +1,8 @@
 # Install a verified cairn Windows archive.
-# Usage: powershell -File .\install.ps1 [-Prefix C:\absolute\path]
+# Usage: powershell -File .\install.ps1 [-Prefix C:\absolute\path] [-NoAgentSkills]
 param(
-    [string]$Prefix = (Join-Path $env:USERPROFILE ".local")
+    [string]$Prefix = (Join-Path $env:USERPROFILE ".local"),
+    [switch]$NoAgentSkills
 )
 $ErrorActionPreference = "Stop"
 $payload = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -30,6 +31,24 @@ foreach ($name in @("python", "app", "bin")) {
 }
 foreach ($name in @("cairn", "cairn-mcp", "cairn-embedd")) {
     Copy-Item (Join-Path $dest "bin\$name.cmd") (Join-Path $Prefix "bin\$name.cmd") -Force
+}
+if ($NoAgentSkills -or $env:CAIRN_NO_AGENT_SKILLS -eq "1") {
+    Write-Host "Skipped automatic Agent Skill installation. Run CAIRN_EXPERIMENTAL_SKILLS=1 cairn skills install --agent detected later."
+} else {
+    $previousSkillGate = $env:CAIRN_EXPERIMENTAL_SKILLS
+    $env:CAIRN_EXPERIMENTAL_SKILLS = "1"
+    try {
+        & (Join-Path $dest "bin\cairn.cmd") skills install --agent detected
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Cairn installed, but automatic Agent Skill installation failed. Retry with cairn skills install --agent detected, or set CAIRN_NO_AGENT_SKILLS=1 to skip it."
+        }
+    } finally {
+        if ($null -eq $previousSkillGate) {
+            Remove-Item Env:CAIRN_EXPERIMENTAL_SKILLS -ErrorAction SilentlyContinue
+        } else {
+            $env:CAIRN_EXPERIMENTAL_SKILLS = $previousSkillGate
+        }
+    }
 }
 Write-Host "Installed cairn $version. Programs are in $(Join-Path $Prefix 'bin')."
 Write-Host "Next, per project: cairn init --yes && cairn bootstrap"

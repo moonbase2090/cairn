@@ -27,6 +27,46 @@ def test_store_retrieve_roundtrip(tmp_path):
     assert hits[0].similarity and hits[0].similarity > 0.2
 
 
+def test_vault_falls_back_when_sqlite_cannot_load_extensions(tmp_path, monkeypatch):
+    import sqlite3
+    import cairn.store as store_module
+
+    original_connect = sqlite3.connect
+
+    class ConnectionWithoutExtensionLoading:
+        def __init__(self, connection):
+            object.__setattr__(self, "_connection", connection)
+
+        def __getattr__(self, name):
+            if name == "enable_load_extension":
+                raise AttributeError(name)
+            return getattr(self._connection, name)
+
+        def __setattr__(self, name, value):
+            setattr(self._connection, name, value)
+
+    monkeypatch.setattr(store_module, "_HAS_VEC", True)
+    monkeypatch.setattr(
+        sqlite3, "connect",
+        lambda *args, **kwargs: ConnectionWithoutExtensionLoading(
+            original_connect(*args, **kwargs)
+        ),
+    )
+    client, vault, _embedder = make_client(tmp_path)
+
+    assert vault._vec is False
+    stored = client.store_memory(
+        "SQLite without extension loading still stores memories.",
+        team_id="cairn", task_id="lambda-runtime",
+    )
+    assert stored.key is not None
+    hits = client.retrieve_memory(
+        "SQLite extension fallback", filters={"task_id": "lambda-runtime"},
+    )
+    assert hits and hits[0].key == stored.key
+    vault.close()
+
+
 def test_exact_duplicate_is_noop(tmp_path):
     client, _, _ = make_client(tmp_path)
     a = client.store_memory("Benchmark providers on price per kilogram", team_id="t", task_id="k")
@@ -120,6 +160,22 @@ def test_export_import_roundtrip(tmp_path):
     legacy_row["key"] = pack["memories"][0]["key"] + "-legacy"
     legacy_row["embedding"] = vec.tolist()
     assert c2.import_pack({**pack, "memories": [legacy_row]}) == {"added": 1, "skipped": 0}
+
+
+def test_portable_import_marks_claimed_agent_content_external(tmp_path):
+    source, _, _ = make_client(tmp_path / "source")
+    stored = source.store_memory("A portable pack can claim any origin.", team_id="team-a", task_id="pack")
+    pack = source.export()
+    pack["memories"][0]["agent_id"] = "trusted-lead"
+    pack["memories"][0]["origin"] = "agent"
+    pack["memories"][0]["team_id"] = "other-team"
+
+    destination, _, _ = make_client(tmp_path / "destination")
+    assert destination.import_pack(pack) == {"added": 1, "skipped": 0}
+    imported = destination.get_memory(stored.key)
+
+    assert imported is not None
+    assert imported.origin == "external"
 
 
 def test_vault_uses_wal_and_mmap(tmp_path):

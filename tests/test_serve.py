@@ -3,28 +3,37 @@ import hashlib
 import json
 import shutil
 import subprocess
+import threading
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import pytest
 
 from cairn import cli
 from cairn.client import CairnClient
 from cairn.embed import HashEmbedder
-from cairn.serve import pull_from, push_to, start_background
+from cairn.serve import pull_from, push_to, start_background, sync_handshake
 from cairn.storage import MemoryQuery
 from cairn.store import Vault
+from cairn.vault_identity import VaultIdentity
 
 
 def make_client(db_path, agent="test"):
     emb = HashEmbedder()
-    return CairnClient(Vault(db_path, emb.name, emb.dims, create=True), agent, emb)
+    vault = Vault(db_path, emb.name, emb.dims, create=True)
+    vault._set_meta("vault_id", "shared-serve-test-vault")
+    vault._set_meta("vault_name", "serve-test")
+    vault.conn.commit()
+    vault._vault_identity = VaultIdentity("shared-serve-test-vault", "serve-test")
+    return CairnClient(vault, agent, emb)
 
 
-def add_server_token(client, token_id, raw_token, agent_id):
+def add_server_token(client, token_id, raw_token, agent_id, curator=False):
     digest = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
     with client.vault.transaction():
-        client.vault.create_server_token(token_id, digest, agent_id, 1)
+        client.vault.create_server_token(token_id, digest, agent_id, 1, curator=curator)
     return digest
 
 
@@ -44,6 +53,176 @@ def test_push_pull_roundtrip(tmp_path):
         c2 = make_client(tmp_path / "b" / "vault.db", "grok-t")
         assert c2.import_pack(pack) == {"added": 1, "skipped": 0}
         assert c2.retrieve_memory("sync fact", filters={"task_id": "k"})
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+def test_sync_does_not_forward_bearer_to_redirect_target(operation):
+    received_authorization = []
+
+    class SinkHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _respond(self):
+            received_authorization.append(self.headers.get("Authorization"))
+            body = b"{}"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = _respond
+        do_POST = _respond
+
+    sink = ThreadingHTTPServer(("127.0.0.1", 0), SinkHandler)
+    sink_thread = threading.Thread(target=sink.serve_forever, daemon=True)
+    sink_thread.start()
+    target = f"http://127.0.0.1:{sink.server_address[1]}/capture"
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _redirect(self):
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.end_headers()
+
+        do_GET = _redirect
+        do_POST = _redirect
+
+    redirector = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    redirect_thread = threading.Thread(target=redirector.serve_forever, daemon=True)
+    redirect_thread.start()
+    base = f"http://127.0.0.1:{redirector.server_address[1]}"
+    try:
+        rejected = None
+        try:
+            if operation == "pull":
+                pull_from(base, token="sync-token-fixture")
+            else:
+                push_to(base, {"memories": []}, token="sync-token-fixture")
+        except urllib.error.HTTPError as error:
+            rejected = error
+        assert received_authorization == []
+        assert rejected is not None and rejected.code == 302
+    finally:
+        redirector.shutdown()
+        redirector.server_close()
+        redirect_thread.join(timeout=2)
+        sink.shutdown()
+        sink.server_close()
+        sink_thread.join(timeout=2)
+
+
+def test_server_rejects_push_that_skips_the_saved_peer_cursor(tmp_path):
+    source = make_client(tmp_path / "a" / "vault.db", "source-agent")
+    source.store_memory("A cursor gap must be rejected.", team_id="t", task_id="sync")
+    pack = source.export_delta()
+    pack["after"] = pack["cursor"]
+    server = make_client(tmp_path / "server" / "vault.db", "server")
+    srv = start_background(server)
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        with pytest.raises(urllib.error.HTTPError) as rejected:
+            push_to(url, pack)
+        assert rejected.value.code == 409
+        assert server.vault.count() == 0
+    finally:
+        srv.shutdown()
+
+
+def _cursor_value(vault, peer, direction, token_id):
+    return vault.get_sync_cursor(peer, direction, token_id)
+
+
+def _replace_shared_cursor_with_legacy_empty_token(vault, peer, direction, cursor):
+    vault.conn.execute(
+        "DELETE FROM sync_cursors WHERE peer=? AND direction=? AND token_id='shared'",
+        (peer, direction),
+    )
+    vault.conn.commit()
+    vault.set_sync_cursor(peer, direction, cursor, 1, "")
+
+
+def test_cli_sync_uses_replica_peer_and_shared_token_cursors(tmp_path, capsys):
+    source = make_client(tmp_path / "source" / "vault.db", "source-agent")
+    source.store_memory("first shared-token sync fact", team_id="t", task_id="sync")
+    server = make_client(tmp_path / "server" / "vault.db", "server-agent")
+    server.store_memory("server starts with an event", team_id="t", task_id="sync")
+    srv = start_background(server, token="shared-secret")
+    args = SimpleNamespace(
+        url=f"http://127.0.0.1:{srv.server_address[1]}", token="shared-secret",
+        tls_ca=None, json=True, since=None, out=None,
+    )
+    try:
+        # Older clients keyed local cursors by URL; replay from zero on upgrade.
+        source.vault.set_sync_cursor(args.url, "push", 999, 1, "shared")
+        source.vault.set_sync_cursor(args.url, "pull", 999, 1, "shared")
+        handshake = sync_handshake(args.url, source.vault.vault_identity.vault_id,
+                                   token=args.token)
+        source_origin = source.vault.sync_origin_id()
+        server_origin = server.vault.sync_origin_id()
+        assert handshake["origin_id"] == server_origin
+        assert handshake["token_id"] == "shared"
+
+        assert cli._cmd_push(args, source) == 0
+        capsys.readouterr()
+        pushed = _cursor_value(source.vault, server_origin, "push", "shared")
+        assert pushed > 0
+        assert _cursor_value(server.vault, source_origin, "push", "shared") == pushed
+
+        assert cli._cmd_pull(args, source) == 0
+        capsys.readouterr()
+        pulled = _cursor_value(source.vault, server_origin, "pull", "shared")
+        assert pulled > 0
+        assert _cursor_value(server.vault, source_origin, "pull", "shared") == pulled
+
+        # A pre-sentinel server cursor remains resumable when upgraded.
+        _replace_shared_cursor_with_legacy_empty_token(
+            server.vault, source_origin, "push", pushed,
+        )
+        source.store_memory("incremental shared-token sync fact", team_id="t", task_id="sync")
+        assert cli._cmd_push(args, source) == 0
+        capsys.readouterr()
+        pushed = _cursor_value(source.vault, server_origin, "push", "shared")
+        assert _cursor_value(server.vault, source_origin, "push", "shared") == pushed
+
+        _replace_shared_cursor_with_legacy_empty_token(
+            server.vault, source_origin, "pull", pulled,
+        )
+        server.store_memory("incremental server sync fact", team_id="t", task_id="sync")
+        assert cli._cmd_pull(args, source) == 0
+        capsys.readouterr()
+        pulled = _cursor_value(source.vault, server_origin, "pull", "shared")
+        assert _cursor_value(server.vault, source_origin, "pull", "shared") == pulled
+        assert source.vault.get_sync_cursor(args.url, "push", "shared") == 999
+        assert source.vault.get_sync_cursor(args.url, "pull", "shared") == 999
+    finally:
+        srv.shutdown()
+
+
+def test_sync_handshake_and_push_reject_a_different_vault(tmp_path):
+    source = make_client(tmp_path / "source" / "vault.db", "source-agent")
+    source.vault._set_meta("vault_id", "different-serve-vault")
+    source.vault._set_meta("vault_name", "different")
+    source.vault.conn.commit()
+    source.vault._vault_identity = VaultIdentity("different-serve-vault", "different")
+    source.store_memory("This pack must not cross vaults.", team_id="t", task_id="sync")
+
+    server = make_client(tmp_path / "server" / "vault.db", "server-agent")
+    srv = start_background(server)
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        with pytest.raises(ValueError, match="different vault"):
+            sync_handshake(url, source.vault.vault_identity.vault_id)
+        with pytest.raises(urllib.error.HTTPError) as rejected:
+            push_to(url, source.export_delta())
+        assert rejected.value.code == 400
+        assert server.vault.count() == 0
+        assert server.vault.list_sync_cursors() == []
     finally:
         srv.shutdown()
 
@@ -119,6 +298,44 @@ def test_per_agent_tokens_bind_pushes_and_allow_shared_rows_to_round_trip(tmp_pa
             push_to(url, source_a.export(), token=token_a)
         assert revoked_push.value.code == 401
         assert server_client.vault.get_server_token(digest_a) is None
+    finally:
+        srv.shutdown()
+
+
+def test_curator_token_can_apply_cross_agent_state_events(tmp_path):
+    owner = make_client(tmp_path / "owner" / "vault.db", "owner-agent")
+    row = owner.store_memory("A fact owned by agent A.", team_id="t", task_id="curator")
+    peer = make_client(tmp_path / "peer" / "vault.db", "peer-agent")
+    server = make_client(tmp_path / "server" / "vault.db", "server-agent")
+    add_server_token(server, "ct_owner", "owner-token", "owner-agent")
+    add_server_token(server, "ct_peer", "peer-token", "peer-agent")
+    add_server_token(server, "ct_curator", "curator-token", "peer-agent", curator=True)
+    srv = start_background(server, token_mode="per-agent")
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        push_to(url, owner.export_delta(), token="owner-token")
+        pack = pull_from(url, token="peer-token", after=0, peer=peer.vault.sync_origin_id())
+        peer.import_sync_pack(pack)
+        correction = peer.store_memory(
+            "A correction owned by agent B.", team_id="t", task_id="curator",
+            supersedes_key=row.key, mode="new",
+        )
+        attempted = peer.export_delta()
+
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            push_to(url, attempted, token="peer-token")
+        assert denied.value.code == 403
+        assert server.get_memory(row.key).status == "active"
+        with pytest.raises(urllib.error.HTTPError) as denied_v1:
+            push_to(url, peer.export(), token="peer-token")
+        assert denied_v1.value.code == 403
+
+        # The curator may add a correction against another agent's row.
+        assert push_to(url, peer.export(), token="curator-token")["added"] == 1
+        accepted = push_to(url, attempted, token="curator-token")
+        assert accepted["updated"] == 2
+        assert server.get_memory(row.key).status == "superseded"
+        assert server.get_memory(correction.key).status == "active"
     finally:
         srv.shutdown()
 
@@ -280,12 +497,16 @@ def test_cli_token_create_list_revoke(tmp_path, monkeypatch, capsys):
     ).fetchone()["token_hash"]
     assert stored_hash == digest
     assert stored_hash != created["token"]
+    stored_created_at = client.vault.conn.execute(
+        "SELECT created_at FROM server_tokens WHERE token_id=?", (created["token_id"],)
+    ).fetchone()["created_at"]
 
     assert cli.main(["--vault", str(tmp_path / "vault"), "token", "list", "--json"]) == 0
     listed_output = capsys.readouterr().out
     listed = json.loads(listed_output)
     assert listed == [{
-        "token_id": created["token_id"], "agent_id": "client-a", "created_at": listed[0]["created_at"],
+        "token_id": created["token_id"], "agent_id": "client-a", "curator": False,
+        "created_at": stored_created_at,
     }]
     assert created["token"] not in listed_output
 

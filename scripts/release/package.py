@@ -199,7 +199,9 @@ def build(repo: Path, out: Path, target: str) -> Path:
         (root / "INSTALL.txt").write_text(
             f"cairn {version} for {target}.\n"
             "Unix: ./install.sh [--prefix /absolute/path]\n"
-            "Windows: powershell -File .\\install.ps1 [-Prefix C:\\absolute\\path]\n"
+            "Set CAIRN_NO_AGENT_SKILLS=1 to skip automatic Agent Skill installation.\n"
+            "Windows: powershell -File .\\install.ps1 [-Prefix C:\\absolute\\path] "
+            "[-NoAgentSkills]\n"
             "The installer puts cairn, cairn-mcp, and cairn-embedd on the prefix bin path.\n"
             "Then, in each project: cairn init --yes && cairn bootstrap\n"
         )

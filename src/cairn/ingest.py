@@ -6,10 +6,13 @@ unchanged chunks return `unchanged` via the exact-hash path.
 """
 from __future__ import annotations
 
+import os
 import re
+import stat
 from pathlib import Path
 
 from cairn.models import content_digest
+from cairn.secret_scan import scan_content
 
 HEADING = re.compile(r"^(#{1,3})\s+(.+?)\s*$")
 SUFFIXES = (".md", ".markdown", ".txt")
@@ -68,31 +71,45 @@ def ingest_dir(client, team: str, path: str | Path, memory_type: str = "document
         raise ValueError(f"not a directory: {path}")
     files = sorted(
         p for p in root.rglob("*")
-        if p.is_file() and p.suffix.lower() in SUFFIXES and not any(part.startswith(".") for part in p.parts)
+        if not p.is_symlink() and p.is_file() and p.suffix.lower() in SUFFIXES
+        and not any(part.startswith(".") for part in p.parts)
     )
     created = unchanged = flagged = 0
     flagged_keys: list[dict] = []
     for fp in files:
         try:
-            if fp.stat().st_size > MAX_FILE_BYTES:
+            fd = os.open(fp, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(fd, "rb") as stream:
+                file_stat = os.fstat(stream.fileno())
+                if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size > MAX_FILE_BYTES:
+                    continue
+                raw = stream.read(MAX_FILE_BYTES + 1)
+            if len(raw) > MAX_FILE_BYTES:
                 continue
-            text = fp.read_text(encoding="utf-8", errors="replace")
+            text = raw.decode("utf-8", errors="replace")
         except OSError:
             continue
         if not text.strip():
             continue
         rel = str(fp.relative_to(root))
         task_id = sanitize_task_id(fp.stem)
-        pending: list[tuple[str, str | None]] = []
+        chunks: list[tuple[str, str | None]] = []
         for heading, body in chunk_markdown(text):
             content = f"# {heading}\n\n{body}" if heading else body
+            chunks.append((content, heading))
+        for content, _heading in chunks:
+            scan_content(content)
+
+        pending: list[tuple[str, str | None]] = []
+        for content, heading in chunks:
             if client.vault.by_hash(f"sha256:{content_digest(content)}", task_id):
                 unchanged += 1
                 continue
             pending.append((content, heading))
         if not pending:
             continue
-        vecs = client.embedder.embed([c for c, _h in pending])
+        vecs = client._embed_many([c for c, _h in pending])
         for (content, heading), vec in zip(pending, vecs):
             res = client.store_memory(
                 content, team_id=team, task_id=task_id, memory_type=memory_type,

@@ -143,16 +143,14 @@ def test_sock_path_linux_uses_run_user(monkeypatch):
     assert sock_path() == Path(f"/run/user/{os.getuid()}") / "cairn" / "embed.sock"
 
 
-def test_check_sock_path_rejects_long_macos_path(monkeypatch):
+def test_check_sock_path_is_platform_specific(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert check_sock_path(Path("/" + "x" * 200)) is None
+
     monkeypatch.setattr(sys, "platform", "darwin")
     check_sock_path(Path("/" + "x" * (DARWIN_SUN_PATH - 2)))
     with pytest.raises(OSError, match="CAIRN_EMBED_SOCK"):
         check_sock_path(Path("/" + "x" * (DARWIN_SUN_PATH - 1)))
-
-
-def test_check_sock_path_leaves_linux_alone(monkeypatch):
-    monkeypatch.setattr(sys, "platform", "linux")
-    check_sock_path(Path("/" + "x" * 200))
 
 
 def test_spawn_fails_fast_on_long_macos_path(monkeypatch, tmp_path):

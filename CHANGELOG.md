@@ -2,6 +2,46 @@
 
 Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
+## 0.15.4 - 2026-10-17
+
+### Added
+
+- Add the Cairn Agent Skill and a gated `cairn skills install` command.
+  Unix and Windows archive installers install it for detected agents while
+  preserving different existing copies.
+- Sync row state with revisioned event packs, resumable peer cursors, and
+  retained tombstones. Add per-agent curator tokens and competing correction
+  detection and resolution across CLI, HTTP sync, and MCP.
+- Give each vault a stable logical ID and display name. Identity appears in
+  `whoami`, memory results, and sync handshakes, and sync rejects a pack from
+  a different vault before applying any change.
+- `cairn bootstrap --name` adds or updates only its named MCP entry and
+  refuses a name that already points at a different vault.
+- Opt-in AWS storage backend (`cairn[aws]`) with a per-vault CDK stack.
+  SQLite stays the default, and the HTTP sync endpoint is off by default.
+- A project-local verification skill for offline CLI workflows.
+
+### Changed
+
+- Cairn is now licensed under the MIT license instead of MPL-2.0.
+- The shell installer can add the optional FastEmbed and AWS SDK packages,
+  both off by default. Runtime errors now give correct install advice.
+- Releases check public release text and packaged artifacts before
+  publishing.
+
+### Fixed
+
+- Reject credential-like content, such as private keys and access tokens,
+  before it is embedded or stored. A read-only preflight reports category
+  counts only.
+- AWS cleanup removes exact object versions, reports individual delete
+  failures, and storage falls back when the runtime cannot load SQLite
+  extensions.
+- Validate imported document hashes and paths, clean up files when an import
+  rolls back, require an access token for Galaxy data routes, refuse sync
+  redirects, skip file symlinks during ingest, mark portable imports as
+  external content, and validate bootstrap IDs.
+
 ## 0.11.0 - 2026-09-30
 
 ### Added

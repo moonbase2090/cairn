@@ -5,6 +5,10 @@ per-project wiring always stays manual: `cairn init --yes && cairn bootstrap`.
 
 ## Release archives
 
+Unix and Windows archive installers install the Agent Skill for detected
+agents. Set CAIRN_NO_AGENT_SKILLS=1 to skip that step. The Windows installer
+also accepts -NoAgentSkills.
+
 GitHub Actions builds three archives when a `vX.Y.Z` tag is pushed:
 `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, and
 `x86_64-pc-windows-msvc`. Each archive contains its own Python, `cairn`,
@@ -19,9 +23,15 @@ and checksummed, and `SIGNING.txt` says `unsigned`.
 
 ## Shell script (Linux + macOS)
 
+The installer also installs the Cairn Agent Skill for detected coding agents.
+Set CAIRN_NO_AGENT_SKILLS=1 to skip that step. To install the skill later, run
+CAIRN_EXPERIMENTAL_SKILLS=1 cairn skills install --agent detected.
+
 ```sh
 curl -fsSL https://cairncli.com/install.sh | sh
 CAIRN_REF=main sh install.sh   # pin a branch, tag, or sha
+curl -fsSL https://cairncli.com/install.sh | CAIRN_INSTALL_EMBED=fastembed sh
+curl -fsSL https://cairncli.com/install.sh | CAIRN_INSTALL_AWS=1 sh
 ```
 
 What it does: installs `uv` if missing (official installer), ensures a
@@ -29,6 +39,13 @@ Python `>=3.11` (`uv python install` fallback), installs/upgrades cairn
 from `git+https://github.com/moonbase2090/cairn.git`, guards that the
 resulting binary actually has the `init` command, and warns when the tool
 bin dir is off `PATH` (including the GUI-editor caveat for `.mcp.json`).
+The optional `CAIRN_INSTALL_EMBED=fastembed` and `CAIRN_INSTALL_AWS=1` flags
+add FastEmbed or the AWS SDK to Cairn's isolated tool environment. Both remain
+off by default; combine them when a vault uses FastEmbed and AWS, and repeat
+the selected flags when upgrading. AWS deployment also requires the AWS CLI,
+Node.js, and npm. Cairn runs `npm ci` for its pinned local CDK dependencies as
+needed, but the shell installer does not install those system tools or deploy
+AWS resources.
 
 ## Homebrew tap (macOS)
 
