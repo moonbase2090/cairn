@@ -176,6 +176,13 @@ def build(repo: Path, out: Path, target: str) -> Path:
     version = project_version(repo)
     scripts = repo / "scripts" / "release"
     out.mkdir(parents=True, exist_ok=True)
+    # Never publish an archive left over from an earlier build.
+    for stale in [
+        *out.glob("cairn-*.tar.gz"),
+        *out.glob("cairn-*.zip"),
+        out / "SHA256SUMS",
+    ]:
+        stale.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / f"cairn-{version}-{target}"
         root.mkdir()
@@ -203,6 +210,9 @@ def build(repo: Path, out: Path, target: str) -> Path:
         shutil.rmtree(app / "bin", ignore_errors=True)
         for cache in app.rglob("__pycache__"):
             shutil.rmtree(cache, ignore_errors=True)
+        # direct_url.json records the build checkout path; it is not needed at runtime.
+        for record in app.glob("*.dist-info/direct_url.json"):
+            record.unlink()
         shutil.rmtree(root / "python" / "share", ignore_errors=True)
         bindir = root / "bin"
         bindir.mkdir()
@@ -214,7 +224,7 @@ def build(repo: Path, out: Path, target: str) -> Path:
                 write_unix_wrapper(bindir / name, name)
         (root / "VERSION").write_text(version + "\n")
         (root / "TARGET").write_text(target + "\n")
-        shutil.copy2(repo / "LICENSE", root / "MPL-2.0.txt")
+        shutil.copy2(repo / "LICENSE", root / "MIT.txt")
         (root / "INSTALL.txt").write_text(
             f"cairn {version} for {target}.\n"
             "Unix: ./install.sh [--prefix /absolute/path]\n"
@@ -232,6 +242,8 @@ def build(repo: Path, out: Path, target: str) -> Path:
         sign_tree(root, scripts)
         env = os.environ.copy()
         env["PYTHONPATH"] = str(app)
+        # The probe must not leave bytecode that embeds the build directory.
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         probe = subprocess.run(
             [str(python), str(app / "entries" / "run_cairn.py"), "--version"],
             capture_output=True,
