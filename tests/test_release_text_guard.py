@@ -321,23 +321,39 @@ def release_archive(files: dict[str, bytes]) -> bytes:
 
 def test_is_vendored_member_matches_only_bundled_third_party_paths() -> None:
     root = "cairn-0.15.5-x86_64-unknown-linux-gnu"
-    assert scanner.is_vendored_member(f"{root}/python/lib/python3.12/smtplib.py")
-    assert scanner.is_vendored_member(f"{root}/app/numpy/lib/_datasource.py")
-    assert scanner.is_vendored_member(f"{root}/app/numpy-2.5.4.dist-info/METADATA")
-    assert scanner.is_vendored_member(f"{root}\\python\\Lib\\site.py")
+    assert scanner.is_vendored_member(f"{root}/python/lib/python3.12/smtplib.py", root)
+    assert scanner.is_vendored_member(f"{root}/app/numpy/lib/_datasource.py", root)
+    assert scanner.is_vendored_member(f"{root}/app/numpy-2.5.4.dist-info/METADATA", root)
+    assert scanner.is_vendored_member(f"{root}\\python\\Lib\\site.py", root)
 
-    assert not scanner.is_vendored_member(f"{root}/app/cairn/cli.py")
-    assert not scanner.is_vendored_member(f"{root}/app/cairn-0.15.5.dist-info/METADATA")
-    assert not scanner.is_vendored_member(f"{root}/app/entries/run_cairn.py")
-    assert not scanner.is_vendored_member(f"{root}/install.sh")
-    assert not scanner.is_vendored_member(f"{root}/python/../install.sh")
-    assert not scanner.is_vendored_member("other-1.0.0/python/lib/os.py")
-    assert not scanner.is_vendored_member("python/lib/os.py")
+    assert not scanner.is_vendored_member(f"{root}/python/lib/os.py", None)
+    assert not scanner.is_vendored_member(f"{root}/app/cairn/cli.py", root)
+    assert not scanner.is_vendored_member(f"{root}/app/cairn-0.15.5.dist-info/METADATA", root)
+    assert not scanner.is_vendored_member(f"{root}/app/entries/run_cairn.py", root)
+    assert not scanner.is_vendored_member(f"{root}/install.sh", root)
+    assert not scanner.is_vendored_member(f"{root}/python/../install.sh", root)
+    assert not scanner.is_vendored_member("cairn-9.9.9-other/python/lib/os.py", root)
+    assert not scanner.is_vendored_member("python/lib/os.py", root)
 
 
-def test_scan_blob_skips_bundled_third_party_content_but_scans_cairn_files() -> None:
-    root = "cairn-0.15.5-x86_64-unknown-linux-gnu"
-    archive = release_archive({
+def test_release_root_for_trusts_only_packaged_artifacts_in_dist(tmp_path: Path) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (tmp_path / "docs").mkdir()
+    linux = dist / "cairn-0.15.5-x86_64-unknown-linux-gnu.tar.gz"
+    windows = dist / "cairn-0.15.5-x86_64-pc-windows-msvc.zip"
+    for path in (linux, windows):
+        path.write_bytes(b"")
+    assert scanner.release_root_for(linux, tmp_path) == "cairn-0.15.5-x86_64-unknown-linux-gnu"
+    assert scanner.release_root_for(windows, tmp_path) == "cairn-0.15.5-x86_64-pc-windows-msvc"
+    assert scanner.release_root_for(tmp_path / "docs" / linux.name, tmp_path) is None
+    assert scanner.release_root_for(dist / "cairn-0.15.5.tar.gz", tmp_path) is None
+    assert scanner.release_root_for(dist / "notes-0.15.5-x86_64.tar.gz", tmp_path) is None
+    assert scanner.release_root_for(dist / "SHA256SUMS", tmp_path) is None
+
+
+def bundled_release_archive(root: str) -> bytes:
+    return release_archive({
         f"{root}/python/lib/python3.12/smtplib.py": b"example: user@example.invalid",
         f"{root}/python/lib/config/Setup.local": b"",
         f"{root}/app/numpy/lib/_datasource.py": b"cache under /home/fixture/data",
@@ -350,8 +366,12 @@ def test_scan_blob_skips_bundled_third_party_content_but_scans_cairn_files() -> 
         ),
     })
 
+
+def test_scan_blob_skips_bundled_third_party_content_but_scans_cairn_files() -> None:
+    root = "cairn-0.15.5-x86_64-unknown-linux-gnu"
     findings: set[str] = set()
-    scanner.scan_blob(archive, "release.tar.gz", scanner.GENERIC_PATTERNS, findings)
+    scanner.scan_blob(bundled_release_archive(root), "release.tar.gz", scanner.GENERIC_PATTERNS, findings,
+                      release_root=root)
 
     assert findings == {
         "release.tar.gz!member-4:1",
@@ -361,11 +381,40 @@ def test_scan_blob_skips_bundled_third_party_content_but_scans_cairn_files() -> 
     }
 
 
+def test_untrusted_archives_are_scanned_in_full() -> None:
+    root = "cairn-0.15.5-x86_64-unknown-linux-gnu"
+    untrusted: set[str] = set()
+    scanner.scan_blob(bundled_release_archive(root), "docs.tar.gz", scanner.GENERIC_PATTERNS, untrusted)
+    mismatched: set[str] = set()
+    scanner.scan_blob(bundled_release_archive(root), "other.tar.gz", scanner.GENERIC_PATTERNS, mismatched,
+                      release_root="cairn-0.15.5-x86_64-apple-darwin")
+    expected = {f"!member-{n}:1" for n in (1, 3, 4, 5, 6)} | {"!member-2-name:1", "!member-7:1", "!member-7:2"}
+    assert untrusted == {"docs.tar.gz" + item for item in expected}
+    assert mismatched == {"other.tar.gz" + item for item in expected}
+
+
+def test_main_trusts_only_dist_release_artifacts(tmp_path: Path, monkeypatch, capsys) -> None:
+    root = "cairn-0.15.5-x86_64-unknown-linux-gnu"
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / f"{root}.tar.gz").write_bytes(release_archive({
+        f"{root}/python/lib/python3.12/smtplib.py": b"example: user@example.invalid",
+    }))
+    (tmp_path / "bundle").mkdir()
+    (tmp_path / "bundle" / f"{root}.tar.gz").write_bytes(release_archive({
+        f"{root}/python/lib/python3.12/smtplib.py": b"example: user@example.invalid",
+    }))
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    monkeypatch.delenv("RELEASE_DENYLIST", raising=False)
+    monkeypatch.setattr(sys, "argv", ["check_release_text.py", str(tmp_path), "dist", "bundle"])
+    assert scanner.main() == 1
+    assert capsys.readouterr().out.split() == [f"bundle/{root}.tar.gz!member-1:1"]
+
+
 def test_scan_blob_scans_vendored_paths_inside_nested_archives() -> None:
     root = "cairn-0.15.5-x86_64-unknown-linux-gnu"
     inner = release_archive({f"{root}/python/leak.txt": b"/Users/fixture/private"})
     findings: set[str] = set()
-    scanner.scan_blob(inner, "outer.tar.gz", scanner.GENERIC_PATTERNS, findings, depth=1)
+    scanner.scan_blob(inner, "outer.tar.gz", scanner.GENERIC_PATTERNS, findings, depth=1, release_root=root)
     assert findings == {"outer.tar.gz!member-1:1"}
 
 

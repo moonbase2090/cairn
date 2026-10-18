@@ -198,7 +198,26 @@ def zip_local_extra(data: bytes, member: zipfile.ZipInfo, central_start: int) ->
     return data[extra_start:extra_end]
 
 
-def is_vendored_member(name: str) -> bool:
+def release_root_for(path: Path, root: Path) -> str | None:
+    """Return the archive root for a packaged release artifact in `<repo>/dist`.
+
+    Only archives the release build wrote to the repository's dist directory,
+    named `cairn-<version>-<target>.tar.gz` or `.zip`, are trusted to carry
+    bundled third-party files. Every other input is scanned in full.
+    """
+    try:
+        if path.resolve().parent != (root / "dist").resolve():
+            return None
+    except OSError:
+        return None
+    for suffix in (".tar.gz", ".zip"):
+        if path.name.endswith(suffix):
+            stem = path.name[: -len(suffix)]
+            return stem if RELEASE_ROOT.match(stem) and "-" in stem[len("cairn-"):] else None
+    return None
+
+
+def is_vendored_member(name: str, release_root: str | None) -> bool:
     """Return True for bundled third-party content in a packaged release archive.
 
     The bundled Python runtime (`python/`) and every `app/` entry that is not
@@ -206,8 +225,10 @@ def is_vendored_member(name: str) -> bool:
     Their names and archive metadata are still scanned; only their contents
     are skipped. Anything else, including unexpected layouts, is scanned.
     """
+    if release_root is None:
+        return False
     parts = PurePosixPath(name.replace("\\", "/")).parts
-    if len(parts) < 3 or ".." in parts or not RELEASE_ROOT.match(parts[0]):
+    if len(parts) < 3 or ".." in parts or parts[0] != release_root:
         return False
     if parts[1] == "python":
         return True
@@ -216,9 +237,9 @@ def is_vendored_member(name: str) -> bool:
     return False
 
 
-def is_checksum_manifest(name: str) -> bool:
+def is_checksum_manifest(name: str, release_root: str | None) -> bool:
     parts = PurePosixPath(name.replace("\\", "/")).parts
-    return len(parts) == 2 and parts[1] == "SHA256SUMS" and bool(RELEASE_ROOT.match(parts[0]))
+    return release_root is not None and parts == (release_root, "SHA256SUMS")
 
 
 def scan_member(
@@ -228,13 +249,14 @@ def scan_member(
     patterns: list[re.Pattern[str]],
     findings: set[str],
     depth: int,
+    release_root: str | None,
 ) -> None:
     """Scan one archive member; drop SHA256SUMS lines that name bundled third-party files."""
-    if depth == 0 and is_checksum_manifest(name):
-        root = PurePosixPath(name.replace("\\", "/")).parts[0]
+    if depth == 0 and is_checksum_manifest(name, release_root):
+        root = release_root
         lines = data.decode("utf-8", errors="replace").split("\n")
         kept = [
-            "" if len(line.split("  ", 1)) == 2 and is_vendored_member(f"{root}/{line.split('  ', 1)[1]}") else line
+            "" if len(line.split("  ", 1)) == 2 and is_vendored_member(f"{root}/{line.split('  ', 1)[1]}", release_root) else line
             for line in lines
         ]
         data = "\n".join(kept).encode("utf-8")
@@ -258,7 +280,9 @@ def scan_blob(
     patterns: list[re.Pattern[str]],
     findings: set[str],
     depth: int = 0,
+    release_root: str | None = None,
 ) -> None:
+    """Scan data. `release_root` marks a trusted packaged release artifact (see release_root_for)."""
     looks_like_zip = data.startswith(ZIP_SIGNATURES)
     looks_like_tar = (
         len(data) > 262 and data[257:262] == TAR_SIGNATURE
@@ -272,7 +296,7 @@ def scan_blob(
                 scan_binary(archive.comment, f"{display}-comment", patterns, findings)
                 for index, member in enumerate(archive.infolist(), start=1):
                     label = safe_member_label(display, index)
-                    vendored = depth == 0 and is_vendored_member(member.filename)
+                    vendored = depth == 0 and is_vendored_member(member.filename, release_root)
                     if not vendored:
                         scan_text(member.filename, f"{label}-name", patterns, findings)
                     scan_binary(member.comment, f"{label}-comment", patterns, findings)
@@ -282,7 +306,7 @@ def scan_blob(
                         scan_binary(local_extra, f"{label}-local-extra", patterns, findings)
                     if member.is_dir() or vendored:
                         continue
-                    scan_member(archive.read(member), member.filename, label, patterns, findings, depth)
+                    scan_member(archive.read(member), member.filename, label, patterns, findings, depth, release_root)
                 return
         except Exception as error:
             raise ScanError from error
@@ -301,7 +325,7 @@ def scan_blob(
             with archive:
                 for index, member in enumerate(archive.getmembers(), start=1):
                     label = safe_member_label(display, index)
-                    vendored = depth == 0 and is_vendored_member(member.name)
+                    vendored = depth == 0 and is_vendored_member(member.name, release_root)
                     if not vendored:
                         scan_text(member.name, f"{label}-name", patterns, findings)
                     scan_text(member.linkname, f"{label}-link", patterns, findings)
@@ -314,7 +338,7 @@ def scan_blob(
                         continue
                     stream = archive.extractfile(member)
                     if stream is not None:
-                        scan_member(stream.read(), member.name, label, patterns, findings, depth)
+                        scan_member(stream.read(), member.name, label, patterns, findings, depth, release_root)
                 return
         except Exception as error:
             raise ScanError from error
@@ -348,7 +372,7 @@ def main() -> int:
     for path in sorted(files, key=lambda item: display_path(item, root)):
         display = display_path(path, root)
         try:
-            scan_blob(path.read_bytes(), display, patterns, findings)
+            scan_blob(path.read_bytes(), display, patterns, findings, release_root=release_root_for(path, root))
         except (OSError, ScanError):
             print(f"cannot scan {display}:1", file=sys.stderr)
             return 2
