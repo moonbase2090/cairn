@@ -667,3 +667,84 @@ def test_cli_token_create_list_revoke(tmp_path, monkeypatch, capsys):
         == 2
     )
     assert "--agent must not be empty" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "expected_status", "expected_body"),
+    [
+        ("/missing", b"{}", 404, {"error": "not found"}),
+        ("/push", b"{", 400, {"error": "invalid JSON pack"}),
+        ("/push", b"[]", 400, {"error": "request body must be an object"}),
+    ],
+)
+def test_post_rejects_invalid_request_shapes(
+    tmp_path, path, body, expected_status, expected_body
+):
+    server_client = make_client(tmp_path / "srv" / "vault.db", "server")
+    srv = start_background(server_client)
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        req = urllib.request.Request(url + path, data=body, method="POST")
+        with pytest.raises(urllib.error.HTTPError) as response:
+            urllib.request.urlopen(req, timeout=5)
+        assert response.value.code == expected_status
+        assert json.loads(response.value.read()) == expected_body
+    finally:
+        srv.shutdown()
+
+
+def test_post_rejects_invalid_content_length_as_empty_pack(tmp_path):
+    server_client = make_client(tmp_path / "srv" / "vault.db", "server")
+    srv = start_background(server_client)
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        req = urllib.request.Request(
+            url + "/push",
+            method="POST",
+            headers={"Content-Length": "invalid"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as response:
+            urllib.request.urlopen(req, timeout=5)
+        assert response.value.code == 400
+        assert json.loads(response.value.read()) == {
+            "error": "invalid pack: need {embed_model, dims, memories[]} from `cairn export`"
+        }
+    finally:
+        srv.shutdown()
+
+
+def test_post_reports_cross_space_pack_rejection(tmp_path):
+    server_client = make_client(tmp_path / "srv" / "vault.db", "server")
+    srv = start_background(server_client)
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        pack = server_client.export()
+        pack["dims"] += 1
+        with pytest.raises(urllib.error.HTTPError) as response:
+            push_to(url, pack)
+        assert response.value.code == 400
+        assert json.loads(response.value.read()) == {
+            "error": (
+                f"pack is {pack['embed_model']}/{pack['dims']}d, vault is "
+                f"{server_client.embedder.name}/{server_client.embedder.dims}d — "
+                "refusing cross-space import"
+            )
+        }
+    finally:
+        srv.shutdown()
+
+
+def test_post_rejects_sync_cursor_that_is_a_boolean(tmp_path):
+    server_client = make_client(tmp_path / "srv" / "vault.db", "server")
+    srv = start_background(server_client)
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        pack = {"pack": "cairn-sync-2", "after": 0, "cursor": False}
+        with pytest.raises(urllib.error.HTTPError) as response:
+            push_to(url, pack)
+        assert response.value.code == 400
+        assert json.loads(response.value.read()) == {
+            "error": "invalid sync pack cursor"
+        }
+    finally:
+        srv.shutdown()
