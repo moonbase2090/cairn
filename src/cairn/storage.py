@@ -15,11 +15,11 @@ backend; agent identity lives there, and each memory row records its agent_id.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
-import re
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -315,78 +315,93 @@ class StorageConfig:
     sync_endpoint: str | None = None
 
     def __post_init__(self):
-        if not isinstance(self.backend, str) or not self.backend:
-            raise ValueError("[storage] backend must be a non-empty string")
-        if self.url is not None and not isinstance(self.url, str):
-            raise ValueError("[storage] url must be a string")
-        if self.backend == "postgres" and (self.url is None or not self.url.strip()):
-            raise ValueError("[storage] url is required when backend = 'postgres'")
-        if self.backend != "postgres" and self.url is not None:
-            raise ValueError(
-                "[storage] url is only supported when backend = 'postgres'"
-            )
-        aws_fields = (
-            self.region,
-            self.profile,
-            self.vault_id,
-            self.vault_name,
-            self.table,
-            self.cache_table,
-            self.content_bucket,
-            self.vector_bucket,
-            self.vector_index,
-            self.vector_index_arn,
-            self.sync_endpoint,
-        )
-        if self.backend == "aws":
-            missing = [
-                name
-                for name, value in (
-                    ("region", self.region),
-                    ("vault_id", self.vault_id),
-                    ("vault_name", self.vault_name),
-                    ("table", self.table),
-                    ("cache_table", self.cache_table),
-                    ("content_bucket", self.content_bucket),
-                    ("vector_bucket", self.vector_bucket),
-                    ("vector_index", self.vector_index),
-                    ("vector_index_arn", self.vector_index_arn),
-                )
-                if not isinstance(value, str) or not value.strip()
-            ]
-            if missing:
-                raise ValueError("[storage] AWS backend requires " + ", ".join(missing))
-            if not re.fullmatch(r"[a-z]{2}(?:-[a-z]+)+-\d", self.region or ""):
-                raise ValueError("[storage] region must be an AWS region name")
-            if not re.fullmatch(r"[0-9a-f]{32}", self.vault_id or ""):
-                raise ValueError(
-                    "[storage] vault_id must be a 32-character logical vault ID"
-                )
-            from .vault_identity import safe_vault_name
+        _validate_storage_config(self)
 
-            if safe_vault_name(self.vault_name) != self.vault_name:
-                raise ValueError("[storage] vault_name must be a safe display name")
-            if self.profile is not None and not re.fullmatch(
-                r"[A-Za-z0-9_+=,.@-]{1,64}",
-                self.profile,
-            ):
-                raise ValueError("[storage] profile contains unsupported characters")
-            if self.sync_endpoint is not None:
-                endpoint = urlsplit(self.sync_endpoint)
-                if (
-                    endpoint.scheme != "https"
-                    or not endpoint.netloc
-                    or endpoint.username
-                    or endpoint.password
-                    or endpoint.query
-                    or endpoint.fragment
-                    or endpoint.path not in {"", "/"}
-                ):
-                    raise ValueError(
-                        "[storage] sync_endpoint must be an HTTPS API base URL"
-                    )
-        elif any(value is not None for value in aws_fields):
-            raise ValueError("AWS resource settings require backend = 'aws'")
+
+def _validate_storage_config(config: StorageConfig) -> None:
+    if not isinstance(config.backend, str) or not config.backend:
+        raise ValueError("[storage] backend must be a non-empty string")
+    if config.url is not None and not isinstance(config.url, str):
+        raise ValueError("[storage] url must be a string")
+    if config.backend == "postgres":
+        if config.url is None or not config.url.strip():
+            raise ValueError("[storage] url is required when backend = 'postgres'")
+    elif config.url is not None:
+        raise ValueError("[storage] url is only supported when backend = 'postgres'")
+
+    if config.backend == "aws":
+        _validate_aws_storage_config(config)
+    elif _has_aws_storage_setting(config):
+        raise ValueError("AWS resource settings require backend = 'aws'")
+
+
+def _has_aws_storage_setting(config: StorageConfig) -> bool:
+    return any(
+        value is not None
+        for value in (
+            config.region,
+            config.profile,
+            config.vault_id,
+            config.vault_name,
+            config.table,
+            config.cache_table,
+            config.content_bucket,
+            config.vector_bucket,
+            config.vector_index,
+            config.vector_index_arn,
+            config.sync_endpoint,
+        )
+    )
+
+
+def _validate_aws_storage_config(config: StorageConfig) -> None:
+    missing = [
+        name
+        for name, value in (
+            ("region", config.region),
+            ("vault_id", config.vault_id),
+            ("vault_name", config.vault_name),
+            ("table", config.table),
+            ("cache_table", config.cache_table),
+            ("content_bucket", config.content_bucket),
+            ("vector_bucket", config.vector_bucket),
+            ("vector_index", config.vector_index),
+            ("vector_index_arn", config.vector_index_arn),
+        )
+        if not isinstance(value, str) or not value.strip()
+    ]
+    if missing:
+        raise ValueError("[storage] AWS backend requires " + ", ".join(missing))
+    if not re.fullmatch(r"[a-z]{2}(?:-[a-z]+)+-\d", config.region or ""):
+        raise ValueError("[storage] region must be an AWS region name")
+    if not re.fullmatch(r"[0-9a-f]{32}", config.vault_id or ""):
+        raise ValueError("[storage] vault_id must be a 32-character logical vault ID")
+    from .vault_identity import safe_vault_name
+
+    if safe_vault_name(config.vault_name) != config.vault_name:
+        raise ValueError("[storage] vault_name must be a safe display name")
+    if config.profile is not None and not re.fullmatch(
+        r"[A-Za-z0-9_+=,.@-]{1,64}",
+        config.profile,
+    ):
+        raise ValueError("[storage] profile contains unsupported characters")
+    _validate_sync_endpoint(config.sync_endpoint)
+
+
+def _validate_sync_endpoint(endpoint_url: str | None) -> None:
+    if endpoint_url is None:
+        return
+    endpoint = urlsplit(endpoint_url)
+    if (
+        endpoint.scheme != "https"
+        or not endpoint.netloc
+        or endpoint.username
+        or endpoint.password
+        or endpoint.query
+        or endpoint.fragment
+        or endpoint.path not in {"", "/"}
+    ):
+        raise ValueError("[storage] sync_endpoint must be an HTTPS API base URL")
 
 
 def _open_sqlite(
