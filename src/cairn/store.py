@@ -1187,75 +1187,20 @@ class Vault(StorageBackend):
             kind == "state" and existing is None and self.has_sync_tombstone(key)
         ):
             self._validate_resolution_event(event, resolution)
-        changed = False
         if kind == "snapshot":
-            snapshot = event.get("snapshot")
-            if not isinstance(snapshot, dict) or snapshot.get("key") != key:
-                raise ValueError("invalid snapshot sync event")
-            if existing and existing["content_hash"] != snapshot.get("content_hash"):
-                raise ValueError(
-                    f"sync integrity conflict for {key}: content hash changed"
-                )
-            if not existing:
-                if self.has_sync_tombstone(key):
-                    self._append_sync_event(event)
-                    return "skipped"
-                raw = snapshot.get("embedding")
-                if not isinstance(raw, str):
-                    raise ValueError(f"sync snapshot for {key} has no embedding")
-                vector = np.frombuffer(base64.b64decode(raw), dtype=np.float32).copy()
-                rec = {field: snapshot.get(field) for field in MEMORY_FIELDS}
-                rec["content"] = snapshot.get("content")
-                self.insert(rec, vector)
-                changed = True
-            elif incoming_order > current_order:
-                self.conn.execute(
-                    "UPDATE memories SET status=?, updated_at=?, archived_at=?, expires_at=?, "
-                    "state_revision=?, state_origin=?, state_event_id=? WHERE key=?",
-                    (
-                        snapshot.get("status"),
-                        event.get("updated_at"),
-                        snapshot.get("archived_at"),
-                        snapshot.get("expires_at"),
-                        event.get("state_revision"),
-                        event.get("state_origin", event.get("origin_id")),
-                        event.get("state_event_id", event["event_id"]),
-                        key,
-                    ),
-                )
-                changed = True
+            changed, tombstone_precedence = self._apply_snapshot_sync_event(
+                event, key, existing, incoming_order, current_order
+            )
         elif kind == "state":
-            if existing is None:
-                if self.has_sync_tombstone(key):
-                    self._append_sync_event(event)
-                    return "skipped"
-                raise ValueError(
-                    f"state event for missing key {key}; send a snapshot first"
-                )
-            if incoming_order > current_order:
-                self.conn.execute(
-                    "UPDATE memories SET status=?, updated_at=?, archived_at=?, state_revision=?, "
-                    "state_origin=?, state_event_id=? WHERE key=?",
-                    (
-                        event.get("status"),
-                        event.get("updated_at"),
-                        event.get("archived_at"),
-                        event.get("state_revision"),
-                        event.get("state_origin", event.get("origin_id")),
-                        event.get("state_event_id", event["event_id"]),
-                        key,
-                    ),
-                )
-                changed = True
+            changed, tombstone_precedence = self._apply_state_sync_event(
+                event, key, existing, incoming_order, current_order
+            )
         else:
-            self._remember_tombstone(event)
-            if existing is not None:
-                rowid, content_hash = existing["rowid"], existing["content_hash"]
-                self.conn.execute("DELETE FROM memories WHERE key=?", (key,))
-                if self._vec_ok:
-                    self.conn.execute("DELETE FROM mem_vec WHERE rowid=?", (rowid,))
-                self.delete_doc_if_orphan(content_hash)
-                changed = True
+            changed = self._apply_tombstone_sync_event(event, key, existing)
+            tombstone_precedence = False
+        if tombstone_precedence:
+            self._append_sync_event(event)
+            return "skipped"
         self._append_sync_event(event)
         if changed:
             self._record_resolution_event(event)
@@ -1264,6 +1209,80 @@ class Vault(StorageBackend):
             if kind == "snapshot" and changed and existing is None
             else ("updated" if changed else "skipped")
         )
+
+    def _apply_snapshot_sync_event(
+        self, event: dict, key: str, existing, incoming_order, current_order
+    ) -> tuple[bool, bool]:
+        snapshot = event.get("snapshot")
+        if not isinstance(snapshot, dict) or snapshot.get("key") != key:
+            raise ValueError("invalid snapshot sync event")
+        if existing and existing["content_hash"] != snapshot.get("content_hash"):
+            raise ValueError(f"sync integrity conflict for {key}: content hash changed")
+        if not existing:
+            if self.has_sync_tombstone(key):
+                return False, True
+            raw = snapshot.get("embedding")
+            if not isinstance(raw, str):
+                raise ValueError(f"sync snapshot for {key} has no embedding")
+            vector = np.frombuffer(base64.b64decode(raw), dtype=np.float32).copy()
+            rec = {field: snapshot.get(field) for field in MEMORY_FIELDS}
+            rec["content"] = snapshot.get("content")
+            self.insert(rec, vector)
+            return True, False
+        if incoming_order > current_order:
+            self.conn.execute(
+                "UPDATE memories SET status=?, updated_at=?, archived_at=?, expires_at=?, "
+                "state_revision=?, state_origin=?, state_event_id=? WHERE key=?",
+                (
+                    snapshot.get("status"),
+                    event.get("updated_at"),
+                    snapshot.get("archived_at"),
+                    snapshot.get("expires_at"),
+                    event.get("state_revision"),
+                    event.get("state_origin", event.get("origin_id")),
+                    event.get("state_event_id", event["event_id"]),
+                    key,
+                ),
+            )
+            return True, False
+        return False, False
+
+    def _apply_state_sync_event(
+        self, event: dict, key: str, existing, incoming_order, current_order
+    ) -> tuple[bool, bool]:
+        if existing is None:
+            if self.has_sync_tombstone(key):
+                return False, True
+            raise ValueError(
+                f"state event for missing key {key}; send a snapshot first"
+            )
+        if incoming_order > current_order:
+            self.conn.execute(
+                "UPDATE memories SET status=?, updated_at=?, archived_at=?, state_revision=?, "
+                "state_origin=?, state_event_id=? WHERE key=?",
+                (
+                    event.get("status"),
+                    event.get("updated_at"),
+                    event.get("archived_at"),
+                    event.get("state_revision"),
+                    event.get("state_origin", event.get("origin_id")),
+                    event.get("state_event_id", event["event_id"]),
+                    key,
+                ),
+            )
+            return True, False
+        return False, False
+
+    def _apply_tombstone_sync_event(self, event: dict, key: str, existing) -> bool:
+        self._remember_tombstone(event)
+        if existing is None:
+            return False
+        rowid, content_hash = existing["rowid"], existing["content_hash"]
+        self.conn.execute("DELETE FROM memories WHERE key=?", (key,))
+        if self._vec_ok:
+            self.conn.execute("DELETE FROM mem_vec WHERE rowid=?", (rowid,))
+        self.delete_doc_if_orphan(content_hash)
+        return True
 
     def _record_resolution_event(self, event: dict) -> None:
         resolution = event.get("conflict_resolution")

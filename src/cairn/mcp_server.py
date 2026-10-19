@@ -508,139 +508,157 @@ def _serve_state_path(client: CairnClient) -> Path:
 
 def _tool_serve(client: CairnClient, args: dict) -> str:
     action = args.get("action")
-    state_path = _serve_state_path(client)
     if action == "start":
-        host = str(args.get("host", "127.0.0.1"))
-        port = int(args.get("port", 8778))
-        mode = args.get("token_mode", "per-agent")
-        if mode not in {"shared", "per-agent"}:
-            raise ValueError("token_mode must be shared or per-agent")
-        existing = _read_serve_state(state_path)
-        if existing and _process_running(existing["pid"]):
-            return _dump(
-                {
-                    "running": True,
-                    "pid": existing["pid"],
-                    "url": existing["url"],
-                    "already_running": True,
-                }
-            )
-        tls_cert, tls_key = args.get("tls_cert"), args.get("tls_key")
-        if bool(tls_cert) != bool(tls_key):
-            raise ValueError("HTTPS needs both tls_cert and tls_key")
-        token = args.get("token") or os.environ.get("CAIRN_TOKEN")
-        child_env = dict(os.environ)
-        if mode == "per-agent":
-            child_env.pop("CAIRN_TOKEN", None)
-        elif not token:
-            raise ValueError("shared token mode needs token or CAIRN_TOKEN")
-        else:
-            child_env["CAIRN_TOKEN"] = token
-        logfile = client.vault.vault_dir / "sync-server.log"
-        command = [
-            sys.executable,
-            "-m",
-            "cairn.cli",
-            "--vault",
-            str(client.vault.vault_dir),
-            "--agent-id",
-            client.agent_id,
-            "serve",
-            "--host",
-            host,
-            "--port",
-            str(port),
-            "--token-mode",
-            mode,
-        ]
-        if tls_cert:
-            command.extend(["--tls-cert", str(tls_cert), "--tls-key", str(tls_key)])
-        with open(logfile, "ab") as log:
-            proc = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                env=child_env,
-                start_new_session=True,
-            )
-        _SERVERS[str(state_path)] = proc
-        scheme = "https" if tls_cert else "http"
-        url = f"{scheme}://{host}:{port}"
-        deadline = time.monotonic() + 5
-        while True:
-            if proc.poll() is not None:
-                _SERVERS.pop(str(state_path), None)
-                raise RuntimeError(
-                    f"sync server exited during startup; inspect {logfile}"
-                )
-            try:
-                if health_from(url, cafile=args.get("tls_ca")).get("ok") is True:
-                    break
-            except (URLError, OSError, TimeoutError):
-                pass
-            if time.monotonic() >= deadline:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=2)
-                _SERVERS.pop(str(state_path), None)
-                raise RuntimeError(
-                    f"sync server did not become healthy; inspect {logfile}"
-                )
-            time.sleep(0.05)
-        state_path.write_text(json.dumps({"pid": proc.pid, "url": url, "mode": mode}))
-        return _dump({"running": True, "pid": proc.pid, "url": url, "token_mode": mode})
+        return _start_serve(client, args)
     if action == "status":
-        state = _read_serve_state(state_path)
-        proc = _SERVERS.get(str(state_path))
-        running = bool(
-            state and (proc.poll() is None if proc else _process_running(state["pid"]))
-        )
-        return _dump({"running": running, **(state or {})})
+        return _serve_status(client)
     if action == "health":
-        url = args.get("url")
-        if not url:
-            state = _read_serve_state(state_path)
-            url = state["url"] if state else None
-        if not url:
-            raise ValueError("cairn_serve health needs url or a running server")
-        return _dump(health_from(url, cafile=args.get("tls_ca")))
+        return _serve_health(client, args)
     if action == "stop":
-        state = _read_serve_state(state_path)
-        proc = _SERVERS.get(str(state_path))
-        running = (
-            proc.poll() is None
-            if proc
-            else bool(state and _process_running(state["pid"]))
+        return _stop_serve(client)
+    raise ValueError("cairn_serve action must be start, status, health, or stop")
+
+
+def _start_serve(client: CairnClient, args: dict) -> str:
+    state_path = _serve_state_path(client)
+    host = str(args.get("host", "127.0.0.1"))
+    port = int(args.get("port", 8778))
+    mode = args.get("token_mode", "per-agent")
+    if mode not in {"shared", "per-agent"}:
+        raise ValueError("token_mode must be shared or per-agent")
+    existing = _read_serve_state(state_path)
+    if existing and _process_running(existing["pid"]):
+        return _dump(
+            {
+                "running": True,
+                "pid": existing["pid"],
+                "url": existing["url"],
+                "already_running": True,
+            }
         )
-        if not state or not running:
-            state_path.unlink(missing_ok=True)
-            return _dump({"running": False, "stopped": False})
-        pid = int(state["pid"])
-        if proc:
+    tls_cert, tls_key = args.get("tls_cert"), args.get("tls_key")
+    if bool(tls_cert) != bool(tls_key):
+        raise ValueError("HTTPS needs both tls_cert and tls_key")
+    token = args.get("token") or os.environ.get("CAIRN_TOKEN")
+    child_env = dict(os.environ)
+    if mode == "per-agent":
+        child_env.pop("CAIRN_TOKEN", None)
+    elif not token:
+        raise ValueError("shared token mode needs token or CAIRN_TOKEN")
+    else:
+        child_env["CAIRN_TOKEN"] = token
+    logfile = client.vault.vault_dir / "sync-server.log"
+    command = [
+        sys.executable,
+        "-m",
+        "cairn.cli",
+        "--vault",
+        str(client.vault.vault_dir),
+        "--agent-id",
+        client.agent_id,
+        "serve",
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--token-mode",
+        mode,
+    ]
+    if tls_cert:
+        command.extend(["--tls-cert", str(tls_cert), "--tls-key", str(tls_key)])
+    with open(logfile, "ab") as log:
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=child_env,
+            start_new_session=True,
+        )
+    _SERVERS[str(state_path)] = proc
+    scheme = "https" if tls_cert else "http"
+    url = f"{scheme}://{host}:{port}"
+    _wait_for_serve_health(proc, state_path, url, logfile, args.get("tls_ca"))
+    state_path.write_text(json.dumps({"pid": proc.pid, "url": url, "mode": mode}))
+    return _dump({"running": True, "pid": proc.pid, "url": url, "token_mode": mode})
+
+
+def _wait_for_serve_health(
+    proc, state_path: Path, url: str, logfile: Path, cafile
+) -> None:
+    deadline = time.monotonic() + 5
+    while True:
+        if proc.poll() is not None:
+            _SERVERS.pop(str(state_path), None)
+            raise RuntimeError(f"sync server exited during startup; inspect {logfile}")
+        try:
+            if health_from(url, cafile=cafile).get("ok") is True:
+                return
+        except (URLError, OSError, TimeoutError):
+            pass
+        if time.monotonic() >= deadline:
             proc.terminate()
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=2)
-        else:
-            try:
-                os.killpg(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline and _process_running(pid):
-                time.sleep(0.05)
-            if _process_running(pid):
-                raise RuntimeError(f"sync server process {pid} did not stop")
-        _SERVERS.pop(str(state_path), None)
+            _SERVERS.pop(str(state_path), None)
+            raise RuntimeError(f"sync server did not become healthy; inspect {logfile}")
+        time.sleep(0.05)
+
+
+def _serve_status(client: CairnClient) -> str:
+    state_path = _serve_state_path(client)
+    state = _read_serve_state(state_path)
+    proc = _SERVERS.get(str(state_path))
+    running = bool(
+        state and (proc.poll() is None if proc else _process_running(state["pid"]))
+    )
+    return _dump({"running": running, **(state or {})})
+
+
+def _serve_health(client: CairnClient, args: dict) -> str:
+    url = args.get("url")
+    if not url:
+        state = _read_serve_state(_serve_state_path(client))
+        url = state["url"] if state else None
+    if not url:
+        raise ValueError("cairn_serve health needs url or a running server")
+    return _dump(health_from(url, cafile=args.get("tls_ca")))
+
+
+def _stop_serve(client: CairnClient) -> str:
+    state_path = _serve_state_path(client)
+    state = _read_serve_state(state_path)
+    proc = _SERVERS.get(str(state_path))
+    running = (
+        proc.poll() is None if proc else bool(state and _process_running(state["pid"]))
+    )
+    if not state or not running:
         state_path.unlink(missing_ok=True)
-        return _dump({"running": False, "stopped": True})
-    raise ValueError("cairn_serve action must be start, status, health, or stop")
+        return _dump({"running": False, "stopped": False})
+    pid = int(state["pid"])
+    if proc:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)
+    else:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and _process_running(pid):
+            time.sleep(0.05)
+        if _process_running(pid):
+            raise RuntimeError(f"sync server process {pid} did not stop")
+    _SERVERS.pop(str(state_path), None)
+    state_path.unlink(missing_ok=True)
+    return _dump({"running": False, "stopped": True})
 
 
 def _read_serve_state(path: Path) -> dict | None:
