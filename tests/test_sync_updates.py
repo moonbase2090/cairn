@@ -306,3 +306,39 @@ def test_competing_corrections_are_recorded_resolved_and_synced(tmp_path):
     assert peer.get_memory(correction_b.key).status == "superseded"
     assert peer.get_memory(correction_c.key).status == "superseded"
     assert peer.sync_status()["conflicts"] == []
+
+
+@pytest.mark.parametrize(
+    ("status", "competitors", "message"),
+    [
+        ("archived", ["loser", "winner"], "supersede state event"),
+        (
+            "superseded",
+            ["loser", "winner", "winner"],
+            "invalid competing correction resolution",
+        ),
+        (
+            "superseded",
+            ["loser", "winner"],
+            "does not match an active competing correction",
+        ),
+    ],
+)
+def test_sync_rejects_invalid_resolution_events(tmp_path, status, competitors, message):
+    client = make_client(tmp_path / "vault.db", "agent-a")
+    event = {
+        "event_id": "event-invalid-resolution",
+        "kind": "state",
+        "key": "loser",
+        "state_revision": 1,
+        "status": status,
+        "conflict_resolution": {
+            "base_key": "base",
+            "winner_key": "winner",
+            "competitor_keys": competitors,
+            "resolved_by": "agent-a",
+        },
+    }
+
+    with pytest.raises(ValueError, match=message):
+        client.vault.apply_sync_event(event)
