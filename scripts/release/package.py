@@ -90,7 +90,7 @@ def copied_python(root: Path) -> Path:
     unix = root / "python" / "bin" / "python3"
     if unix.exists() or unix.is_symlink():
         return unix.resolve()
-    for candidate in (root / "python").glob("python3*"):
+    for candidate in (root / "python").glob("bin/python3*"):
         if candidate.is_file() and candidate.parent.name == "bin":
             return candidate
     windows = root / "python" / "python.exe"

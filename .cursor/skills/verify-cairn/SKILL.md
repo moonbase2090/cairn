@@ -21,6 +21,10 @@ copy, and confirm the hook fails; then stage formatted content, make only the
 working-tree copy unformatted, and confirm the hook passes. Repeat with a Python
 filename containing spaces. Confirm a staged change with no Python files passes.
 
+For release package changes, run `uv run pytest tests/test_release_package.py`.
+These tests build temporary tar and ZIP archives with mocked interpreter
+installation and signing functions.
+
 Cairn is a short-lived CLI, not a server that stays open. From the repository
 root, build its editable package and confirm the CLI starts:
 
