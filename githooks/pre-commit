@@ -1,25 +1,85 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env python3
+"""Check formatting for Python content currently staged in the Git index."""
 
-staged_py=$(git diff --cached --name-only --diff-filter=ACMR -- '*.py')
-[ -n "$staged_py" ] || exit 0
+from __future__ import annotations
 
-if ! command -v ruff >/dev/null 2>&1; then
-  printf '%s\n' 'Install the dev tools with: pip install -e ".[dev]"'
-  exit 1
-fi
+import shutil
+import subprocess
+import sys
 
-old_ifs=$IFS
-IFS='
-'
-set -f
-set -- $staged_py
-IFS=$old_ifs
-set +f
 
-if ruff format --check -- "$@"; then
-  exit 0
-fi
+def _git_output(*args: str) -> bytes:
+    return subprocess.run(
+        ["git", *args], check=True, stdout=subprocess.PIPE
+    ).stdout
 
-printf '%s\n' 'Fix formatting with: ruff format'
-exit 1
+
+def _staged_python_blobs() -> list[tuple[str, bytes]]:
+    changed = {
+        path
+        for path in _git_output(
+            "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--"
+        ).split(b"\0")
+        if path.endswith(b".py")
+    }
+    if not changed:
+        return []
+
+    blobs: dict[bytes, bytes] = {}
+    for entry in _git_output("ls-files", "--stage", "-z").split(b"\0"):
+        if not entry:
+            continue
+        metadata, path = entry.split(b"\t", 1)
+        _mode, object_id, stage = metadata.split()
+        if stage == b"0" and path in changed:
+            blobs[path] = object_id
+
+    staged: list[tuple[str, bytes]] = []
+    for path in sorted(changed):
+        object_id = blobs.get(path)
+        if object_id is None:
+            continue
+        content = _git_output("cat-file", "blob", object_id.decode("ascii"))
+        filename = path.decode(
+            sys.getfilesystemencoding(), errors="surrogateescape"
+        )
+        staged.append((filename, content))
+    return staged
+
+
+def main() -> int:
+    try:
+        staged = _staged_python_blobs()
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+        print(f"Could not check staged Python formatting: {exc}", file=sys.stderr)
+        return 1
+
+    if not staged:
+        return 0
+
+    ruff = shutil.which("ruff")
+    if ruff is None:
+        print('Install the dev tools with: pip install -e ".[dev]"')
+        return 1
+
+    failed = False
+    for path, content in staged:
+        result = subprocess.run(
+            [ruff, "format", "--check", "--stdin-filename", path, "-"],
+            check=False,
+            input=content,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        if result.returncode:
+            sys.stdout.buffer.write(result.stdout)
+            failed = True
+
+    if failed:
+        print("Fix formatting with: ruff format")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

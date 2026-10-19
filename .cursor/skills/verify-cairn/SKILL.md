@@ -15,10 +15,11 @@ surface-specific verification when a change touches them.
 
 For Python formatting or hook changes, install the development dependencies with
 `uv sync --extra dev`, then run `uv run ruff format --check .`.
-Run `scripts/install-hooks.sh` in a disposable clone. Stage an unformatted Python
-file and confirm the pre-commit hook fails; format and stage it again and confirm
-the hook passes. Include a filename with spaces and the case with no staged
-Python files.
+Run `scripts/install-hooks.sh` in a disposable clone. Verify the hook checks the
+index contents: stage an unformatted Python file, format only the working-tree
+copy, and confirm the hook fails; then stage formatted content, make only the
+working-tree copy unformatted, and confirm the hook passes. Repeat with a Python
+filename containing spaces. Confirm a staged change with no Python files passes.
 
 Cairn is a short-lived CLI, not a server that stays open. From the repository
 root, build its editable package and confirm the CLI starts:
