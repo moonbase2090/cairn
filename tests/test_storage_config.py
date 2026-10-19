@@ -9,6 +9,23 @@ from cairn.mcp_server import make_client
 from cairn.storage import StorageConfig, UnknownBackendError
 
 
+def valid_aws_settings(**overrides):
+    settings = {
+        "backend": "aws",
+        "region": "us-west-2",
+        "vault_id": "0123456789abcdef0123456789abcdef",
+        "vault_name": "work-vault",
+        "table": "memory",
+        "cache_table": "cache",
+        "content_bucket": "content",
+        "vector_bucket": "vectors",
+        "vector_index": "index",
+        "vector_index_arn": "arn:aws:s3vectors:us-west-2:123456789012:index/mock",
+    }
+    settings.update(overrides)
+    return settings
+
+
 @pytest.fixture
 def dirs(tmp_path, monkeypatch):
     home, vdir = tmp_path / "home", tmp_path / ".cairn"
@@ -29,6 +46,58 @@ def run(argv, capsys):
 def test_default_is_sqlite(dirs):
     _, vdir = dirs
     assert storage_config(vdir) == StorageConfig()
+
+
+@pytest.mark.parametrize("backend", [None, ""])
+def test_storage_config_requires_non_empty_string_backend(backend):
+    with pytest.raises(ValueError, match="backend must be a non-empty string"):
+        StorageConfig(backend=backend)
+
+
+def test_storage_config_requires_string_url():
+    with pytest.raises(ValueError, match="url must be a string"):
+        StorageConfig(url=123)
+
+
+def test_storage_config_only_allows_url_for_postgres():
+    with pytest.raises(ValueError, match="only supported when backend = 'postgres'"):
+        StorageConfig(url="postgresql://localhost/cairn")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"region": "not-a-region"}, "region must be an AWS region name"),
+        ({"vault_id": "invalid"}, "vault_id must be a 32-character logical vault ID"),
+        ({"vault_name": "team/work-vault"}, "vault_name must be a safe display name"),
+        ({"profile": "bad profile"}, "profile contains unsupported characters"),
+    ],
+)
+def test_aws_config_rejects_invalid_resource_values(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        StorageConfig(**valid_aws_settings(**overrides))
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://user@example.test",
+        "https://user:pass@example.test",
+        "https://example.test?mode=sync",
+        "https://example.test#fragment",
+        "https://example.test/v1",
+    ],
+)
+def test_aws_sync_endpoint_rejects_credentials_and_paths(endpoint):
+    with pytest.raises(ValueError, match="HTTPS API base URL"):
+        StorageConfig(**valid_aws_settings(sync_endpoint=endpoint))
+
+
+def test_aws_fields_are_rejected_for_other_backends():
+    with pytest.raises(
+        ValueError, match="AWS resource settings require backend = 'aws'"
+    ):
+        StorageConfig(region="us-west-2")
 
 
 def test_home_config_selects_backend(dirs):
