@@ -4,6 +4,8 @@ import argparse
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from cairn import skill_install
 from cairn.cli import build_parser, main
 
@@ -132,3 +134,160 @@ def test_muse_list_accepts_the_managed_user_skill_path(
     assert (
         skill_install.muse_skill_path(tmp_path) == "$CONFIG_DIR/skills/cairn/SKILL.md"
     )
+
+
+def _mock_muse_list(monkeypatch, home: Path, stdout: str, *, stderr="", code=0):
+    def fake_run(command, **kwargs):
+        assert command == ["muse", "skills", "list", "--source", "user", "--json"]
+        assert kwargs["env"]["HOME"] == str(home)
+        return subprocess.CompletedProcess(command, code, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(skill_install.subprocess, "run", fake_run)
+
+
+@pytest.mark.parametrize(
+    ("code", "stdout", "stderr", "message"),
+    [
+        (1, "fallback detail", "", "muse skills list failed: fallback detail"),
+        (1, "ignored", "stderr detail", "muse skills list failed: stderr detail"),
+    ],
+)
+def test_muse_list_reports_command_failure(
+    tmp_path: Path, monkeypatch, code, stdout, stderr, message
+):
+    _mock_muse_list(monkeypatch, tmp_path, stdout, stderr=stderr, code=code)
+    with pytest.raises(skill_install.SkillInstallError, match=message):
+        skill_install.muse_skill_path(tmp_path)
+
+
+def test_muse_list_reports_missing_command(tmp_path: Path, monkeypatch):
+    def missing_command(*args, **kwargs):
+        raise FileNotFoundError("muse")
+
+    monkeypatch.setattr(skill_install.subprocess, "run", missing_command)
+    with pytest.raises(skill_install.SkillInstallError, match="run muse skills list"):
+        skill_install.muse_skill_path(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "message"),
+    [
+        ("not JSON", "parse JSON"),
+        ("[]", "did not return a JSON object"),
+        ('{"skills": {}}', "did not contain a skills array"),
+        ('{"skills": [{"id": "cairn"}]}', "without a skill path"),
+    ],
+)
+def test_muse_list_rejects_invalid_responses(
+    tmp_path: Path, monkeypatch, stdout, message
+):
+    _mock_muse_list(monkeypatch, tmp_path, stdout)
+    with pytest.raises(skill_install.SkillInstallError, match=message):
+        skill_install.muse_skill_path(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        ('{"skills": [null]}', None),
+        ('{"skills": [], "diagnostics": {}}', None),
+        ('{"skills": [], "diagnostics": [null, {"path": "other"}]}', None),
+        (
+            '{"skills": [], "diagnostics": [{"path": "$CONFIG_DIR/skills/cairn"}]}',
+            "$CONFIG_DIR/skills/cairn",
+        ),
+        (
+            '{"skills": [{"name": "cairn", "path": "$CONFIG_DIR/skills/cairn"}]}',
+            "$CONFIG_DIR/skills/cairn",
+        ),
+    ],
+)
+def test_muse_list_checks_skill_entries_and_diagnostics(
+    tmp_path: Path, monkeypatch, stdout, expected
+):
+    _mock_muse_list(monkeypatch, tmp_path, stdout)
+    assert skill_install.muse_skill_path(tmp_path) == expected
+
+
+def test_detected_install_reports_when_no_agent_is_available(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setattr(skill_install, "detected_targets", lambda *args: ([], False))
+    assert skill_install.install_skill(
+        tmp_path,
+        "detected",
+        path_value="",
+        config_home=tmp_path / ".config",
+    ) == [skill_install.InstallResult("detected", "no supported agents detected", "")]
+
+
+def test_check_reports_current_and_replaceable_file_targets(tmp_path: Path):
+    codex_dir = tmp_path / ".codex" / "skills" / "cairn"
+    shared_dir = tmp_path / ".agents" / "skills" / "cairn"
+    codex_dir.mkdir(parents=True)
+    shared_dir.mkdir(parents=True)
+    (codex_dir / "SKILL.md").write_bytes(source_skill().read_bytes())
+    (shared_dir / "SKILL.md").write_text("local edit\n")
+
+    results = skill_install.install_skill(tmp_path, "codex", check=True, force=True)
+
+    assert [(result.agent, result.status) for result in results] == [
+        ("codex", "current"),
+        ("shared", "would replace"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("path", "force", "status"),
+    [
+        (None, False, "missing"),
+        ("$CONFIG_DIR/skills/cairn/SKILL.md", False, "present; left in place"),
+        ("$CONFIG_DIR/skills/cairn/SKILL.md", True, "would replace"),
+    ],
+)
+def test_muse_check_reports_presence_and_force_status(
+    tmp_path: Path, monkeypatch, path, force, status
+):
+    monkeypatch.setattr(skill_install, "muse_skill_path", lambda home: path)
+    assert skill_install.install_skill(tmp_path, "muse", check=True, force=force) == [
+        skill_install.InstallResult(
+            "muse", status, path or "$CONFIG_DIR/skills/cairn/SKILL.md"
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("path", "force", "status", "calls"),
+    [
+        (None, False, "installed", [False]),
+        (
+            "$CONFIG_DIR/skills/cairn/SKILL.md",
+            False,
+            "already present; left in place",
+            [],
+        ),
+        (
+            "$CONFIG_DIR/skills/cairn/SKILL.md",
+            True,
+            "installed",
+            [True],
+        ),
+    ],
+)
+def test_muse_install_respects_presence_and_force(
+    tmp_path: Path, monkeypatch, path, force, status, calls
+):
+    installs = []
+    monkeypatch.setattr(skill_install, "muse_skill_path", lambda home: path)
+    monkeypatch.setattr(
+        skill_install, "install_muse", lambda home, forced: installs.append(forced)
+    )
+
+    result = skill_install.install_skill(tmp_path, "muse", force=force)
+
+    assert result == [
+        skill_install.InstallResult(
+            "muse", status, path or "$CONFIG_DIR/skills/cairn/SKILL.md"
+        )
+    ]
+    assert installs == calls
