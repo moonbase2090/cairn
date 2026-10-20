@@ -1,4 +1,5 @@
 """Continuous SQLite backups through Litestream's WAL replication format."""
+
 from __future__ import annotations
 
 import contextlib
@@ -30,8 +31,11 @@ _DURATION = re.compile(r"([1-9][0-9]*)([smh])\Z")
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}\Z")
 _DOC_REF = re.compile(r"sha256:([0-9a-f]{64})\Z")
 _CREDENTIAL_ENV = (
-    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-    "LITESTREAM_ACCESS_KEY_ID", "LITESTREAM_SECRET_ACCESS_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "LITESTREAM_ACCESS_KEY_ID",
+    "LITESTREAM_SECRET_ACCESS_KEY",
 )
 
 
@@ -68,23 +72,38 @@ def _read_config(path: Path) -> dict | None:
 
 def _duration(value: object, field: str) -> tuple[str, int]:
     if not isinstance(value, str) or not (match := _DURATION.fullmatch(value)):
-        raise ValueError(f"{field} must be a positive duration such as '30s', '5m', or '24h'")
+        raise ValueError(
+            f"{field} must be a positive duration such as '30s', '5m', or '24h'"
+        )
     amount = int(match.group(1))
     seconds = amount * {"s": 1, "m": 60, "h": 3600}[match.group(2)]
     return value, seconds
 
 
 def _parse_target(
-    raw: dict, vault_dir: Path, default_name: str, config_dir: Path,
+    raw: dict,
+    vault_dir: Path,
+    default_name: str,
+    config_dir: Path,
 ) -> BackupTarget:
     allowed = {
-        "name", "kind", "bucket", "endpoint", "region", "path", "sync_interval",
-        "snapshot_interval", "retention", "l0_retention",
+        "name",
+        "kind",
+        "bucket",
+        "endpoint",
+        "region",
+        "path",
+        "sync_interval",
+        "snapshot_interval",
+        "retention",
+        "l0_retention",
     }
     extra = set(raw) - allowed
     if extra:
         if extra & {"access_key", "secret_key", "access_key_id", "secret_access_key"}:
-            raise ValueError("backup credentials belong in standard environment or profile settings, not config.toml")
+            raise ValueError(
+                "backup credentials belong in standard environment or profile settings, not config.toml"
+            )
         raise ValueError(f"unknown [[backup]] setting(s): {', '.join(sorted(extra))}")
 
     kind = raw.get("kind")
@@ -96,55 +115,114 @@ def _parse_target(
     requested_name = raw.get("name")
     name = requested_name if requested_name is not None else default_name
     if not isinstance(name, str) or not _NAME.fullmatch(name):
-        raise ValueError("backup name must start with a letter or number and contain only letters, numbers, '.', '_' or '-'")
+        raise ValueError(
+            "backup name must start with a letter or number and contain only letters, numbers, '.', '_' or '-'"
+        )
 
     sync_interval = raw.get("sync_interval", DEFAULT_SYNC_INTERVAL)
-    if isinstance(sync_interval, bool) or not isinstance(sync_interval, (int, float)) or sync_interval <= 0:
-        raise ValueError(f"backup {name!r}: sync_interval must be a positive number of seconds")
+    if (
+        isinstance(sync_interval, bool)
+        or not isinstance(sync_interval, (int, float))
+        or sync_interval <= 0
+    ):
+        raise ValueError(
+            f"backup {name!r}: sync_interval must be a positive number of seconds"
+        )
     snapshot_interval, snapshot_seconds = _duration(
         raw.get("snapshot_interval", DEFAULT_SNAPSHOT_INTERVAL),
         f"backup {name!r} snapshot_interval",
     )
-    retention, _ = _duration(raw.get("retention", DEFAULT_RETENTION), f"backup {name!r} retention")
+    retention, _ = _duration(
+        raw.get("retention", DEFAULT_RETENTION), f"backup {name!r} retention"
+    )
     l0_retention, _ = _duration(
         raw.get("l0_retention", DEFAULT_L0_RETENTION), f"backup {name!r} l0_retention"
     )
 
-    settings = (name, float(sync_interval), snapshot_interval, snapshot_seconds,
-                retention, l0_retention)
+    settings = (
+        name,
+        float(sync_interval),
+        snapshot_interval,
+        snapshot_seconds,
+        retention,
+        l0_retention,
+    )
     if kind == "s3":
         return _parse_s3_target(raw, vault_dir, *settings)
     return _parse_file_target(raw, vault_dir, config_dir, *settings)
 
 
-def _parse_s3_target(raw: dict, vault_dir: Path, name: str, sync_interval: float,
-                     snapshot_interval: str, snapshot_seconds: int, retention: str,
-                     l0_retention: str) -> BackupTarget:
+def _parse_s3_target(
+    raw: dict,
+    vault_dir: Path,
+    name: str,
+    sync_interval: float,
+    snapshot_interval: str,
+    snapshot_seconds: int,
+    retention: str,
+    l0_retention: str,
+) -> BackupTarget:
     bucket = raw.get("bucket")
     if not isinstance(bucket, str) or not bucket.strip() or "/" in bucket:
         raise ValueError(f"backup {name!r}: bucket must be a non-empty bucket name")
     endpoint = raw.get("endpoint")
     parsed = urlsplit(endpoint) if isinstance(endpoint, str) else None
-    if endpoint is not None and (parsed is None or parsed.scheme not in {"http", "https"}
-                                 or not parsed.hostname or parsed.username is not None
-                                 or parsed.password is not None or parsed.query or parsed.fragment):
-        raise ValueError(f"backup {name!r}: endpoint must be an http(s) URL without credentials, query, or fragment")
+    if endpoint is not None and (
+        parsed is None
+        or parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            f"backup {name!r}: endpoint must be an http(s) URL without credentials, query, or fragment"
+        )
     region = raw.get("region", "us-east-1")
     if not isinstance(region, str) or not region.strip():
         raise ValueError(f"backup {name!r}: region must be a non-empty string")
     prefix = raw.get("path")
     if prefix is None:
-        digest = hashlib.sha256(str((vault_dir / "vault.db").resolve()).encode()).hexdigest()[:20]
+        digest = hashlib.sha256(
+            str((vault_dir / "vault.db").resolve()).encode()
+        ).hexdigest()[:20]
         prefix = f"cairn/{digest}"
-    if not isinstance(prefix, str) or not prefix.strip() or prefix.startswith("/") or ".." in Path(prefix).parts:
-        raise ValueError(f"backup {name!r}: path must be a non-empty object prefix without '..'")
-    return BackupTarget(name, "s3", bucket, prefix.strip("/"), endpoint, region,
-                        sync_interval, snapshot_interval, snapshot_seconds, retention, l0_retention)
+    if (
+        not isinstance(prefix, str)
+        or not prefix.strip()
+        or prefix.startswith("/")
+        or ".." in Path(prefix).parts
+    ):
+        raise ValueError(
+            f"backup {name!r}: path must be a non-empty object prefix without '..'"
+        )
+    return BackupTarget(
+        name,
+        "s3",
+        bucket,
+        prefix.strip("/"),
+        endpoint,
+        region,
+        sync_interval,
+        snapshot_interval,
+        snapshot_seconds,
+        retention,
+        l0_retention,
+    )
 
 
-def _parse_file_target(raw: dict, vault_dir: Path, config_dir: Path, name: str,
-                       sync_interval: float, snapshot_interval: str, snapshot_seconds: int,
-                       retention: str, l0_retention: str) -> BackupTarget:
+def _parse_file_target(
+    raw: dict,
+    vault_dir: Path,
+    config_dir: Path,
+    name: str,
+    sync_interval: float,
+    snapshot_interval: str,
+    snapshot_seconds: int,
+    retention: str,
+    l0_retention: str,
+) -> BackupTarget:
     local_path = raw.get("path")
     if not isinstance(local_path, str) or not local_path.strip():
         raise ValueError(f"backup {name!r}: a local target needs path")
@@ -154,19 +232,40 @@ def _parse_file_target(raw: dict, vault_dir: Path, config_dir: Path, name: str,
     folder = folder.resolve()
     vault = vault_dir.resolve()
     if folder == vault or folder.is_relative_to(vault):
-        raise ValueError(f"backup {name!r}: local backup path must be outside the vault directory")
-    return BackupTarget(name, "file", None, str(folder), None, "", sync_interval,
-                        snapshot_interval, snapshot_seconds, retention, l0_retention)
+        raise ValueError(
+            f"backup {name!r}: local backup path must be outside the vault directory"
+        )
+    return BackupTarget(
+        name,
+        "file",
+        None,
+        str(folder),
+        None,
+        "",
+        sync_interval,
+        snapshot_interval,
+        snapshot_seconds,
+        retention,
+        l0_retention,
+    )
 
 
 def backup_settings(vault_dir: Path, home: Path | None = None) -> BackupSettings:
     """Read [[backup]] targets from the vault config, then the user's config."""
     if home is None:
         home = Path.home()
-        xdg_config = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")) / "cairn" / "config.toml"
+        xdg_config = (
+            Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
+            / "cairn"
+            / "config.toml"
+        )
     else:
         xdg_config = home / ".config" / "cairn" / "config.toml"
-    for path in (vault_dir / "config.toml", home / ".cairn" / "config.toml", xdg_config):
+    for path in (
+        vault_dir / "config.toml",
+        home / ".cairn" / "config.toml",
+        xdg_config,
+    ):
         config = _read_config(path)
         if config is None or "backup" not in config:
             continue
@@ -182,10 +281,12 @@ def backup_settings(vault_dir: Path, home: Path | None = None) -> BackupSettings
             normalized_kind = "file" if kind == "local" else kind
             kind_counts[normalized_kind] = kind_counts.get(normalized_kind, 0) + 1
             ordinal = kind_counts[normalized_kind]
-            default_name = ("local" if normalized_kind == "file" else "s3")
+            default_name = "local" if normalized_kind == "file" else "s3"
             if ordinal > 1:
                 default_name += f"-{ordinal}"
-            targets_list.append(_parse_target(raw, vault_dir, default_name, path.parent))
+            targets_list.append(
+                _parse_target(raw, vault_dir, default_name, path.parent)
+            )
         targets = tuple(targets_list)
         names = [target.name for target in targets]
         if len(set(names)) != len(names):
@@ -234,10 +335,17 @@ def _config_text(target: BackupTarget, db_path: Path, metadata_dir: Path) -> str
 def _write_config(target: BackupTarget, db_path: Path, vault_dir: Path) -> Path:
     runtime_dir = vault_dir / "backup" / target.name
     runtime_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    identity = json.dumps([
-        str(db_path.resolve()), target.kind, target.bucket, target.path,
-        target.endpoint, target.region,
-    ], sort_keys=True)
+    identity = json.dumps(
+        [
+            str(db_path.resolve()),
+            target.kind,
+            target.bucket,
+            target.path,
+            target.endpoint,
+            target.region,
+        ],
+        sort_keys=True,
+    )
     fingerprint = hashlib.sha256(identity.encode()).hexdigest()[:20]
     metadata_dir = runtime_dir / "meta" / fingerprint
     metadata_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -257,15 +365,24 @@ def _litestream() -> str:
         raise FileNotFoundError(
             "backup requires Litestream 0.5.16 or later; install it from https://litestream.io/install/"
         )
-    result = subprocess.run([binary, "version"], text=True, capture_output=True, check=False)
+    result = subprocess.run(
+        [binary, "version"], text=True, capture_output=True, check=False
+    )
     match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", result.stdout + result.stderr)
-    if result.returncode or match is None or tuple(map(int, match.groups())) < MIN_LITESTREAM_VERSION:
+    if (
+        result.returncode
+        or match is None
+        or tuple(map(int, match.groups())) < MIN_LITESTREAM_VERSION
+    ):
         raise OSError("backup requires Litestream 0.5.16 or later")
     return binary
 
 
 def _clean_error(text: str, returncode: int) -> str:
-    detail = next((line.strip() for line in reversed(text.splitlines()) if line.strip()), "no details provided")
+    detail = next(
+        (line.strip() for line in reversed(text.splitlines()) if line.strip()),
+        "no details provided",
+    )
     for key in _CREDENTIAL_ENV:
         secret = os.environ.get(key)
         if secret:
@@ -275,11 +392,16 @@ def _clean_error(text: str, returncode: int) -> str:
 
 def _run_litestream(binary: str, args: list[str], stop=None) -> tuple[int, str]:
     process = subprocess.Popen(
-        [binary, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        [binary, *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
     while True:
         try:
-            _stdout, stderr = process.communicate(timeout=0.2 if stop is not None else None)
+            _stdout, stderr = process.communicate(
+                timeout=0.2 if stop is not None else None
+            )
             return process.returncode, stderr
         except subprocess.TimeoutExpired:
             if stop is None or not stop.is_set():
@@ -302,7 +424,11 @@ def _read_state(vault_dir: Path) -> dict:
         value = json.loads((vault_dir / "backup" / "status.json").read_text())
     except (OSError, ValueError):
         return {"targets": {}}
-    return value if isinstance(value, dict) and isinstance(value.get("targets"), dict) else {"targets": {}}
+    return (
+        value
+        if isinstance(value, dict) and isinstance(value.get("targets"), dict)
+        else {"targets": {}}
+    )
 
 
 def _write_state(vault_dir: Path, state: dict) -> None:
@@ -390,7 +516,9 @@ def backup_status(vault_dir: Path, settings: BackupSettings) -> dict:
                 "kind": target.kind,
                 "last_success": saved_targets.get(target.name, {}).get("last_success"),
                 "last_error": saved_targets.get(target.name, {}).get("last_error"),
-                "last_snapshot": saved_targets.get(target.name, {}).get("last_snapshot"),
+                "last_snapshot": saved_targets.get(target.name, {}).get(
+                    "last_snapshot"
+                ),
             }
             for target in settings.targets
         ],
@@ -408,9 +536,12 @@ def _document_refs(db_path: Path) -> list[str]:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(memories)")}
         if "content_ref" not in columns:
             return []
-        refs = [row[0] for row in connection.execute(
-            "SELECT DISTINCT content_ref FROM memories WHERE content_ref IS NOT NULL"
-        )]
+        refs = [
+            row[0]
+            for row in connection.execute(
+                "SELECT DISTINCT content_ref FROM memories WHERE content_ref IS NOT NULL"
+            )
+        ]
     for ref in refs:
         if not isinstance(ref, str) or not _DOC_REF.fullmatch(ref):
             raise OSError("vault contains an unsupported external document reference")
@@ -430,7 +561,9 @@ def _document_bytes(vault_dir: Path, ref: str) -> bytes:
     except (OSError, UnicodeDecodeError) as error:
         raise OSError(f"cannot read external vault document {source}") from error
     if f"sha256:{content_digest(text)}" != ref:
-        raise OSError(f"external vault document failed its content hash check: {source}")
+        raise OSError(
+            f"external vault document failed its content hash check: {source}"
+        )
     return payload
 
 
@@ -449,7 +582,9 @@ def _s3_doc_key(target: BackupTarget, ref: str) -> str:
     return f"{target.path}/cairn-docs/{digest[:2]}/{digest[2:4]}/{digest}.md"
 
 
-def _sync_file_documents(target: BackupTarget, refs: list[str], vault_dir: Path) -> None:
+def _sync_file_documents(
+    target: BackupTarget, refs: list[str], vault_dir: Path
+) -> None:
     remote_root = Path(target.path) / "cairn-docs"
     for ref in refs:
         digest = ref.split(":", 1)[1]
@@ -469,8 +604,9 @@ def _sync_file_documents(target: BackupTarget, refs: list[str], vault_dir: Path)
                 temporary.unlink()
 
 
-def _s3_document_is_current(client, target: BackupTarget, key: str,
-                            digest: str, size: int) -> bool:
+def _s3_document_is_current(
+    client, target: BackupTarget, key: str, digest: str, size: int
+) -> bool:
     try:
         current = client.head_object(Bucket=target.bucket, Key=key)
     except client.exceptions.ClientError as error:
@@ -478,8 +614,10 @@ def _s3_document_is_current(client, target: BackupTarget, key: str,
         if code in {"404", "NoSuchKey", "NotFound"}:
             return False
         raise
-    return (current.get("Metadata", {}).get("cairn-sha256") == digest
-            and current.get("ContentLength") == size)
+    return (
+        current.get("Metadata", {}).get("cairn-sha256") == digest
+        and current.get("ContentLength") == size
+    )
 
 
 def _sync_s3_document(client, target: BackupTarget, ref: str, payload: bytes) -> None:
@@ -487,8 +625,9 @@ def _sync_s3_document(client, target: BackupTarget, ref: str, payload: bytes) ->
     key = _s3_doc_key(target, ref)
     if _s3_document_is_current(client, target, key, digest, len(payload)):
         return
-    client.put_object(Bucket=target.bucket, Key=key, Body=payload,
-                      Metadata={"cairn-sha256": digest})
+    client.put_object(
+        Bucket=target.bucket, Key=key, Body=payload, Metadata={"cairn-sha256": digest}
+    )
 
 
 def _sync_s3_documents(target: BackupTarget, refs: list[str], vault_dir: Path) -> None:
@@ -499,9 +638,15 @@ def _sync_s3_documents(target: BackupTarget, refs: list[str], vault_dir: Path) -
             _sync_s3_document(client, target, ref, payload)
         except Exception as error:  # noqa: BLE001 - sanitize errors from the S3 client boundary
             response = getattr(error, "response", {})
-            code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+            code = (
+                response.get("Error", {}).get("Code")
+                if isinstance(response, dict)
+                else None
+            )
             detail = f" ({code})" if code else f" ({type(error).__name__})"
-            raise OSError(f"could not sync external documents to S3 backup {target.name!r}{detail}") from None
+            raise OSError(
+                f"could not sync external documents to S3 backup {target.name!r}{detail}"
+            ) from None
 
 
 def _sync_documents(target: BackupTarget, db_path: Path, vault_dir: Path) -> None:
@@ -521,7 +666,9 @@ def _fetch_document(target: BackupTarget, ref: str, client=None) -> bytes:
 
 def _fetch_file_document(target: BackupTarget, ref: str) -> bytes:
     digest = ref.split(":", 1)[1]
-    source = Path(target.path) / "cairn-docs" / digest[:2] / digest[2:4] / f"{digest}.md"
+    source = (
+        Path(target.path) / "cairn-docs" / digest[:2] / digest[2:4] / f"{digest}.md"
+    )
     try:
         return source.read_bytes()
     except OSError as error:
@@ -536,13 +683,20 @@ def _fetch_s3_document(target: BackupTarget, ref: str, client=None) -> bytes:
         return response["Body"].read()
     except Exception as error:  # noqa: BLE001 - sanitize errors from the S3 client boundary
         response = getattr(error, "response", {})
-        code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+        code = (
+            response.get("Error", {}).get("Code")
+            if isinstance(response, dict)
+            else None
+        )
         detail = f" ({code})" if code else f" ({type(error).__name__})"
-        raise OSError(f"S3 backup {target.name!r} is missing external document {ref}{detail}") from None
+        raise OSError(
+            f"S3 backup {target.name!r} is missing external document {ref}{detail}"
+        ) from None
 
 
-def _stage_documents(refs: list[str], target: BackupTarget, vault_dir: Path,
-                     staging_root: Path, client) -> None:
+def _stage_documents(
+    refs: list[str], target: BackupTarget, vault_dir: Path, staging_root: Path, client
+) -> None:
     from .models import content_digest
 
     for ref in refs:
@@ -570,7 +724,9 @@ def _install_staged_documents(staging_root: Path, vault_dir: Path) -> None:
             os.link(staged, destination)
         except FileExistsError:
             if destination.read_bytes() != staged.read_bytes():
-                raise OSError(f"existing vault document has unexpected content: {destination}")
+                raise OSError(
+                    f"existing vault document has unexpected content: {destination}"
+                )
 
 
 def _install_documents(db_path: Path, target: BackupTarget, vault_dir: Path) -> None:
@@ -585,22 +741,37 @@ def _install_documents(db_path: Path, target: BackupTarget, vault_dir: Path) -> 
         _install_staged_documents(staging_root, vault_dir)
 
 
-def _run_target_once(target: BackupTarget, db_path: Path, vault_dir: Path,
-                     binary: str, state: dict, stop=None) -> None:
+def _run_target_once(
+    target: BackupTarget,
+    db_path: Path,
+    vault_dir: Path,
+    binary: str,
+    state: dict,
+    stop=None,
+) -> None:
     now = time.time()
     previous = state["targets"].get(target.name, {})
-    identity = json.dumps([
-        str(db_path.resolve()), target.kind, target.bucket, target.path,
-        target.endpoint, target.region,
-    ], sort_keys=True)
+    identity = json.dumps(
+        [
+            str(db_path.resolve()),
+            target.kind,
+            target.bucket,
+            target.path,
+            target.endpoint,
+            target.region,
+        ],
+        sort_keys=True,
+    )
     fingerprint = hashlib.sha256(identity.encode()).hexdigest()[:20]
     last_snapshot = previous.get("last_snapshot")
     try:
         last_snapshot_time = dt.datetime.fromisoformat(last_snapshot).timestamp()
     except (AttributeError, TypeError, ValueError):
         last_snapshot_time = 0
-    take_snapshot = (previous.get("fingerprint") != fingerprint
-                     or now - last_snapshot_time >= target.snapshot_seconds)
+    take_snapshot = (
+        previous.get("fingerprint") != fingerprint
+        or now - last_snapshot_time >= target.snapshot_seconds
+    )
     _sync_documents(target, db_path, vault_dir)
     config_path = _write_config(target, db_path, vault_dir)
     args = ["replicate", "-once", "-enforce-retention"]
@@ -615,7 +786,9 @@ def _run_target_once(target: BackupTarget, db_path: Path, vault_dir: Path,
         # A writer may commit a new content_ref after the pre-sync scan but
         # before Litestream captures the WAL. Sync again before reporting success.
         _sync_documents(target, db_path, vault_dir)
-        result.update(last_success=_timestamp(), last_error=None, fingerprint=fingerprint)
+        result.update(
+            last_success=_timestamp(), last_error=None, fingerprint=fingerprint
+        )
         if take_snapshot:
             result["last_snapshot"] = _timestamp()
     else:
@@ -626,10 +799,14 @@ def _run_target_once(target: BackupTarget, db_path: Path, vault_dir: Path,
 
 def replicate(vault_dir: Path, settings: BackupSettings) -> int:
     if not settings.targets:
-        raise ValueError("no backup targets are configured; add one or more [[backup]] tables")
+        raise ValueError(
+            "no backup targets are configured; add one or more [[backup]] tables"
+        )
     db_path = vault_dir / "vault.db"
     if not db_path.is_file():
-        raise FileNotFoundError(f"no SQLite vault at {db_path} — run `cairn init` first")
+        raise FileNotFoundError(
+            f"no SQLite vault at {db_path} — run `cairn init` first"
+        )
     binary = _litestream()
     stop = threading.Event()
     old_handlers = {}
@@ -644,13 +821,18 @@ def replicate(vault_dir: Path, settings: BackupSettings) -> int:
             if lock is None:
                 raise OSError("backup replication is already running for this vault")
             state = _read_state(vault_dir)
-            print(f"replicating SQLite backups to {len(settings.targets)} target(s)", flush=True)
+            print(
+                f"replicating SQLite backups to {len(settings.targets)} target(s)",
+                flush=True,
+            )
             while not stop.is_set():
                 for target in settings.targets:
                     if stop.is_set():
                         break
                     try:
-                        _run_target_once(target, db_path, vault_dir, binary, state, stop)
+                        _run_target_once(
+                            target, db_path, vault_dir, binary, state, stop
+                        )
                     except OSError as error:
                         previous = state["targets"].get(target.name, {})
                         previous["last_error"] = str(error)
@@ -668,7 +850,9 @@ def _target_named(settings: BackupSettings, name: str) -> BackupTarget:
     for target in settings.targets:
         if target.name == name:
             return target
-    available = ", ".join(target.name for target in settings.targets) or "none configured"
+    available = (
+        ", ".join(target.name for target in settings.targets) or "none configured"
+    )
     raise ValueError(f"unknown backup target {name!r}; available: {available}")
 
 
@@ -678,7 +862,9 @@ def _validate_timestamp(value: str | None) -> str | None:
     try:
         parsed = dt.datetime.fromisoformat(value)
     except ValueError as error:
-        raise ValueError("--at must be an ISO 8601 timestamp with a timezone, such as 2026-09-29T18:00:00Z") from error
+        raise ValueError(
+            "--at must be an ISO 8601 timestamp with a timezone, such as 2026-09-29T18:00:00Z"
+        ) from error
     if parsed.tzinfo is None:
         raise ValueError("--at must include a timezone, for example 'Z' or '+00:00'")
     normalized = parsed.astimezone(dt.UTC)
@@ -688,13 +874,25 @@ def _validate_timestamp(value: str | None) -> str | None:
 
 def _write_project_identity(vault_dir: Path, identity) -> None:
     if not (vault_dir / "project.json").exists():
-        project = vault_dir.parent.name if vault_dir.name == ".cairn" else vault_dir.name
+        project = (
+            vault_dir.parent.name if vault_dir.name == ".cairn" else vault_dir.name
+        )
         team = identity[0] if identity else project
-        agent = os.environ.get("CAIRN_AGENT") or (identity[1] if identity else "cairn-cli")
-        (vault_dir / "project.json").write_text(json.dumps({
-            "project": project, "slug": project.lower().replace(" ", "-"),
-            "team": team, "agent_id": agent,
-        }, indent=2) + "\n")
+        agent = os.environ.get("CAIRN_AGENT") or (
+            identity[1] if identity else "cairn-cli"
+        )
+        (vault_dir / "project.json").write_text(
+            json.dumps(
+                {
+                    "project": project,
+                    "slug": project.lower().replace(" ", "-"),
+                    "team": team,
+                    "agent_id": agent,
+                },
+                indent=2,
+            )
+            + "\n"
+        )
 
 
 def _ensure_sqlite_gitignore(vault_dir: Path) -> None:
@@ -713,7 +911,11 @@ def _restore_metadata(vault_dir: Path, db_path: Path) -> None:
     from .embed import format_embedder_hint
 
     with sqlite3.connect(db_path) as connection:
-        values = dict(connection.execute("SELECT k, v FROM meta WHERE k IN ('embed_model', 'dims')"))
+        values = dict(
+            connection.execute(
+                "SELECT k, v FROM meta WHERE k IN ('embed_model', 'dims')"
+            )
+        )
         identity = connection.execute(
             "SELECT team_id, agent_id FROM memories ORDER BY rowid LIMIT 1"
         ).fetchone()
@@ -724,19 +926,39 @@ def _restore_metadata(vault_dir: Path, db_path: Path) -> None:
     _ensure_sqlite_gitignore(vault_dir)
 
 
-def restore(vault_dir: Path, settings: BackupSettings, name: str, at: str | None = None) -> dict:
+def restore(
+    vault_dir: Path, settings: BackupSettings, name: str, at: str | None = None
+) -> dict:
     target = _target_named(settings, name)
     timestamp = _validate_timestamp(at)
     db_path = vault_dir / "vault.db"
-    sidecars = [db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm"), Path(f"{db_path}-journal")]
+    sidecars = [
+        db_path,
+        Path(f"{db_path}-wal"),
+        Path(f"{db_path}-shm"),
+        Path(f"{db_path}-journal"),
+    ]
     if any(path.exists() for path in sidecars):
-        raise FileExistsError(f"{db_path} or one of its SQLite sidecars already exists; move it aside before restoring")
+        raise FileExistsError(
+            f"{db_path} or one of its SQLite sidecars already exists; move it aside before restoring"
+        )
     binary = _litestream()
     vault_dir.mkdir(parents=True, exist_ok=True)
     config_path = _write_config(target, db_path, vault_dir)
-    with tempfile.TemporaryDirectory(prefix="cairn-restore-", dir=vault_dir) as temporary_dir:
+    with tempfile.TemporaryDirectory(
+        prefix="cairn-restore-", dir=vault_dir
+    ) as temporary_dir:
         output_path = Path(temporary_dir) / "vault.db"
-        args = ["restore", "-config", str(config_path), "-o", str(output_path), "-integrity-check", "full", "-json"]
+        args = [
+            "restore",
+            "-config",
+            str(config_path),
+            "-o",
+            str(output_path),
+            "-integrity-check",
+            "full",
+            "-json",
+        ]
         if timestamp:
             args.extend(["-timestamp", timestamp])
         args.append(str(db_path.resolve()))
@@ -744,12 +966,20 @@ def restore(vault_dir: Path, settings: BackupSettings, name: str, at: str | None
         if code:
             raise OSError(_clean_error(stderr, code))
         if not output_path.is_file():
-            raise OSError("Litestream reported success without creating a restored database")
+            raise OSError(
+                "Litestream reported success without creating a restored database"
+            )
         with sqlite3.connect(output_path) as connection:
             check = connection.execute("PRAGMA integrity_check").fetchone()[0]
         if check != "ok":
-            raise OSError(f"restored SQLite database failed its integrity check: {check}")
+            raise OSError(
+                f"restored SQLite database failed its integrity check: {check}"
+            )
         _install_documents(output_path, target, vault_dir)
         os.replace(output_path, db_path)
     _restore_metadata(vault_dir, db_path)
-    return {"restored": str(db_path), "target": target.name, "at": timestamp or "latest"}
+    return {
+        "restored": str(db_path),
+        "target": target.name,
+        "at": timestamp or "latest",
+    }

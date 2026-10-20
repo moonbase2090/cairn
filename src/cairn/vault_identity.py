@@ -1,4 +1,5 @@
 """Stable logical identity shared by replicas of one Cairn vault."""
+
 from __future__ import annotations
 
 import json
@@ -28,7 +29,9 @@ def safe_vault_name(value: object, fallback: str = "cairn") -> str:
     candidate = str(value or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
     candidate = "".join(char for char in candidate if char.isprintable()).strip()
     if candidate in {"", ".", ".."}:
-        candidate = str(fallback or "cairn").strip().replace("\\", "/").rsplit("/", 1)[-1]
+        candidate = (
+            str(fallback or "cairn").strip().replace("\\", "/").rsplit("/", 1)[-1]
+        )
         candidate = "".join(char for char in candidate if char.isprintable()).strip()
     return candidate or "cairn"
 
@@ -85,7 +88,9 @@ def load_vault_identity(get_meta: Callable[[str], str | None]) -> VaultIdentity:
     try:
         return VaultIdentity(vault_id, name)
     except ValueError as error:
-        raise RuntimeError("vault identity is invalid; refusing to use this vault") from error
+        raise RuntimeError(
+            "vault identity is invalid; refusing to use this vault"
+        ) from error
 
 
 def split_legacy_cursor_peer(peer: str) -> tuple[str, str]:

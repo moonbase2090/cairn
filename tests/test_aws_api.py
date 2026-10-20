@@ -17,7 +17,12 @@ sync_api = importlib.import_module("sync_api")
 
 
 VAULT_ID = "0123456789abcdef0123456789abcdef"
-CALLER = {"vault_id": VAULT_ID, "token_id": "ct-member", "agent_id": "agent-a", "curator": False}
+CALLER = {
+    "vault_id": VAULT_ID,
+    "token_id": "ct-member",
+    "agent_id": "agent-a",
+    "curator": False,
+}
 
 
 class FakeTokenTable:
@@ -62,7 +67,8 @@ class FakeVault:
     def export_sync_events(self, after, limit):
         events = [event for event in self.events if event["feed_seq"] > after][:limit]
         return {
-            "pack": "cairn-sync-2", "after": after,
+            "pack": "cairn-sync-2",
+            "after": after,
             "cursor": events[-1]["feed_seq"] if events else after,
             "events": events,
         }
@@ -107,41 +113,66 @@ def response_body(response):
 def test_authorizer_looks_up_only_the_vault_qualified_token_digest():
     token = "cairn_example_secret_token"
     digest = hashlib.sha256(token.encode()).hexdigest()
-    table = FakeTokenTable({
-        "recordType": "server-token", "vault_id": VAULT_ID,
-        "token_id": "ct-member", "agent_id": "agent-a", "curator": False,
-        "revoked": False,
-    })
+    table = FakeTokenTable(
+        {
+            "recordType": "server-token",
+            "vault_id": VAULT_ID,
+            "token_id": "ct-member",
+            "agent_id": "agent-a",
+            "curator": False,
+            "revoked": False,
+        }
+    )
 
     result = authorizer.authorize_request(
-        {"headers": {"Authorization": f"Bearer {token}"}}, table, VAULT_ID,
+        {"headers": {"Authorization": f"Bearer {token}"}},
+        table,
+        VAULT_ID,
     )
 
     assert result == {"isAuthorized": True, "context": CALLER}
-    assert table.calls == [{
-        "Key": {"PK": f"VAULT#{VAULT_ID}#TOKEN#{digest}", "SK": "TOKEN"},
-        "ConsistentRead": True,
-    }]
+    assert table.calls == [
+        {
+            "Key": {"PK": f"VAULT#{VAULT_ID}#TOKEN#{digest}", "SK": "TOKEN"},
+            "ConsistentRead": True,
+        }
+    ]
     assert token not in json.dumps(result)
     assert digest not in json.dumps(result)
 
 
 def test_authorizer_rejects_revoked_and_wrong_vault_memberships():
     event_data = {"headers": {"authorization": "Bearer cairn_token"}}
-    revoked = FakeTokenTable({
-        "recordType": "server-token", "vault_id": VAULT_ID,
-        "token_id": "ct-member", "agent_id": "agent-a", "curator": False,
-        "revoked": True,
-    })
-    wrong_vault = FakeTokenTable({
-        "recordType": "server-token", "vault_id": "f" * 32,
-        "token_id": "ct-member", "agent_id": "agent-a", "curator": False,
-        "revoked": False,
-    })
+    revoked = FakeTokenTable(
+        {
+            "recordType": "server-token",
+            "vault_id": VAULT_ID,
+            "token_id": "ct-member",
+            "agent_id": "agent-a",
+            "curator": False,
+            "revoked": True,
+        }
+    )
+    wrong_vault = FakeTokenTable(
+        {
+            "recordType": "server-token",
+            "vault_id": "f" * 32,
+            "token_id": "ct-member",
+            "agent_id": "agent-a",
+            "curator": False,
+            "revoked": False,
+        }
+    )
 
-    assert authorizer.authorize_request(event_data, revoked, VAULT_ID) == {"isAuthorized": False}
-    assert authorizer.authorize_request(event_data, wrong_vault, VAULT_ID) == {"isAuthorized": False}
-    assert authorizer.authorize_request({}, wrong_vault, VAULT_ID) == {"isAuthorized": False}
+    assert authorizer.authorize_request(event_data, revoked, VAULT_ID) == {
+        "isAuthorized": False
+    }
+    assert authorizer.authorize_request(event_data, wrong_vault, VAULT_ID) == {
+        "isAuthorized": False
+    }
+    assert authorizer.authorize_request({}, wrong_vault, VAULT_ID) == {
+        "isAuthorized": False
+    }
 
 
 def test_health_uses_the_stable_endpoint_identity():
@@ -149,13 +180,19 @@ def test_health_uses_the_stable_endpoint_identity():
     request = event("/health", "GET")
 
     response = sync_api.handle_request(
-        request, client, endpoint_origin_id=f"aws-{VAULT_ID}", embed_dims=3,
+        request,
+        client,
+        endpoint_origin_id=f"aws-{VAULT_ID}",
+        embed_dims=3,
     )
 
     assert response["statusCode"] == 200
     assert response_body(response) == {
-        "ok": True, "memories": 3, "vault_id": VAULT_ID,
-        "vault_name": "private team", "origin_id": f"aws-{VAULT_ID}",
+        "ok": True,
+        "memories": 3,
+        "vault_id": VAULT_ID,
+        "vault_name": "private team",
+        "origin_id": f"aws-{VAULT_ID}",
         "token_id": "ct-member",
     }
 
@@ -163,44 +200,63 @@ def test_health_uses_the_stable_endpoint_identity():
 def test_pull_paginates_and_saves_a_cursor_for_the_member_token():
     vault = FakeVault()
     request = event(
-        "/pull", "GET", headers={"x-cairn-peer": "agent-b-origin"},
+        "/pull",
+        "GET",
+        headers={"x-cairn-peer": "agent-b-origin"},
         query={"after": "10", "limit": "5"},
     )
 
     response = sync_api.handle_request(
-        request, fake_client(vault), endpoint_origin_id=f"aws-{VAULT_ID}",
-        embed_dims=3, exported_at=123,
+        request,
+        fake_client(vault),
+        endpoint_origin_id=f"aws-{VAULT_ID}",
+        embed_dims=3,
+        exported_at=123,
     )
 
     assert response["statusCode"] == 200
     pack = response_body(response)
     assert pack == {
-        "pack": "cairn-sync-2", "after": 10, "cursor": 11,
+        "pack": "cairn-sync-2",
+        "after": 10,
+        "cursor": 11,
         "events": [{"event_id": "agent-b:1", "feed_seq": 11}],
-        "embed_model": "hash", "dims": 3, "exported_at": 123,
-        "origin_id": f"aws-{VAULT_ID}", "vault_id": VAULT_ID,
+        "embed_model": "hash",
+        "dims": 3,
+        "exported_at": 123,
+        "origin_id": f"aws-{VAULT_ID}",
+        "vault_id": VAULT_ID,
     }
     assert vault.cursor_writes == [("agent-b-origin", "pull", 11, 123, "ct-member")]
 
 
 def test_push_rejects_foreign_owner_and_accepts_assigned_agent():
     pack = {
-        "pack": "cairn-sync-2", "origin_id": "agent-origin", "cursor": 1,
-        "events": [{
-            "event_id": "agent-origin:1", "kind": "snapshot",
-            "key": "mem_agent-a_task_hash_1",
-            "snapshot": {"agent_id": "agent-a", "supersedes": None},
-        }],
+        "pack": "cairn-sync-2",
+        "origin_id": "agent-origin",
+        "cursor": 1,
+        "events": [
+            {
+                "event_id": "agent-origin:1",
+                "kind": "snapshot",
+                "key": "mem_agent-a_task_hash_1",
+                "snapshot": {"agent_id": "agent-a", "supersedes": None},
+            }
+        ],
     }
     client = fake_client()
     accepted = sync_api.handle_request(
-        event("/push", "POST", body=pack), client,
-        endpoint_origin_id=f"aws-{VAULT_ID}", embed_dims=3,
+        event("/push", "POST", body=pack),
+        client,
+        endpoint_origin_id=f"aws-{VAULT_ID}",
+        embed_dims=3,
     )
     pack["events"][0]["snapshot"]["agent_id"] = "agent-b"
     rejected = sync_api.handle_request(
-        event("/push", "POST", body=pack), client,
-        endpoint_origin_id=f"aws-{VAULT_ID}", embed_dims=3,
+        event("/push", "POST", body=pack),
+        client,
+        endpoint_origin_id=f"aws-{VAULT_ID}",
+        embed_dims=3,
     )
 
     assert accepted["statusCode"] == 200
@@ -213,17 +269,23 @@ def test_search_validates_vector_dimensions_and_returns_vault_identity():
     request = event("/search", "POST", body={"vector": [1, 0, 0], "limit": 2})
 
     response = sync_api.handle_request(
-        request, fake_client(vault), endpoint_origin_id=f"aws-{VAULT_ID}", embed_dims=3,
+        request,
+        fake_client(vault),
+        endpoint_origin_id=f"aws-{VAULT_ID}",
+        embed_dims=3,
     )
     invalid = sync_api.handle_request(
-        event("/search", "POST", body={"vector": [1, 0]}), fake_client(vault),
-        endpoint_origin_id=f"aws-{VAULT_ID}", embed_dims=3,
+        event("/search", "POST", body={"vector": [1, 0]}),
+        fake_client(vault),
+        endpoint_origin_id=f"aws-{VAULT_ID}",
+        embed_dims=3,
     )
 
     assert response["statusCode"] == 200
     assert response_body(response) == {
         "results": [{"key": "mem_agent-a_task_digest_1", "similarity": 0.9}],
-        "vault_id": VAULT_ID, "vault_name": "private team",
+        "vault_id": VAULT_ID,
+        "vault_name": "private team",
     }
     assert vault.query == ([1.0, 0.0, 0.0], 2, "active", None)
     assert invalid["statusCode"] == 400
@@ -250,8 +312,10 @@ def test_search_validates_vector_dimensions_and_returns_vault_identity():
 )
 def test_search_rejects_invalid_vector_and_query_options(payload, expected_status):
     response = sync_api.handle_request(
-        event("/search", "POST", body=payload), fake_client(),
-        endpoint_origin_id=f"aws-{VAULT_ID}", embed_dims=3,
+        event("/search", "POST", body=payload),
+        fake_client(),
+        endpoint_origin_id=f"aws-{VAULT_ID}",
+        embed_dims=3,
     )
 
     assert response["statusCode"] == expected_status
@@ -270,10 +334,15 @@ def test_search_rejects_invalid_vector_and_query_options(payload, expected_statu
         ({"after": "11"}, {"x-cairn-peer": "agent-b-origin"}, 409),
     ],
 )
-def test_pull_rejects_invalid_cursors_limits_and_peer_headers(query, headers, expected_status):
+def test_pull_rejects_invalid_cursors_limits_and_peer_headers(
+    query, headers, expected_status
+):
     response = sync_api.handle_request(
-        event("/pull", "GET", headers=headers, query=query), fake_client(),
-        endpoint_origin_id=f"aws-{VAULT_ID}", embed_dims=3, exported_at=123,
+        event("/pull", "GET", headers=headers, query=query),
+        fake_client(),
+        endpoint_origin_id=f"aws-{VAULT_ID}",
+        embed_dims=3,
+        exported_at=123,
     )
 
     assert response["statusCode"] == expected_status
@@ -290,8 +359,11 @@ def test_pull_accepts_raw_query_string_and_drops_events_to_fit_response(monkeypa
     monkeypatch.setattr(sync_api, "MAX_RESPONSE_BYTES", 550)
 
     response = sync_api.handle_request(
-        request, fake_client(vault), endpoint_origin_id=f"aws-{VAULT_ID}",
-        embed_dims=3, exported_at=123,
+        request,
+        fake_client(vault),
+        endpoint_origin_id=f"aws-{VAULT_ID}",
+        embed_dims=3,
+        exported_at=123,
     )
 
     assert response["statusCode"] == 200
@@ -308,7 +380,9 @@ def test_pull_rejects_a_single_event_larger_than_the_response_limit(monkeypatch)
 
     response = sync_api.handle_request(
         event("/pull", "GET", headers={"x-cairn-peer": "agent-b-origin"}),
-        fake_client(vault), endpoint_origin_id=f"aws-{VAULT_ID}", embed_dims=3,
+        fake_client(vault),
+        endpoint_origin_id=f"aws-{VAULT_ID}",
+        embed_dims=3,
         exported_at=123,
     )
 
@@ -327,8 +401,10 @@ def test_pull_rejects_a_single_event_larger_than_the_response_limit(monkeypatch)
 )
 def test_push_rejects_invalid_origin_and_skipped_cursor(pack, expected_status):
     response = sync_api.handle_request(
-        event("/push", "POST", body=pack), fake_client(),
-        endpoint_origin_id=f"aws-{VAULT_ID}", embed_dims=3,
+        event("/push", "POST", body=pack),
+        fake_client(),
+        endpoint_origin_id=f"aws-{VAULT_ID}",
+        embed_dims=3,
     )
 
     assert response["statusCode"] == expected_status
@@ -340,15 +416,33 @@ def test_push_rejects_invalid_json_and_inconsistent_authorizer_metadata():
     bad_caller = event("/health", "GET", caller={**CALLER, "vault_id": "f" * 32})
     bad_dims = event("/health", "GET")
 
-    assert sync_api.handle_request(
-        invalid_json, fake_client(), endpoint_origin_id="origin", embed_dims=3,
-    )["statusCode"] == 400
-    assert sync_api.handle_request(
-        bad_caller, fake_client(), endpoint_origin_id="origin", embed_dims=3,
-    )["statusCode"] == 403
-    assert sync_api.handle_request(
-        bad_dims, fake_client(), endpoint_origin_id="origin", embed_dims=8,
-    )["statusCode"] == 500
+    assert (
+        sync_api.handle_request(
+            invalid_json,
+            fake_client(),
+            endpoint_origin_id="origin",
+            embed_dims=3,
+        )["statusCode"]
+        == 400
+    )
+    assert (
+        sync_api.handle_request(
+            bad_caller,
+            fake_client(),
+            endpoint_origin_id="origin",
+            embed_dims=3,
+        )["statusCode"]
+        == 403
+    )
+    assert (
+        sync_api.handle_request(
+            bad_dims,
+            fake_client(),
+            endpoint_origin_id="origin",
+            embed_dims=8,
+        )["statusCode"]
+        == 500
+    )
 
 
 @pytest.mark.parametrize(
@@ -365,7 +459,10 @@ def test_request_body_validation_errors_are_returned_as_client_errors(body_field
     event_data.update(body_fields)
 
     response = sync_api.handle_request(
-        event_data, fake_client(), endpoint_origin_id="origin", embed_dims=3,
+        event_data,
+        fake_client(),
+        endpoint_origin_id="origin",
+        embed_dims=3,
     )
 
     assert response["statusCode"] == 400
@@ -379,15 +476,33 @@ def test_request_body_size_limit_and_route_errors_are_explicit(monkeypatch):
     no_path.pop("rawPath")
     no_path.pop("path", None)
 
-    assert sync_api.handle_request(
-        oversized, fake_client(), endpoint_origin_id="origin", embed_dims=3,
-    )["statusCode"] == 413
-    assert sync_api.handle_request(
-        wrong_route, fake_client(), endpoint_origin_id="origin", embed_dims=3,
-    )["statusCode"] == 404
-    assert sync_api.handle_request(
-        no_path, fake_client(), endpoint_origin_id="origin", embed_dims=3,
-    )["statusCode"] == 404
+    assert (
+        sync_api.handle_request(
+            oversized,
+            fake_client(),
+            endpoint_origin_id="origin",
+            embed_dims=3,
+        )["statusCode"]
+        == 413
+    )
+    assert (
+        sync_api.handle_request(
+            wrong_route,
+            fake_client(),
+            endpoint_origin_id="origin",
+            embed_dims=3,
+        )["statusCode"]
+        == 404
+    )
+    assert (
+        sync_api.handle_request(
+            no_path,
+            fake_client(),
+            endpoint_origin_id="origin",
+            embed_dims=3,
+        )["statusCode"]
+        == 404
+    )
 
 
 def test_response_size_limit_replaces_an_oversized_payload(monkeypatch):
@@ -396,4 +511,6 @@ def test_response_size_limit_replaces_an_oversized_payload(monkeypatch):
     response = sync_api._response(200, {"payload": "x" * 100})
 
     assert response["statusCode"] == 413
-    assert response_body(response) == {"error": "response exceeds the sync API size limit"}
+    assert response_body(response) == {
+        "error": "response exceeds the sync API size limit"
+    }

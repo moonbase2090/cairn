@@ -4,6 +4,7 @@ Seeded by `cairn bootstrap` under task `cairn-onboarding`, so a fresh agent that
 only knows `cairn retrieve "how do I use shared memory?"` gets up to speed with
 zero human intervention. Idempotent (exact-hash store path).
 """
+
 from __future__ import annotations
 
 ONBOARDING_TASK = "cairn-onboarding"
@@ -13,9 +14,9 @@ PACK: list[dict] = [
         "heading": "how to use shared memory",
         "body": (
             "You share a persistent team memory via cairn. At the START of a task, "
-            "retrieve first: `cairn retrieve \"<query>\" --task <task>` (or the "
+            'retrieve first: `cairn retrieve "<query>" --task <task>` (or the '
             "retrieve_memory tool). Prefer what the team already knows over re-deriving facts. "
-            "Store what's worth keeping with `cairn store \"<fact>\" --team <team> --task <task> "
+            'Store what\'s worth keeping with `cairn store "<fact>" --team <team> --task <task> '
             "--type <episodic|semantic|procedural>`. Always set accurate team/task/type. "
             "When you use a retrieved fact, CITE its key (per mem_...) so teammates can audit it."
         ),
@@ -74,8 +75,11 @@ def seed_onboarding(client, team: str) -> dict:
     for item in PACK:
         content = f"# {item['heading']}\n\n{item['body']}"
         res = client.store_memory(
-            content, team_id=team, task_id=ONBOARDING_TASK,
-            memory_type="procedural", provenance="cairn-bootstrap",
+            content,
+            team_id=team,
+            task_id=ONBOARDING_TASK,
+            memory_type="procedural",
+            provenance="cairn-bootstrap",
         )
         if res.action.value == "created":
             created += 1

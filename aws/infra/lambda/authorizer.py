@@ -1,4 +1,5 @@
 """HTTP API authorizer for Cairn per-agent vault tokens."""
+
 from __future__ import annotations
 
 import hashlib
@@ -10,8 +11,11 @@ def _bearer_token(event: dict[str, Any]) -> str | None:
     headers = event.get("headers")
     if isinstance(headers, dict):
         authorization = next(
-            (value for name, value in headers.items()
-             if isinstance(name, str) and name.lower() == "authorization"),
+            (
+                value
+                for name, value in headers.items()
+                if isinstance(name, str) and name.lower() == "authorization"
+            ),
             None,
         )
     else:
@@ -46,12 +50,16 @@ def authorize_request(event: dict[str, Any], table, vault_id: str) -> dict[str, 
     token_id = item.get("token_id")
     agent_id = item.get("agent_id")
     curator = item.get("curator")
-    if (item.get("recordType") != "server-token"
-            or item.get("vault_id") != vault_id
-            or item.get("revoked") is not False
-            or not isinstance(token_id, str) or not token_id
-            or not isinstance(agent_id, str) or not agent_id
-            or not isinstance(curator, bool)):
+    if (
+        item.get("recordType") != "server-token"
+        or item.get("vault_id") != vault_id
+        or item.get("revoked") is not False
+        or not isinstance(token_id, str)
+        or not token_id
+        or not isinstance(agent_id, str)
+        or not agent_id
+        or not isinstance(curator, bool)
+    ):
         return {"isAuthorized": False}
     return {
         "isAuthorized": True,

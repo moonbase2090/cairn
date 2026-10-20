@@ -3,7 +3,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "release" / "clean_release_notes.py"
+SCRIPT = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "release"
+    / "clean_release_notes.py"
+)
 SPEC = importlib.util.spec_from_file_location("clean_release_notes", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 notes = importlib.util.module_from_spec(SPEC)
@@ -35,7 +40,10 @@ def test_clean_removes_attributions_and_new_contributors() -> None:
 
 def test_clean_keeps_titles_that_mention_by_and_unrelated_text() -> None:
     text = "* docs: sort by @-mentions policy in https://github.com/example/repo/pull/1\nPlain text by @nobody.\n"
-    assert notes.clean(text) == "* docs: sort by @-mentions policy in https://github.com/example/repo/pull/1\nPlain text by @nobody.\n"
+    assert (
+        notes.clean(text)
+        == "* docs: sort by @-mentions policy in https://github.com/example/repo/pull/1\nPlain text by @nobody.\n"
+    )
 
 
 def test_clean_keeps_new_contributors_heading_with_other_entries() -> None:
@@ -49,4 +57,9 @@ def test_main_rewrites_file_in_place(tmp_path: Path) -> None:
     result = subprocess.run([sys.executable, str(SCRIPT), str(path)], check=False)
     assert result.returncode == 0
     assert path.read_text(encoding="utf-8") == EXPECTED
-    assert subprocess.run([sys.executable, str(SCRIPT)], check=False, capture_output=True).returncode == 2
+    assert (
+        subprocess.run(
+            [sys.executable, str(SCRIPT)], check=False, capture_output=True
+        ).returncode
+        == 2
+    )

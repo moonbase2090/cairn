@@ -4,6 +4,7 @@ The archive carries its own CPython, the cairn package, and wrappers for
 cairn, cairn-mcp, and cairn-embedd. macOS signing and Windows Authenticode
 run only when the corresponding credentials are set.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -71,7 +72,8 @@ def managed_python() -> Path:
     subprocess.run(["uv", "python", "install", "3.12"], check=True, env=env)
     exe = subprocess.check_output(
         ["uv", "python", "find", "3.12", "--managed-python"],
-        env=env, text=True,
+        env=env,
+        text=True,
     ).strip()
     if not exe:
         raise SystemExit("uv did not find a managed CPython 3.12")
@@ -88,7 +90,7 @@ def copied_python(root: Path) -> Path:
     unix = root / "python" / "bin" / "python3"
     if unix.exists() or unix.is_symlink():
         return unix.resolve()
-    for candidate in (root / "python").glob("python3*"):
+    for candidate in (root / "python").glob("bin/python3*"):
         if candidate.is_file() and candidate.parent.name == "bin":
             return candidate
     windows = root / "python" / "python.exe"
@@ -102,17 +104,17 @@ def write_unix_wrapper(path: Path, entry: str) -> None:
         "#!/bin/sh\n"
         "set -eu\n"
         "source=$0\n"
-        "while [ -L \"$source\" ]; do\n"
-        "  dir=$(CDPATH= cd -- \"$(dirname \"$source\")\" && pwd)\n"
-        "  link=$(readlink \"$source\")\n"
-        "  case \"$link\" in\n"
+        'while [ -L "$source" ]; do\n'
+        '  dir=$(CDPATH= cd -- "$(dirname "$source")" && pwd)\n'
+        '  link=$(readlink "$source")\n'
+        '  case "$link" in\n'
         "    /*) source=$link ;;\n"
         "    *) source=$dir/$link ;;\n"
         "  esac\n"
         "done\n"
-        "root=$(CDPATH= cd -- \"$(dirname \"$source\")/..\" && pwd)\n"
-        "export PYTHONPATH=\"$root/app${PYTHONPATH:+:$PYTHONPATH}\"\n"
-        f"exec \"$root/python/bin/python3\" \"$root/app/entries/run_{entry}.py\" \"$@\"\n"
+        'root=$(CDPATH= cd -- "$(dirname "$source")/.." && pwd)\n'
+        'export PYTHONPATH="$root/app${PYTHONPATH:+:$PYTHONPATH}"\n'
+        f'exec "$root/python/bin/python3" "$root/app/entries/run_{entry}.py" "$@"\n'
     )
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
@@ -121,9 +123,9 @@ def write_windows_wrapper(path: Path, entry: str) -> None:
     path.write_text(
         "@echo off\r\n"
         "setlocal\r\n"
-        "set \"ROOT=%~dp0..\"\r\n"
-        "set \"PYTHONPATH=%ROOT%\\app\"\r\n"
-        f"\"%ROOT%\\python\\python.exe\" \"%ROOT%\\app\\entries\\run_{entry}.py\" %*\r\n"
+        'set "ROOT=%~dp0.."\r\n'
+        'set "PYTHONPATH=%ROOT%\\app"\r\n'
+        f'"%ROOT%\\python\\python.exe" "%ROOT%\\app\\entries\\run_{entry}.py" %*\r\n'
     )
 
 
@@ -132,9 +134,7 @@ def write_entries(app: Path) -> None:
     entries.mkdir(parents=True)
     for name, module in MODULES.items():
         (entries / f"run_{name}.py").write_text(
-            "import sys\n"
-            f"from {module} import main\n"
-            "raise SystemExit(main())\n"
+            f"import sys\nfrom {module} import main\nraise SystemExit(main())\n"
         )
 
 
@@ -144,7 +144,13 @@ def sign_tree(root: Path, scripts: Path) -> None:
         return
     if platform.system() == "Windows":
         subprocess.run(
-            ["powershell", "-File", str(scripts / "sign_windows.ps1"), "-Root", str(root)],
+            [
+                "powershell",
+                "-File",
+                str(scripts / "sign_windows.ps1"),
+                "-Root",
+                str(root),
+            ],
             check=True,
         )
         return
@@ -152,7 +158,9 @@ def sign_tree(root: Path, scripts: Path) -> None:
 
 
 def archive(root: Path, dest: Path) -> None:
-    files = sorted(path for path in root.rglob("*") if path.is_file() and path.name != "SHA256SUMS")
+    files = sorted(
+        path for path in root.rglob("*") if path.is_file() and path.name != "SHA256SUMS"
+    )
     lines = [f"{sha256(path)}  {path.relative_to(root).as_posix()}\n" for path in files]
     (root / "SHA256SUMS").write_text("".join(lines))
     if dest.suffix == ".zip":
@@ -169,7 +177,11 @@ def build(repo: Path, out: Path, target: str) -> Path:
     scripts = repo / "scripts" / "release"
     out.mkdir(parents=True, exist_ok=True)
     # Never publish an archive left over from an earlier build.
-    for stale in [*out.glob("cairn-*.tar.gz"), *out.glob("cairn-*.zip"), out / "SHA256SUMS"]:
+    for stale in [
+        *out.glob("cairn-*.tar.gz"),
+        *out.glob("cairn-*.zip"),
+        out / "SHA256SUMS",
+    ]:
         stale.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / f"cairn-{version}-{target}"
@@ -180,7 +192,18 @@ def build(repo: Path, out: Path, target: str) -> Path:
         app.mkdir()
         python = copied_python(root)
         subprocess.run(
-            ["uv", "pip", "install", "--python", str(python), "--target", str(app), "--link-mode", "copy", str(repo)],
+            [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                str(python),
+                "--target",
+                str(app),
+                "--link-mode",
+                "copy",
+                str(repo),
+            ],
             check=True,
         )
         write_entries(app)
@@ -223,7 +246,10 @@ def build(repo: Path, out: Path, target: str) -> Path:
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         probe = subprocess.run(
             [str(python), str(app / "entries" / "run_cairn.py"), "--version"],
-            capture_output=True, text=True, env=env, check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
         )
         if probe.returncode != 0 or version not in probe.stdout:
             raise SystemExit(
@@ -234,7 +260,9 @@ def build(repo: Path, out: Path, target: str) -> Path:
         dest = out / f"cairn-{version}-{target}{suffix}"
         archive(root, dest)
     checksums = out / "SHA256SUMS"
-    archives = sorted(path for path in out.iterdir() if path.is_file() and path.name != "SHA256SUMS")
+    archives = sorted(
+        path for path in out.iterdir() if path.is_file() and path.name != "SHA256SUMS"
+    )
     checksums.write_text("".join(f"{sha256(path)}  {path.name}\n" for path in archives))
     return dest
 

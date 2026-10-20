@@ -4,6 +4,7 @@ Each markdown file becomes one or more `document` memories (task_id = file stem)
 chunked at ## headings so sections stay precisely retrievable. Re-runs are safe:
 unchanged chunks return `unchanged` via the exact-hash path.
 """
+
 from __future__ import annotations
 
 import os
@@ -65,24 +66,36 @@ def chunk_markdown(text: str) -> list[tuple[str | None, str]]:
     return out
 
 
-def ingest_dir(client, team: str, path: str | Path, memory_type: str = "document") -> dict:
+def ingest_dir(
+    client, team: str, path: str | Path, memory_type: str = "document"
+) -> dict:
     root = Path(path)
     if not root.is_dir():
         raise ValueError(f"not a directory: {path}")
     files = sorted(
-        p for p in root.rglob("*")
-        if not p.is_symlink() and p.is_file() and p.suffix.lower() in SUFFIXES
+        p
+        for p in root.rglob("*")
+        if not p.is_symlink()
+        and p.is_file()
+        and p.suffix.lower() in SUFFIXES
         and not any(part.startswith(".") for part in p.parts)
     )
     created = unchanged = flagged = 0
     flagged_keys: list[dict] = []
     for fp in files:
         try:
-            fd = os.open(fp, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                         | getattr(os, "O_NONBLOCK", 0))
+            fd = os.open(
+                fp,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+            )
             with os.fdopen(fd, "rb") as stream:
                 file_stat = os.fstat(stream.fileno())
-                if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size > MAX_FILE_BYTES:
+                if (
+                    not stat.S_ISREG(file_stat.st_mode)
+                    or file_stat.st_size > MAX_FILE_BYTES
+                ):
                     continue
                 raw = stream.read(MAX_FILE_BYTES + 1)
             if len(raw) > MAX_FILE_BYTES:
@@ -112,8 +125,12 @@ def ingest_dir(client, team: str, path: str | Path, memory_type: str = "document
         vecs = client._embed_many([c for c, _h in pending])
         for (content, heading), vec in zip(pending, vecs):
             res = client.store_memory(
-                content, team_id=team, task_id=task_id, memory_type=memory_type,
-                provenance=rel, vector=vec,
+                content,
+                team_id=team,
+                task_id=task_id,
+                memory_type=memory_type,
+                provenance=rel,
+                vector=vec,
             )
             if res.action.value == "created":
                 created += 1
@@ -121,7 +138,17 @@ def ingest_dir(client, team: str, path: str | Path, memory_type: str = "document
                 unchanged += 1
             else:  # duplicate_detected — surface, don't silently drop
                 flagged += 1
-                flagged_keys.append({"file": rel, "heading": heading,
-                                     "near": [m.key for m in res.near_duplicates]})
-    return {"files": len(files), "created": created, "unchanged": unchanged,
-            "flagged": flagged, "flagged_keys": flagged_keys}
+                flagged_keys.append(
+                    {
+                        "file": rel,
+                        "heading": heading,
+                        "near": [m.key for m in res.near_duplicates],
+                    }
+                )
+    return {
+        "files": len(files),
+        "created": created,
+        "unchanged": unchanged,
+        "flagged": flagged,
+        "flagged_keys": flagged_keys,
+    }

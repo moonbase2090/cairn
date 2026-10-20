@@ -1,4 +1,5 @@
 """Scaffold tests — all offline (HashEmbedder, tmp vaults)."""
+
 import base64
 import time
 
@@ -18,7 +19,9 @@ def make_client(tmp_path, agent="claude-cairn"):
 
 def test_store_retrieve_roundtrip(tmp_path):
     client, _, _ = make_client(tmp_path)
-    res = client.store_memory("Q2 revenue grew 12 percent year over year", team_id="acme", task_id="q2")
+    res = client.store_memory(
+        "Q2 revenue grew 12 percent year over year", team_id="acme", task_id="q2"
+    )
     assert res.action.value == "created"
     hits = client.retrieve_memory("how did Q2 revenue do?", filters={"task_id": "q2"})
     assert hits, "retrieve found nothing"
@@ -47,7 +50,8 @@ def test_vault_falls_back_when_sqlite_cannot_load_extensions(tmp_path, monkeypat
 
     monkeypatch.setattr(store_module, "_HAS_VEC", True)
     monkeypatch.setattr(
-        sqlite3, "connect",
+        sqlite3,
+        "connect",
         lambda *args, **kwargs: ConnectionWithoutExtensionLoading(
             original_connect(*args, **kwargs)
         ),
@@ -57,11 +61,13 @@ def test_vault_falls_back_when_sqlite_cannot_load_extensions(tmp_path, monkeypat
     assert vault._vec is False
     stored = client.store_memory(
         "SQLite without extension loading still stores memories.",
-        team_id="cairn", task_id="lambda-runtime",
+        team_id="cairn",
+        task_id="lambda-runtime",
     )
     assert stored.key is not None
     hits = client.retrieve_memory(
-        "SQLite extension fallback", filters={"task_id": "lambda-runtime"},
+        "SQLite extension fallback",
+        filters={"task_id": "lambda-runtime"},
     )
     assert hits and hits[0].key == stored.key
     vault.close()
@@ -69,24 +75,44 @@ def test_vault_falls_back_when_sqlite_cannot_load_extensions(tmp_path, monkeypat
 
 def test_exact_duplicate_is_noop(tmp_path):
     client, _, _ = make_client(tmp_path)
-    a = client.store_memory("Benchmark providers on price per kilogram", team_id="t", task_id="k")
-    b = client.store_memory("Benchmark providers on price per kilogram", team_id="t", task_id="k")
+    a = client.store_memory(
+        "Benchmark providers on price per kilogram", team_id="t", task_id="k"
+    )
+    b = client.store_memory(
+        "Benchmark providers on price per kilogram", team_id="t", task_id="k"
+    )
     assert b.action.value == "unchanged"
     assert b.key == a.key
 
 
 def test_near_duplicate_supersede_collapse(tmp_path):
     client, _, _ = make_client(tmp_path)
-    a = client.store_memory("the quick brown fox jumps over the lazy dog", team_id="t", task_id="k")
-    b = client.store_memory("the quick brown fox jumps over the lazy dogs", team_id="t", task_id="k")
-    assert b.action.value == "duplicate_detected", f"got {b.action} — adjust fixture strings"
+    a = client.store_memory(
+        "the quick brown fox jumps over the lazy dog", team_id="t", task_id="k"
+    )
+    b = client.store_memory(
+        "the quick brown fox jumps over the lazy dogs", team_id="t", task_id="k"
+    )
+    assert b.action.value == "duplicate_detected", (
+        f"got {b.action} — adjust fixture strings"
+    )
     assert b.near_duplicates, "expected near-duplicate candidates"
     # explicit new fact bypasses the screen
-    c = client.store_memory("the quick brown fox jumps over the lazy dogs", team_id="t", task_id="k", mode="new")
+    c = client.store_memory(
+        "the quick brown fox jumps over the lazy dogs",
+        team_id="t",
+        task_id="k",
+        mode="new",
+    )
     assert c.action.value == "created"
     # correction supersedes and collapses to v2 on read
-    d = client.store_memory("the quick brown fox jumps over the energetic dog", team_id="t", task_id="k",
-                            supersedes_key=a.key, mode="new")
+    d = client.store_memory(
+        "the quick brown fox jumps over the energetic dog",
+        team_id="t",
+        task_id="k",
+        supersedes_key=a.key,
+        mode="new",
+    )
     assert d.action.value == "superseded"
     assert d.version == 2
     hits = client.retrieve_memory("quick brown fox", filters={"task_id": "k"}, top_k=10)
@@ -96,8 +122,12 @@ def test_near_duplicate_supersede_collapse(tmp_path):
 
 def test_knn_skips_archived_and_returns_rows(tmp_path):
     client, vault, _ = make_client(tmp_path)
-    live = client.store_memory("live coolant manifold reading one", team_id="t", task_id="k")
-    dead = client.store_memory("archived coolant manifold reading two", team_id="t", task_id="k", mode="new")
+    live = client.store_memory(
+        "live coolant manifold reading one", team_id="t", task_id="k"
+    )
+    dead = client.store_memory(
+        "archived coolant manifold reading two", team_id="t", task_id="k", mode="new"
+    )
     client.archive_memory(dead.key)
     hits = vault.knn(client._embed_one("coolant manifold reading"), k=10)
     keys = [row["key"] for row, _dist in hits]
@@ -108,11 +138,17 @@ def test_knn_skips_archived_and_returns_rows(tmp_path):
 
 def test_archive_restore(tmp_path):
     client, _, _ = make_client(tmp_path)
-    res = client.store_memory("ephemeral scratch note for tests", team_id="t", task_id="k")
+    res = client.store_memory(
+        "ephemeral scratch note for tests", team_id="t", task_id="k"
+    )
     client.archive_memory(res.key)
-    assert res.key not in [h.key for h in client.retrieve_memory("scratch note", filters={"task_id": "k"})]
+    assert res.key not in [
+        h.key for h in client.retrieve_memory("scratch note", filters={"task_id": "k"})
+    ]
     client.restore_memory(res.key)
-    assert res.key in [h.key for h in client.retrieve_memory("scratch note", filters={"task_id": "k"})]
+    assert res.key in [
+        h.key for h in client.retrieve_memory("scratch note", filters={"task_id": "k"})
+    ]
 
 
 def test_purge(tmp_path):
@@ -126,8 +162,13 @@ def test_purge(tmp_path):
 def test_gc_promotes_stale_superseded(tmp_path):
     client, vault, _ = make_client(tmp_path)
     a = client.store_memory("original claim here today", team_id="t", task_id="k")
-    client.store_memory("corrected claim here today now", team_id="t", task_id="k",
-                        supersedes_key=a.key, mode="new")
+    client.store_memory(
+        "corrected claim here today now",
+        team_id="t",
+        task_id="k",
+        supersedes_key=a.key,
+        mode="new",
+    )
     old = int(time.time()) - 8 * 86400
     vault.conn.execute("UPDATE memories SET updated_at=? WHERE key=?", (old, a.key))
     vault.conn.commit()
@@ -159,12 +200,17 @@ def test_export_import_roundtrip(tmp_path):
     legacy_row = dict(pack["memories"][0])
     legacy_row["key"] = pack["memories"][0]["key"] + "-legacy"
     legacy_row["embedding"] = vec.tolist()
-    assert c2.import_pack({**pack, "memories": [legacy_row]}) == {"added": 1, "skipped": 0}
+    assert c2.import_pack({**pack, "memories": [legacy_row]}) == {
+        "added": 1,
+        "skipped": 0,
+    }
 
 
 def test_portable_import_marks_claimed_agent_content_external(tmp_path):
     source, _, _ = make_client(tmp_path / "source")
-    stored = source.store_memory("A portable pack can claim any origin.", team_id="team-a", task_id="pack")
+    stored = source.store_memory(
+        "A portable pack can claim any origin.", team_id="team-a", task_id="pack"
+    )
     pack = source.export()
     pack["memories"][0]["agent_id"] = "trusted-lead"
     pack["memories"][0]["origin"] = "agent"
@@ -194,9 +240,15 @@ def test_filtered_retrieve_keeps_in_task_note(tmp_path):
     client, _, _ = make_client(tmp_path)
     query = "how did second quarter revenue do"
     for i in range(30):
-        client.store_memory(f"{query} variant {i}", team_id="t", task_id="noise", mode="new")
+        client.store_memory(
+            f"{query} variant {i}", team_id="t", task_id="noise", mode="new"
+        )
     want = client.store_memory(
-        "unrelated manifold note kept on the q2 task", team_id="t", task_id="q2", mode="new")
+        "unrelated manifold note kept on the q2 task",
+        team_id="t",
+        task_id="q2",
+        mode="new",
+    )
     hits = client.retrieve_memory(query, {"task_id": "q2"}, top_k=5)
     assert [h.key for h in hits] == [want.key]
 
@@ -235,7 +287,9 @@ def test_vec_insert_failure_rolls_back(tmp_path, monkeypatch):
 
 def test_supersede_rolls_back_together(tmp_path, monkeypatch):
     client, vault, _ = make_client(tmp_path)
-    original = client.store_memory("original claim for the ledger", team_id="t", task_id="k")
+    original = client.store_memory(
+        "original claim for the ledger", team_id="t", task_id="k"
+    )
 
     def boom(*_a, **_k):
         raise RuntimeError("status write failed")
@@ -243,8 +297,12 @@ def test_supersede_rolls_back_together(tmp_path, monkeypatch):
     monkeypatch.setattr(vault, "set_status", boom)
     with pytest.raises(RuntimeError):
         client.store_memory(
-            "corrected claim for the ledger", team_id="t", task_id="k",
-            supersedes_key=original.key, mode="new")
+            "corrected claim for the ledger",
+            team_id="t",
+            task_id="k",
+            supersedes_key=original.key,
+            mode="new",
+        )
     assert vault.count() == 1
     assert client.get_memory(original.key).status == "active"
 
@@ -265,8 +323,12 @@ def test_gc_refuses_a_partial_sweep(tmp_path, monkeypatch):
 
     client, _, _ = make_client(tmp_path)
     past = int(time.time()) - 10
-    client.store_memory("expired one", team_id="t", task_id="k1", mode="new", expires_at=past)
-    client.store_memory("expired two", team_id="t", task_id="k2", mode="new", expires_at=past)
+    client.store_memory(
+        "expired one", team_id="t", task_id="k1", mode="new", expires_at=past
+    )
+    client.store_memory(
+        "expired two", team_id="t", task_id="k2", mode="new", expires_at=past
+    )
     monkeypatch.setattr(client_mod, "GC_CAP", 1)
     with pytest.raises(RuntimeError, match="expired"):
         client.gc(dry_run=True)

@@ -1,4 +1,5 @@
 """Offline admission checks for accidental credential disclosures."""
+
 from __future__ import annotations
 
 from collections import Counter
@@ -26,7 +27,9 @@ _GITHUB_TOKEN = re.compile(
     r"[A-Za-z0-9_]{8,}(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
-_AWS_ACCESS_KEY_ID = re.compile(r"(?<![A-Za-z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])")
+_AWS_ACCESS_KEY_ID = re.compile(
+    r"(?<![A-Za-z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])"
+)
 _ASSIGNMENT = re.compile(
     r"(?P<name>[A-Za-z_][A-Za-z0-9_.-]{0,79})\s*[\"']?\s*[:=]\s*"
     r"(?:(?i:Bearer)\s+)?"
@@ -40,7 +43,9 @@ _CREDENTIAL_NAME = re.compile(
 _OPAQUE_SPAN = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9+/=_-]{24,}(?![A-Za-z0-9])")
 _HEX = re.compile(r"[0-9a-f]+", re.IGNORECASE)
 _BASE64 = re.compile(r"[A-Za-z0-9+/=_-]+")
-_COMMON_HEX_ID = re.compile(r"(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})", re.IGNORECASE)
+_COMMON_HEX_ID = re.compile(
+    r"(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})", re.IGNORECASE
+)
 _UUID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
     re.IGNORECASE,
@@ -50,7 +55,9 @@ _UUID = re.compile(
 def _entropy(value: str) -> float:
     counts = Counter(value)
     length = len(value)
-    return -sum((count / length) * math.log2(count / length) for count in counts.values())
+    return -sum(
+        (count / length) * math.log2(count / length) for count in counts.values()
+    )
 
 
 def _looks_opaque(value: str, minimum_length: int) -> bool:
@@ -117,5 +124,8 @@ def summarize_existing_content(contents) -> dict:
         category = find_secret_category(content)
         if category is not None:
             counts[category] += 1
-    return {"scanned": scanned, "findings": dict(sorted(counts.items())),
-            "safe": not counts}
+    return {
+        "scanned": scanned,
+        "findings": dict(sorted(counts.items())),
+        "safe": not counts,
+    }

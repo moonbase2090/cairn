@@ -3,6 +3,7 @@
 Cairn semantics: append-only versioning, exact-hash idempotency,
 explicit supersession, read-collapse, origin trust tags, cite-the-key.
 """
+
 from __future__ import annotations
 
 import base64
@@ -32,6 +33,138 @@ EXPORT_CAP = 100_000
 GC_CAP = 10_000
 
 
+def _validate_sync_pack(
+    pack: dict,
+    vault_id: str,
+    embed_model: str,
+    dims: int,
+) -> tuple[list, int, int]:
+    incoming_vault_id = pack.get("vault_id") if isinstance(pack, dict) else None
+    if not isinstance(incoming_vault_id, str) or not incoming_vault_id:
+        raise ValueError("sync pack is missing its vault identity")
+    if incoming_vault_id != vault_id:
+        raise ValueError("sync pack belongs to a different vault")
+    if (
+        not isinstance(pack, dict)
+        or pack.get("pack") != "cairn-sync-2"
+        or not isinstance(pack.get("events"), list)
+        or "embed_model" not in pack
+        or "dims" not in pack
+    ):
+        raise ValueError(
+            "invalid sync pack: need cairn-sync-2 events and embedding space"
+        )
+    events = pack["events"]
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_content = event.get("content")
+        if isinstance(event_content, str):
+            scan_content(event_content)
+        snapshot = event.get("snapshot")
+        if isinstance(snapshot, dict) and isinstance(snapshot.get("content"), str):
+            scan_content(snapshot["content"])
+    if pack.get("embed_model") != embed_model or pack.get("dims") != dims:
+        raise ValueError(
+            f"pack is {pack.get('embed_model')}/{pack.get('dims')}d, vault is "
+            f"{embed_model}/{dims}d — refusing cross-space import"
+        )
+    after, cursor = pack.get("after"), pack.get("cursor")
+    if (
+        not isinstance(after, int)
+        or isinstance(after, bool)
+        or not isinstance(cursor, int)
+        or isinstance(cursor, bool)
+        or after < 0
+        or cursor < after
+    ):
+        raise ValueError("invalid sync pack cursor")
+    return events, after, cursor
+
+
+def _validate_sync_event_identity(event: dict) -> int:
+    seq = event["feed_seq"]
+    origin = event.get("origin_id")
+    origin_seq = event.get("origin_seq")
+    if (
+        not isinstance(origin, str)
+        or not origin
+        or not isinstance(origin_seq, int)
+        or isinstance(origin_seq, bool)
+        or origin_seq < 1
+        or event.get("event_id") != f"{origin}:{origin_seq}"
+    ):
+        raise ValueError("sync event has an invalid origin identity")
+    if (
+        not isinstance(event.get("state_revision"), int)
+        or isinstance(event.get("state_revision"), bool)
+        or event["state_revision"] < 0
+        or not isinstance(event.get("updated_at"), int)
+        or isinstance(event.get("updated_at"), bool)
+    ):
+        raise ValueError("sync event has invalid state revision metadata")
+    if event.get("kind") not in {"snapshot", "state", "tombstone"}:
+        raise ValueError("sync event has an invalid kind")
+    return seq
+
+
+def _validate_sync_event_memory(event: dict) -> None:
+    kind = event["kind"]
+    if kind in {"snapshot", "state"}:
+        snapshot = event.get("snapshot")
+        incoming_status = (
+            event.get("status")
+            if kind == "state"
+            else snapshot.get("status")
+            if isinstance(snapshot, dict)
+            else None
+        )
+        if incoming_status not in {status.value for status in Status}:
+            raise ValueError("sync event has an invalid memory status")
+    if kind == "snapshot":
+        snapshot = event.get("snapshot")
+        if (
+            not isinstance(event.get("key"), str)
+            or not event["key"]
+            or not isinstance(snapshot, dict)
+            or not set(MEMORY_FIELDS).issubset(snapshot)
+            or snapshot.get("key") != event.get("key")
+            or not isinstance(snapshot.get("content_hash"), str)
+            or not isinstance(snapshot.get("embedding"), str)
+            or not isinstance(snapshot.get("content"), str)
+        ):
+            raise ValueError("sync snapshot is missing required memory data")
+    elif not isinstance(event.get("key"), str) or not event["key"]:
+        raise ValueError("sync event has an invalid key")
+
+
+def _validate_sync_event_resolution(event: dict) -> None:
+    resolution = event.get("conflict_resolution")
+    if resolution is not None and (
+        not isinstance(resolution, dict)
+        or not isinstance(resolution.get("resolved_by"), str)
+        or not resolution["resolved_by"]
+    ):
+        raise ValueError("sync event has invalid conflict resolution metadata")
+
+
+def _validate_sync_events(events: list, after: int, cursor: int) -> None:
+    previous = after
+    for event in events:
+        seq = event.get("feed_seq") if isinstance(event, dict) else None
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq <= previous:
+            raise ValueError(
+                "sync events must have strictly increasing feed_seq values"
+            )
+        previous = _validate_sync_event_identity(event)
+        _validate_sync_event_memory(event)
+        _validate_sync_event_resolution(event)
+    if previous != cursor:
+        raise ValueError("sync pack cursor does not match its final event")
+    if events and events[0]["feed_seq"] <= after:
+        raise ValueError("sync pack contains an event before its requested cursor")
+
+
 def _decode_embedding(raw) -> np.ndarray:
     """Accept cairn-export-1 binary (base64 float32) or legacy JSON float lists."""
     if isinstance(raw, str):
@@ -39,7 +172,9 @@ def _decode_embedding(raw) -> np.ndarray:
     return np.asarray(raw, dtype=np.float32)
 
 
-def _row_to_record(row, content: str | None, similarity: float | None = None) -> MemoryRecord:
+def _row_to_record(
+    row, content: str | None, similarity: float | None = None
+) -> MemoryRecord:
     return MemoryRecord(
         key=row["key"],
         canonical_id=row["canonical_id"],
@@ -59,13 +194,20 @@ def _row_to_record(row, content: str | None, similarity: float | None = None) ->
         content_hash=row["content_hash"],
         distance=(1.0 - similarity) if similarity is not None else None,
         similarity=similarity,
-        storage_stale=(bool(row["storage_stale"])
-                       if "storage_stale" in row.keys() else False),
+        storage_stale=(
+            bool(row["storage_stale"]) if "storage_stale" in row.keys() else False
+        ),
     )
 
 
 class CairnClient:
-    def __init__(self, vault: StorageBackend, agent_id: str, embedder: Embedder, audit_path: Path | None = None):
+    def __init__(
+        self,
+        vault: StorageBackend,
+        agent_id: str,
+        embedder: Embedder,
+        audit_path: Path | None = None,
+    ):
         self.vault = vault
         self.agent_id = agent_id
         self.embedder = embedder
@@ -100,7 +242,8 @@ class CairnClient:
             missing[digest] = text
         if missing:
             encoded = np.asarray(
-                self.embedder.embed(list(missing.values())), dtype=np.float32,
+                self.embedder.embed(list(missing.values())),
+                dtype=np.float32,
             )
             if encoded.shape != (len(missing), self.embedder.dims):
                 raise ValueError("embedder returned vectors with unexpected dimensions")
@@ -111,9 +254,13 @@ class CairnClient:
                         cache_put(digest, self.embedder.name, vector)
                     except Exception:
                         pass  # The cache is optional; memory writes remain authoritative.
-        return np.stack([vectors[digest] for digest in hashes]).astype(np.float32, copy=False)
+        return np.stack([vectors[digest] for digest in hashes]).astype(
+            np.float32, copy=False
+        )
 
-    def _available_key(self, task_id: str, digest: str, first_version: int) -> tuple[str, int]:
+    def _available_key(
+        self, task_id: str, digest: str, first_version: int
+    ) -> tuple[str, int]:
         version = first_version
         while True:
             key = build_key(self.agent_id, task_id, digest, version)
@@ -131,7 +278,17 @@ class CairnClient:
         try:
             self.audit_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.audit_path, "a") as f:
-                f.write(json.dumps({"ts": now_epoch(), "agent": self.agent_id, "action": action, **payload}) + "\n")
+                f.write(
+                    json.dumps(
+                        {
+                            "ts": now_epoch(),
+                            "agent": self.agent_id,
+                            "action": action,
+                            **payload,
+                        }
+                    )
+                    + "\n"
+                )
         except OSError:
             pass
 
@@ -158,7 +315,9 @@ class CairnClient:
         if origin not in {o.value for o in Origin}:
             raise ValueError(f"bad origin: {origin}")
         if not content.strip():
-            raise ValueError("content must be non-empty (whitespace-only stores pollute retrieve)")
+            raise ValueError(
+                "content must be non-empty (whitespace-only stores pollute retrieve)"
+            )
         now = now_epoch()
         digest = content_digest(content)
 
@@ -167,63 +326,125 @@ class CairnClient:
             if target is None:
                 raise KeyError(f"supersedes target not found: {supersedes_key}")
             key, version = self._available_key(
-                task_id, digest, int(target["version"]) + 1,
+                task_id,
+                digest,
+                int(target["version"]) + 1,
             )
             canonical_id = target["canonical_id"]
             summary = (content[:200] or "").strip()
-            vec = np.asarray(vector, dtype=np.float32) if vector is not None else self._embed_one(content)
+            vec = (
+                np.asarray(vector, dtype=np.float32)
+                if vector is not None
+                else self._embed_one(content)
+            )
             with self.vault.transaction():
                 self.vault.insert(
-                    {"key": key, "canonical_id": canonical_id, "content": content,
-                     "content_summary": summary, "memory_type": memory_type,
-                     "status": Status.ACTIVE.value, "origin": origin, "task_id": task_id,
-                     "agent_id": self.agent_id, "team_id": team_id, "version": version,
-                     "created_at": now, "updated_at": now, "expires_at": expires_at,
-                     "archived_at": None, "supersedes": supersedes_key, "parent_key": None,
-                     "provenance": provenance, "confidence": confidence,
-                     "content_hash": f"sha256:{digest}"},
+                    {
+                        "key": key,
+                        "canonical_id": canonical_id,
+                        "content": content,
+                        "content_summary": summary,
+                        "memory_type": memory_type,
+                        "status": Status.ACTIVE.value,
+                        "origin": origin,
+                        "task_id": task_id,
+                        "agent_id": self.agent_id,
+                        "team_id": team_id,
+                        "version": version,
+                        "created_at": now,
+                        "updated_at": now,
+                        "expires_at": expires_at,
+                        "archived_at": None,
+                        "supersedes": supersedes_key,
+                        "parent_key": None,
+                        "provenance": provenance,
+                        "confidence": confidence,
+                        "content_hash": f"sha256:{digest}",
+                    },
                     vec,
                 )
                 self.vault.set_status(supersedes_key, Status.SUPERSEDED.value, now)
-            self._audit("store", {"key": key, "result": "superseded", "supersedes": supersedes_key})
-            return StoreResult(key=key, version=version, action=StoreAction.SUPERSEDED, canonical_id=canonical_id)
+            self._audit(
+                "store",
+                {"key": key, "result": "superseded", "supersedes": supersedes_key},
+            )
+            return StoreResult(
+                key=key,
+                version=version,
+                action=StoreAction.SUPERSEDED,
+                canonical_id=canonical_id,
+            )
 
         # exact-duplicate → idempotent no-op (task-scoped)
         dupes = self.vault.by_hash(f"sha256:{digest}", task_id)
         if dupes:
             row = dupes[0]
-            return StoreResult(key=row["key"], version=row["version"],
-                               action=StoreAction.UNCHANGED, canonical_id=row["canonical_id"])
+            return StoreResult(
+                key=row["key"],
+                version=row["version"],
+                action=StoreAction.UNCHANGED,
+                canonical_id=row["canonical_id"],
+            )
 
         # near-duplicate screen
-        vec = np.asarray(vector, dtype=np.float32) if vector is not None else self._embed_one(content)
+        vec = (
+            np.asarray(vector, dtype=np.float32)
+            if vector is not None
+            else self._embed_one(content)
+        )
         if mode == "auto":
             near = self._near_duplicates(vec, task_id, top=3)
             if near:
-                return StoreResult(key=None, version=None,
-                                   action=StoreAction.DUPLICATE_DETECTED,
-                                   near_duplicates=near)
+                return StoreResult(
+                    key=None,
+                    version=None,
+                    action=StoreAction.DUPLICATE_DETECTED,
+                    near_duplicates=near,
+                )
 
         key, version = self._available_key(task_id, digest, 1)
         canonical_id = f"{task_id}-{digest[:12]}"
         self.vault.insert(
-            {"key": key, "canonical_id": canonical_id, "content": content,
-             "content_summary": (content[:200] or "").strip(), "memory_type": memory_type,
-             "status": Status.ACTIVE.value, "origin": origin, "task_id": task_id,
-             "agent_id": self.agent_id, "team_id": team_id, "version": version,
-             "created_at": now, "updated_at": now, "expires_at": expires_at,
-             "archived_at": None, "supersedes": None, "parent_key": None,
-             "provenance": provenance, "confidence": confidence,
-             "content_hash": f"sha256:{digest}"},
+            {
+                "key": key,
+                "canonical_id": canonical_id,
+                "content": content,
+                "content_summary": (content[:200] or "").strip(),
+                "memory_type": memory_type,
+                "status": Status.ACTIVE.value,
+                "origin": origin,
+                "task_id": task_id,
+                "agent_id": self.agent_id,
+                "team_id": team_id,
+                "version": version,
+                "created_at": now,
+                "updated_at": now,
+                "expires_at": expires_at,
+                "archived_at": None,
+                "supersedes": None,
+                "parent_key": None,
+                "provenance": provenance,
+                "confidence": confidence,
+                "content_hash": f"sha256:{digest}",
+            },
             vec,
         )
         self._audit("store", {"key": key, "result": "created"})
-        return StoreResult(key=key, version=version, action=StoreAction.CREATED, canonical_id=canonical_id)
+        return StoreResult(
+            key=key,
+            version=version,
+            action=StoreAction.CREATED,
+            canonical_id=canonical_id,
+        )
 
-    def _near_duplicates(self, vec: np.ndarray, task_id: str, top: int) -> list[MemoryRecord]:
+    def _near_duplicates(
+        self, vec: np.ndarray, task_id: str, top: int
+    ) -> list[MemoryRecord]:
         now = now_epoch()
         out: list[MemoryRecord] = []
-        for row, dist in self.vault.knn(vec, OVERSAMPLE, filters={"task_id": task_id}, now=now):
+        for row, dist in self.vault.knn(
+            vec, OVERSAMPLE, filters={"task_id": task_id}, now=now
+        ):
             sim = 1.0 - dist
             if sim >= NEAR_DUP_SIM:
                 out.append(self._record(row, sim))
@@ -232,13 +453,22 @@ class CairnClient:
         return out
 
     # -- retrieve ------------------------------------------------------------
-    def retrieve_memory(self, query: str, filters: dict | None = None, top_k: int = 5,
-                        min_similarity: float | None = None) -> list[MemoryRecord]:
+    def retrieve_memory(
+        self,
+        query: str,
+        filters: dict | None = None,
+        top_k: int = 5,
+        min_similarity: float | None = None,
+    ) -> list[MemoryRecord]:
         """min_similarity drops everything below the floor (default None = legacy top-k)."""
         filters = filters or {}
         now = now_epoch()
         qvec = self._embed_one(query)
-        meta = {k: filters[k] for k in ("task_id", "memory_type", "team_id") if filters.get(k) is not None}
+        meta = {
+            k: filters[k]
+            for k in ("task_id", "memory_type", "team_id")
+            if filters.get(k) is not None
+        }
         best: dict[str, tuple[tuple[int, int], MemoryRecord]] = {}
         for row, dist in self.vault.knn(
             qvec, max(top_k * 4, OVERSAMPLE), filters=meta or None, now=now
@@ -251,7 +481,9 @@ class CairnClient:
             rank = (int(row["version"]), int(row["created_at"]))
             if k not in best or rank > best[k][0]:
                 best[k] = (rank, rec)
-        collapsed = sorted(best.values(), key=lambda t: (t[1].similarity or 0.0), reverse=True)
+        collapsed = sorted(
+            best.values(), key=lambda t: t[1].similarity or 0.0, reverse=True
+        )
         return [rec for _, rec in collapsed[:top_k]]
 
     # -- exact verbs -----------------------------------------------------------
@@ -261,21 +493,42 @@ class CairnClient:
             # expired dropped like retrieve, best match first. No version collapse —
             # list is an exact verb; use --canonical to walk a version group.
             status = filters.get("status") or "active"
-            extra = {k: filters[k] for k in
-                     ("task_id", "canonical_id", "memory_type", "team_id", "agent_id")
-                     if filters.get(k) is not None}
+            extra = {
+                k: filters[k]
+                for k in (
+                    "task_id",
+                    "canonical_id",
+                    "memory_type",
+                    "team_id",
+                    "agent_id",
+                )
+                if filters.get(k) is not None
+            }
             now = now_epoch()
             out = []
-            for r in self.vault.fts_search(filters["search"], limit, status, extra or None):
+            for r in self.vault.fts_search(
+                filters["search"], limit, status, extra or None
+            ):
                 if r["expires_at"] is not None and r["expires_at"] <= now:
                     continue
                 out.append(self._record(r))
             return out
-        eq = {col: filters[col] for col in
-              ("task_id", "canonical_id", "memory_type", "status", "team_id", "agent_id")
-              if filters.get(col) is not None}
+        eq = {
+            col: filters[col]
+            for col in (
+                "task_id",
+                "canonical_id",
+                "memory_type",
+                "status",
+                "team_id",
+                "agent_id",
+            )
+            if filters.get(col) is not None
+        }
         if not eq:
-            raise ValueError("list needs at least one filter (task_id, canonical_id, search, …)")
+            raise ValueError(
+                "list needs at least one filter (task_id, canonical_id, search, …)"
+            )
         rows = self.vault.find(MemoryQuery(eq=eq), limit)
         return [self._record(r) for r in rows]
 
@@ -303,11 +556,20 @@ class CairnClient:
             if row["status"] == Status.SUPERSEDED.value:
                 # undoing a correction: the active rival(s) that replaced this memory
                 # were the mistake — archive them so exactly one version stays active
-                rivals = self.vault.find(MemoryQuery(
-                    eq={"canonical_id": row["canonical_id"], "status": Status.ACTIVE.value},
-                    exclude_key=key), 100)
+                rivals = self.vault.find(
+                    MemoryQuery(
+                        eq={
+                            "canonical_id": row["canonical_id"],
+                            "status": Status.ACTIVE.value,
+                        },
+                        exclude_key=key,
+                    ),
+                    100,
+                )
                 for r in rivals:
-                    self.vault.set_status(r["key"], Status.ARCHIVED.value, now, archived_at=now)
+                    self.vault.set_status(
+                        r["key"], Status.ARCHIVED.value, now, archived_at=now
+                    )
                     retired.append(r["key"])
             self.vault.set_status(key, Status.ACTIVE.value, now, archived_at=None)
         self._audit("restore", {"key": key, "retired": retired})
@@ -327,16 +589,28 @@ class CairnClient:
         """
         now = now_epoch()
         total = self.vault.count()
-        promote_rows = self._capped(MemoryQuery(
-            eq={"status": Status.SUPERSEDED.value}, updated_before=now - 7 * 86400), "promote")
-        archived_rows = self._capped(MemoryQuery(
-            eq={"status": Status.ARCHIVED.value}, archived_before=now - 30 * 86400), "archived")
+        promote_rows = self._capped(
+            MemoryQuery(
+                eq={"status": Status.SUPERSEDED.value}, updated_before=now - 7 * 86400
+            ),
+            "promote",
+        )
+        archived_rows = self._capped(
+            MemoryQuery(
+                eq={"status": Status.ARCHIVED.value}, archived_before=now - 30 * 86400
+            ),
+            "archived",
+        )
         expired_rows = self._capped(MemoryQuery(expired_by=now), "expired")
         promote = [r["key"] for r in promote_rows]
         doomed = {r["key"] for r in archived_rows} | {r["key"] for r in expired_rows}
         breaker = len(doomed) > max(10, int(total * 0.05))
-        result: dict = {"promoted": len(promote), "to_delete": len(doomed),
-                        "dry_run": dry_run, "breaker_tripped": breaker}
+        result: dict = {
+            "promoted": len(promote),
+            "to_delete": len(doomed),
+            "dry_run": dry_run,
+            "breaker_tripped": breaker,
+        }
         if dry_run:
             result["promote_keys"] = promote[:20]
             return result
@@ -348,8 +622,9 @@ class CairnClient:
                 self.vault.set_status(k, Status.ARCHIVED.value, now, archived_at=now)
             deleted = self.vault.delete_by_keys(sorted(doomed))
         orphans = self.vault.sweep_orphan_docs()
-        self._audit("gc", {"promoted": len(promote), "deleted": deleted,
-                           "orphan_docs": orphans})
+        self._audit(
+            "gc", {"promoted": len(promote), "deleted": deleted, "orphan_docs": orphans}
+        )
         result["deleted"] = deleted
         result["orphan_docs"] = orphans
         return result
@@ -364,14 +639,20 @@ class CairnClient:
 
     # -- stats -----------------------------------------------------------------
     def stats(self) -> dict:
-        return {"total": self.vault.count(), "by_status": self.vault.count_by_status(),
-                "agent": self.agent_id, "embedder": self.embedder.name,
-                "dims": self.embedder.dims, "docs": self.vault.doc_stats()}
+        return {
+            "total": self.vault.count(),
+            "by_status": self.vault.count_by_status(),
+            "agent": self.agent_id,
+            "embedder": self.embedder.name,
+            "dims": self.embedder.dims,
+            "docs": self.vault.doc_stats(),
+        }
 
     # -- sync packs (git-native team mode) -----------------------------------------
     def export(self, since: int | None = None) -> dict:
-        rows = self.vault.find(MemoryQuery(updated_since=since), EXPORT_CAP + 1,
-                               with_embedding=True)
+        rows = self.vault.find(
+            MemoryQuery(updated_since=since), EXPORT_CAP + 1, with_embedding=True
+        )
         if len(rows) > EXPORT_CAP:
             raise RuntimeError(
                 f"export hit the {EXPORT_CAP} row cap; refusing a partial pack"
@@ -385,21 +666,38 @@ class CairnClient:
             d.pop("content_ref", None)  # packs carry full content; importer re-spills
             d["content"] = self.vault.read_content(r)
             mems.append(d)
-        return {"pack": "cairn-export-1", "embed_model": self.embedder.name,
-                "dims": self.embedder.dims, "exported_at": now_epoch(), "memories": mems}
+        return {
+            "pack": "cairn-export-1",
+            "embed_model": self.embedder.name,
+            "dims": self.embedder.dims,
+            "exported_at": now_epoch(),
+            "memories": mems,
+        }
 
     def import_pack(self, pack: dict) -> dict:
         if isinstance(pack, dict) and pack.get("pack") == "cairn-sync-2":
             return self.import_sync_pack(pack)
-        if (not isinstance(pack, dict) or not isinstance(pack.get("memories"), list)
-                or "embed_model" not in pack or "dims" not in pack):
+        if (
+            not isinstance(pack, dict)
+            or not isinstance(pack.get("memories"), list)
+            or "embed_model" not in pack
+            or "dims" not in pack
+        ):
             raise ValueError(
-                "invalid pack: need {embed_model, dims, memories[]} from `cairn export`")
+                "invalid pack: need {embed_model, dims, memories[]} from `cairn export`"
+            )
         for memory in pack["memories"]:
-            if not isinstance(memory, dict) or not isinstance(memory.get("content"), str):
-                raise ValueError("invalid portable pack: each memory must contain text content")
+            if not isinstance(memory, dict) or not isinstance(
+                memory.get("content"), str
+            ):
+                raise ValueError(
+                    "invalid portable pack: each memory must contain text content"
+                )
             scan_content(memory["content"])
-        if pack.get("embed_model") != self.embedder.name or pack.get("dims") != self.embedder.dims:
+        if (
+            pack.get("embed_model") != self.embedder.name
+            or pack.get("dims") != self.embedder.dims
+        ):
             raise ValueError(
                 f"pack is {pack.get('embed_model')}/{pack.get('dims')}d, vault is "
                 f"{self.embedder.name}/{self.embedder.dims}d — refusing cross-space import"
@@ -427,102 +725,51 @@ class CairnClient:
 
     def export_delta(self, after: int = 0) -> dict:
         pack = self.vault.export_sync_events(after)
-        pack.update({"embed_model": self.embedder.name, "dims": self.embedder.dims,
-                     "exported_at": now_epoch(), "origin_id": self.vault.sync_origin_id(),
-                     "vault_id": self.vault.vault_identity.vault_id})
+        pack.update(
+            {
+                "embed_model": self.embedder.name,
+                "dims": self.embedder.dims,
+                "exported_at": now_epoch(),
+                "origin_id": self.vault.sync_origin_id(),
+                "vault_id": self.vault.vault_identity.vault_id,
+            }
+        )
         return pack
 
-    def import_sync_pack(self, pack: dict, peer: str | None = None,
-                         direction: str = "pull", token_id: str = "") -> dict:
-        incoming_vault_id = pack.get("vault_id") if isinstance(pack, dict) else None
-        if not isinstance(incoming_vault_id, str) or not incoming_vault_id:
-            raise ValueError("sync pack is missing its vault identity")
-        if incoming_vault_id != self.vault.vault_identity.vault_id:
-            raise ValueError("sync pack belongs to a different vault")
-        if (not isinstance(pack, dict) or pack.get("pack") != "cairn-sync-2"
-                or not isinstance(pack.get("events"), list)
-                or "embed_model" not in pack or "dims" not in pack):
-            raise ValueError("invalid sync pack: need cairn-sync-2 events and embedding space")
-        for event in pack["events"]:
-            if not isinstance(event, dict):
-                continue
-            event_content = event.get("content")
-            if isinstance(event_content, str):
-                scan_content(event_content)
-            snapshot = event.get("snapshot")
-            if isinstance(snapshot, dict) and isinstance(snapshot.get("content"), str):
-                scan_content(snapshot["content"])
-        if pack.get("embed_model") != self.embedder.name or pack.get("dims") != self.embedder.dims:
-            raise ValueError(
-                f"pack is {pack.get('embed_model')}/{pack.get('dims')}d, vault is "
-                f"{self.embedder.name}/{self.embedder.dims}d — refusing cross-space import"
-            )
-        after, cursor = pack.get("after"), pack.get("cursor")
-        if (not isinstance(after, int) or isinstance(after, bool)
-                or not isinstance(cursor, int) or isinstance(cursor, bool)
-                or after < 0 or cursor < after):
-            raise ValueError("invalid sync pack cursor")
-        saved_cursor = self.vault.get_sync_cursor(peer, direction, token_id) if peer is not None else 0
+    def import_sync_pack(
+        self,
+        pack: dict,
+        peer: str | None = None,
+        direction: str = "pull",
+        token_id: str = "",
+    ) -> dict:
+        events, after, cursor = _validate_sync_pack(
+            pack,
+            self.vault.vault_identity.vault_id,
+            self.embedder.name,
+            self.embedder.dims,
+        )
+        saved_cursor = (
+            self.vault.get_sync_cursor(peer, direction, token_id)
+            if peer is not None
+            else 0
+        )
         if peer is not None and after > saved_cursor:
             raise ValueError("sync pack starts after the saved peer cursor")
-        previous = after
-        for event in pack["events"]:
-            seq = event.get("feed_seq") if isinstance(event, dict) else None
-            if not isinstance(seq, int) or isinstance(seq, bool) or seq <= previous:
-                raise ValueError("sync events must have strictly increasing feed_seq values")
-            origin = event.get("origin_id")
-            origin_seq = event.get("origin_seq")
-            if (not isinstance(origin, str) or not origin
-                    or not isinstance(origin_seq, int) or isinstance(origin_seq, bool)
-                    or origin_seq < 1
-                    or event.get("event_id") != f"{origin}:{origin_seq}"):
-                raise ValueError("sync event has an invalid origin identity")
-            if (not isinstance(event.get("state_revision"), int)
-                    or isinstance(event.get("state_revision"), bool)
-                    or event["state_revision"] < 0
-                    or not isinstance(event.get("updated_at"), int)
-                    or isinstance(event.get("updated_at"), bool)):
-                raise ValueError("sync event has invalid state revision metadata")
-            if event.get("kind") not in {"snapshot", "state", "tombstone"}:
-                raise ValueError("sync event has an invalid kind")
-            if event["kind"] in {"snapshot", "state"}:
-                snapshot = event.get("snapshot")
-                incoming_status = (event.get("status") if event["kind"] == "state"
-                                   else snapshot.get("status") if isinstance(snapshot, dict) else None)
-                if incoming_status not in {status.value for status in Status}:
-                    raise ValueError("sync event has an invalid memory status")
-            if event["kind"] == "snapshot":
-                snapshot = event.get("snapshot")
-                if (not isinstance(event.get("key"), str) or not event["key"]
-                        or not isinstance(snapshot, dict)
-                        or not set(MEMORY_FIELDS).issubset(snapshot)
-                        or snapshot.get("key") != event.get("key")
-                        or not isinstance(snapshot.get("content_hash"), str)
-                        or not isinstance(snapshot.get("embedding"), str)
-                        or not isinstance(snapshot.get("content"), str)):
-                    raise ValueError("sync snapshot is missing required memory data")
-            elif not isinstance(event.get("key"), str) or not event["key"]:
-                raise ValueError("sync event has an invalid key")
-            if event.get("conflict_resolution") is not None:
-                resolution = event["conflict_resolution"]
-                if (not isinstance(resolution, dict)
-                        or not isinstance(resolution.get("resolved_by"), str)
-                        or not resolution["resolved_by"]):
-                    raise ValueError("sync event has invalid conflict resolution metadata")
-            previous = seq
-        if previous != cursor:
-            raise ValueError("sync pack cursor does not match its final event")
-        if pack["events"] and pack["events"][0]["feed_seq"] <= after:
-            raise ValueError("sync pack contains an event before its requested cursor")
+        _validate_sync_events(events, after, cursor)
         counts = {"added": 0, "updated": 0, "skipped": 0}
         with self.vault.transaction():
-            for event in pack["events"]:
+            for event in events:
                 result = self.vault.apply_sync_event(event)
                 counts[result] += 1
             self.vault.record_competing_corrections(now_epoch())
             if peer is not None:
                 self.vault.set_sync_cursor(
-                    peer, direction, max(saved_cursor, cursor), now_epoch(), token_id,
+                    peer,
+                    direction,
+                    max(saved_cursor, cursor),
+                    now_epoch(),
+                    token_id,
                 )
         counts["cursor"] = max(saved_cursor, cursor)
         counts["conflicts"] = len(self.vault.list_sync_conflicts())
@@ -541,16 +788,30 @@ class CairnClient:
         if peer is not None:
             cursors = [item for item in cursors if item["peer"] == peer]
         identity = self.vault.vault_identity
-        return {"origin_id": self.vault.sync_origin_id(), "vault_id": identity.vault_id,
-                "vault_name": identity.name, "cursors": cursors,
-                "conflicts": self.vault.list_sync_conflicts()}
+        return {
+            "origin_id": self.vault.sync_origin_id(),
+            "vault_id": identity.vault_id,
+            "vault_name": identity.name,
+            "cursors": cursors,
+            "conflicts": self.vault.list_sync_conflicts(),
+        }
 
-    def resolve_competing_correction(self, base_key: str, winner_key: str,
-                                     curator: bool = False,
-                                     resolver_agent: str | None = None) -> dict:
+    def resolve_competing_correction(
+        self,
+        base_key: str,
+        winner_key: str,
+        curator: bool = False,
+        resolver_agent: str | None = None,
+    ) -> dict:
         self.vault.record_competing_corrections(now_epoch())
-        conflict = next((item for item in self.vault.list_sync_conflicts()
-                         if item["base_key"] == base_key), None)
+        conflict = next(
+            (
+                item
+                for item in self.vault.list_sync_conflicts()
+                if item["base_key"] == base_key
+            ),
+            None,
+        )
         if conflict is None:
             raise KeyError(f"no unresolved competing correction for {base_key}")
         if winner_key not in conflict["competitor_keys"]:
@@ -559,21 +820,43 @@ class CairnClient:
         if winner is None or winner["status"] != Status.ACTIVE.value:
             raise ValueError("winner must be an active correction")
         resolver = resolver_agent or self.agent_id
-        losers = [self.vault.get(key) for key in conflict["competitor_keys"] if key != winner_key]
-        losers = [row for row in losers if row is not None and row["status"] == Status.ACTIVE.value]
+        losers = [
+            self.vault.get(key)
+            for key in conflict["competitor_keys"]
+            if key != winner_key
+        ]
+        losers = [
+            row
+            for row in losers
+            if row is not None and row["status"] == Status.ACTIVE.value
+        ]
         if not curator and winner["agent_id"] != resolver:
-            raise PermissionError("only the owning agent or a curator can resolve this conflict")
+            raise PermissionError(
+                "only the owning agent or a curator can resolve this conflict"
+            )
         if not curator and any(row["agent_id"] != resolver for row in losers):
             raise PermissionError("cross-agent conflict resolution requires a curator")
         now = now_epoch()
-        resolution_event = {"conflict_resolution": {
-            "base_key": base_key, "winner_key": winner_key,
-            "competitor_keys": conflict["competitor_keys"], "resolved_by": resolver,
-        }}
+        resolution_event = {
+            "conflict_resolution": {
+                "base_key": base_key,
+                "winner_key": winner_key,
+                "competitor_keys": conflict["competitor_keys"],
+                "resolved_by": resolver,
+            }
+        }
         with self.vault.transaction():
             for row in losers:
-                self.vault.set_status(row["key"], Status.SUPERSEDED.value, now,
-                                      event_metadata=resolution_event)
+                self.vault.set_status(
+                    row["key"],
+                    Status.SUPERSEDED.value,
+                    now,
+                    event_metadata=resolution_event,
+                )
             self.vault.resolve_sync_conflict(base_key, winner_key, resolver, now)
-        return {"base_key": base_key, "winner_key": winner_key,
-                "superseded": [row["key"] for row in losers], "resolved": True}
+        return {
+            "base_key": base_key,
+            "winner_key": winner_key,
+            "superseded": [row["key"] for row in losers],
+            "resolved": True,
+        }

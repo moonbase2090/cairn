@@ -45,14 +45,21 @@ class FakeTable:
             return {"Items": [self.memory]}
         return {"Items": []}
 
-    def update_item(self, *, Key, UpdateExpression, ConditionExpression=None,
-                    ExpressionAttributeValues=None, **_kwargs):
+    def update_item(
+        self,
+        *,
+        Key,
+        UpdateExpression,
+        ConditionExpression=None,
+        ExpressionAttributeValues=None,
+        **_kwargs,
+    ):
         if Key["PK"].endswith("#CLEANUP#LOCK") or "#CONTENT#LOCK#" in Key["PK"]:
             prefix = "SET "
             assert UpdateExpression.startswith(prefix)
             assignments = {
                 assignment.split("=", 1)[0].strip(): assignment.split("=", 1)[1].strip()
-                for assignment in UpdateExpression[len(prefix):].split(",")
+                for assignment in UpdateExpression[len(prefix) :].split(",")
             }
             assert assignments == {
                 "leaseOwner": ":owner",
@@ -62,10 +69,14 @@ class FakeTable:
                 content_key = Key["PK"] if "#CONTENT#LOCK#" in Key["PK"] else None
                 lease = self.content_leases.get(content_key) if content_key else None
                 lease_expires_at = (
-                    lease[1] if lease else None
-                ) if content_key else self.lease_expires_at
+                    (lease[1] if lease else None)
+                    if content_key
+                    else self.lease_expires_at
+                )
                 if not self._lease_condition_holds(
-                    ConditionExpression, ExpressionAttributeValues, lease_expires_at,
+                    ConditionExpression,
+                    ExpressionAttributeValues,
+                    lease_expires_at,
                 ):
                     raise _conditional_failure()
                 if content_key:
@@ -86,7 +97,7 @@ class FakeTable:
     def _lease_condition_holds(self, expression, values, lease_expires_at):
         prefix = "attribute_not_exists(leaseExpiresAt) OR leaseExpiresAt "
         assert expression.startswith(prefix)
-        operator, reference = expression[len(prefix):].split()
+        operator, reference = expression[len(prefix) :].split()
         assert operator in {"<", ">"}
         assert reference == ":now"
         if lease_expires_at is None:
@@ -161,7 +172,12 @@ def _table(memory=None):
 
 def _conditional_failure():
     return ClientError(
-        {"Error": {"Code": "ConditionalCheckFailedException", "Message": "condition failed"}},
+        {
+            "Error": {
+                "Code": "ConditionalCheckFailedException",
+                "Message": "condition failed",
+            }
+        },
         "UpdateItem",
     )
 
@@ -171,7 +187,8 @@ def _run(monkeypatch, table):
     vectors = FakeVectors()
     monkeypatch.setattr(cleanup.boto3, "resource", lambda _name: FakeDynamo(table))
     monkeypatch.setattr(
-        cleanup.boto3, "client",
+        cleanup.boto3,
+        "client",
         lambda name: s3 if name == "s3" else vectors,
     )
     monkeypatch.setenv("MEMORY_TABLE", "table")
@@ -244,7 +261,8 @@ def test_overlapping_cleanup_invocations_share_a_lease(monkeypatch):
     vectors = FakeVectors()
     monkeypatch.setattr(cleanup.boto3, "resource", lambda _name: FakeDynamo(table))
     monkeypatch.setattr(
-        cleanup.boto3, "client",
+        cleanup.boto3,
+        "client",
         lambda name: s3 if name == "s3" else vectors,
     )
     monkeypatch.setenv("MEMORY_TABLE", "table")
@@ -311,8 +329,15 @@ class PaginatingFakeTable(FakeTable):
             return pages[0]
         return {"Items": []}
 
-    def update_item(self, *, Key, UpdateExpression, ConditionExpression=None,
-                    ExpressionAttributeValues=None, **_kwargs):
+    def update_item(
+        self,
+        *,
+        Key,
+        UpdateExpression,
+        ConditionExpression=None,
+        ExpressionAttributeValues=None,
+        **_kwargs,
+    ):
         if Key["PK"].endswith("#CLEANUP#LOCK") or "#CONTENT#LOCK#" in Key["PK"]:
             return super().update_item(
                 Key=Key,
@@ -350,7 +375,10 @@ def test_cleanup_paginates_tombstones_after_paginated_memory_shard_scan(monkeypa
         tombstone_pages=[
             {
                 "Items": [tomb_one],
-                "LastEvaluatedKey": {"GSI0PK": tomb_one["PK"], "GSI0SK": tomb_one["SK"]},
+                "LastEvaluatedKey": {
+                    "GSI0PK": tomb_one["PK"],
+                    "GSI0SK": tomb_one["SK"],
+                },
             },
             {"Items": [tomb_two]},
         ],
@@ -358,7 +386,10 @@ def test_cleanup_paginates_tombstones_after_paginated_memory_shard_scan(monkeypa
             memory_prefix: [
                 {
                     "Items": [],
-                    "LastEvaluatedKey": {"PK": memory_prefix, "SK": "MEMORY#scan-cursor"},
+                    "LastEvaluatedKey": {
+                        "PK": memory_prefix,
+                        "SK": "MEMORY#scan-cursor",
+                    },
                 },
                 {"Items": []},
             ],
