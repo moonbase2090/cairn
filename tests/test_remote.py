@@ -29,7 +29,9 @@ def test_remote_config_uses_environment_pair_and_private_ca(tmp_path, monkeypatc
     monkeypatch.setenv("CAIRN_TOKEN", "secret-token")
     monkeypatch.setenv("CAIRN_TLS_CA", "/tmp/test-ca.pem")
     assert remote_config(tmp_path) == RemoteConfig(
-        "https://vault.example", "secret-token", "/tmp/test-ca.pem",
+        "https://vault.example",
+        "secret-token",
+        "/tmp/test-ca.pem",
     )
 
 
@@ -43,11 +45,14 @@ def test_remote_config_reads_vault_config(tmp_path, monkeypatch):
     )
 
     assert remote_config(vault_dir) == RemoteConfig(
-        "https://vault.example", "config-token",
+        "https://vault.example",
+        "config-token",
     )
 
 
-def test_cli_and_mcp_route_memory_operations_to_remote_vault(tmp_path, monkeypatch, capsys):
+def test_cli_and_mcp_route_memory_operations_to_remote_vault(
+    tmp_path, monkeypatch, capsys
+):
     server = _server_client(tmp_path / "server" / "vault.db")
     digest = hashlib.sha256(b"agent-token").hexdigest()
     with server.vault.transaction():
@@ -60,18 +65,37 @@ def test_cli_and_mcp_route_memory_operations_to_remote_vault(tmp_path, monkeypat
         monkeypatch.setenv("CAIRN_AGENT", "agent-a")
         monkeypatch.setenv("CAIRN_DIR", str(local_dir))
 
-        assert cli.main([
-            "store", "A fact written through the remote client.",
-            "--team", "team", "--task", "remote", "--mode", "new", "--json",
-        ]) == 0
+        assert (
+            cli.main(
+                [
+                    "store",
+                    "A fact written through the remote client.",
+                    "--team",
+                    "team",
+                    "--task",
+                    "remote",
+                    "--mode",
+                    "new",
+                    "--json",
+                ]
+            )
+            == 0
+        )
         stored = json.loads(capsys.readouterr().out)
         assert server.get_memory(stored["key"]).agent_id == "agent-a"
         assert not (local_dir / "vault.db").exists()
 
         client = make_client()
-        result = json.loads(call_tool(client, "retrieve_memory", {
-            "query": "fact written remote", "task_id": "remote",
-        }))
+        result = json.loads(
+            call_tool(
+                client,
+                "retrieve_memory",
+                {
+                    "query": "fact written remote",
+                    "task_id": "remote",
+                },
+            )
+        )
         assert result[0]["key"] == stored["key"]
         assert result[0]["vault_id"] == "remote-cli-test-vault"
     finally:

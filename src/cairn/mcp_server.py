@@ -292,7 +292,8 @@ def make_client() -> CairnClient:
     if config is not None:
         expected_agent = os.environ.get("CAIRN_AGENT") or default_agent_id(vdir)
         return RemoteCairnClient(
-            config, vdir,
+            config,
+            vdir,
             expected_agent_id=expected_agent if expected_agent != "cairn-cli" else None,
         )
     try:
@@ -383,13 +384,19 @@ def _tool_howto(_client: CairnClient, args: dict) -> str:
 def _tool_whoami(client: CairnClient, _args: dict) -> str:
     if getattr(client, "remote", False):
         info = client.whoami()
-        return json.dumps({
-            "vault_name": info["vault_name"], "vault_id": info["vault_id"],
-            "agent": info["agent_id"], "storage": "remote",
-            "role": "curator" if info["curator"] else "member",
-            "embedder": info["embedder"], "dims": info["dims"],
-            "memories": info["memories"],
-        }, default=str)
+        return json.dumps(
+            {
+                "vault_name": info["vault_name"],
+                "vault_id": info["vault_id"],
+                "agent": info["agent_id"],
+                "storage": "remote",
+                "role": "curator" if info["curator"] else "member",
+                "embedder": info["embedder"],
+                "dims": info["dims"],
+                "memories": info["memories"],
+            },
+            default=str,
+        )
     identity = client.vault.vault_identity
     role = (
         "curator"
@@ -789,9 +796,16 @@ def call_tool(client: CairnClient, name: str, args: dict) -> str:
     if fn is None:
         raise ValueError(f"unknown tool: {name}")
     if getattr(client, "remote", False) and name not in {
-        "retrieve_memory", "store_memory", "list_memories", "get_memory",
-        "archive_memory", "restore_memory", "cairn_howto", "cairn_whoami",
-        "cairn_secret_scan", "cairn_ingest",
+        "retrieve_memory",
+        "store_memory",
+        "list_memories",
+        "get_memory",
+        "archive_memory",
+        "restore_memory",
+        "cairn_howto",
+        "cairn_whoami",
+        "cairn_secret_scan",
+        "cairn_ingest",
     }:
         raise ValueError(f"{name} requires a local vault connection")
     return fn(client, args)

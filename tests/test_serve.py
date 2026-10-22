@@ -337,27 +337,36 @@ def test_remote_client_uses_token_identity_and_enforces_memory_ownership(tmp_pat
         agent_b = RemoteCairnClient(RemoteConfig(url, "token-b"), tmp_path / "b")
 
         stored = agent_a.store_memory(
-            "Remote memories keep the token's assigned identity.", "team", "remote",
+            "Remote memories keep the token's assigned identity.",
+            "team",
+            "remote",
             mode="new",
         )
         assert stored.key
         assert server.get_memory(stored.key).agent_id == "agent-a"
-        assert agent_b.retrieve_memory("assigned identity", {"task_id": "remote"})[0].key == stored.key
+        assert (
+            agent_b.retrieve_memory("assigned identity", {"task_id": "remote"})[0].key
+            == stored.key
+        )
         assert agent_b.list_memories({"task_id": "remote"})[0].key == stored.key
         assert agent_b.get_memory(stored.key).agent_id == "agent-a"
         scan = agent_a.preflight_secret_scan()
         assert scan["findings"] == {} and scan["safe"]
         with pytest.raises(ValueError, match="curator permission"):
             agent_b.store_memory(
-                "A cross-agent correction is denied.", "team", "remote",
-                supersedes_key=stored.key, mode="new",
+                "A cross-agent correction is denied.",
+                "team",
+                "remote",
+                supersedes_key=stored.key,
+                mode="new",
             )
         with pytest.raises(ValueError, match="restricted to its assigned agent"):
             agent_b.archive_memory(stored.key)
         assert agent_a.archive_memory(stored.key)["status"] == "archived"
         assert agent_a.restore_memory(stored.key)["status"] == "active"
         assert agent_a.purge_memory(stored.canonical_id) == {
-            "canonical_id": stored.canonical_id, "deleted": 1,
+            "canonical_id": stored.canonical_id,
+            "deleted": 1,
         }
     finally:
         srv.shutdown()
@@ -389,7 +398,10 @@ def test_remote_endpoint_rejects_malformed_requests(tmp_path):
         ]
         for body, status in cases:
             req = urllib.request.Request(
-                url, data=body, headers={"Authorization": "Bearer token-a"}, method="POST",
+                url,
+                data=body,
+                headers={"Authorization": "Bearer token-a"},
+                method="POST",
             )
             with pytest.raises(urllib.error.HTTPError) as rejected:
                 urllib.request.urlopen(req, timeout=5)

@@ -272,8 +272,17 @@ def _human(obj, full: bool = False) -> None:
         print(json.dumps(obj, indent=2, default=str))
 
 
-REMOTE_COMMANDS = {"store", "retrieve", "list", "get", "archive", "restore",
-                  "purge", "ingest", "whoami"}
+REMOTE_COMMANDS = {
+    "store",
+    "retrieve",
+    "list",
+    "get",
+    "archive",
+    "restore",
+    "purge",
+    "ingest",
+    "whoami",
+}
 
 
 def build_client(args):
@@ -1234,12 +1243,18 @@ def _cmd_galaxy(args, client) -> int:
 def _cmd_whoami(args, client) -> int:
     if getattr(client, "remote", False):
         info = client.whoami()
-        emit({
-            "agent": info["agent_id"], "vault_name": info["vault_name"],
-            "vault_id": info["vault_id"],
-            "role": "curator" if info["curator"] else "member",
-            "storage": "remote", "embedder": info["embedder"], "dims": info["dims"],
-        }, args.json)
+        emit(
+            {
+                "agent": info["agent_id"],
+                "vault_name": info["vault_name"],
+                "vault_id": info["vault_id"],
+                "role": "curator" if info["curator"] else "member",
+                "storage": "remote",
+                "embedder": info["embedder"],
+                "dims": info["dims"],
+            },
+            args.json,
+        )
         return 0
     identity = client.vault.vault_identity
     role = (

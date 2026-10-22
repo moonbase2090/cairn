@@ -1,4 +1,5 @@
 """Authenticated client access to a Cairn vault hosted by ``cairn serve``."""
+
 from __future__ import annotations
 
 import json
@@ -37,7 +38,9 @@ def _remote_table(path: Path) -> dict:
         raise TypeError(f"{path.name}: [remote] must be a table")
     unknown = set(table) - {"url", "token", "tls_ca"}
     if unknown:
-        raise ValueError(f"{path.name}: unknown [remote] setting(s): {', '.join(sorted(unknown))}")
+        raise ValueError(
+            f"{path.name}: unknown [remote] setting(s): {', '.join(sorted(unknown))}"
+        )
     if any(not isinstance(value, str) for value in table.values()):
         raise ValueError(f"{path.name}: [remote] values must be strings")
     return table
@@ -50,8 +53,11 @@ def remote_config(vault_dir: Path) -> RemoteConfig | None:
     if env_url or env_token:
         if not (env_url and env_token):
             return None
-        values = {"url": env_url, "token": env_token,
-                  "tls_ca": os.environ.get("CAIRN_TLS_CA")}
+        values = {
+            "url": env_url,
+            "token": env_token,
+            "tls_ca": os.environ.get("CAIRN_TLS_CA"),
+        }
     else:
         values = {}
         for path in (vault_dir / "config.toml", Path.home() / ".cairn" / "config.toml"):
@@ -67,7 +73,9 @@ def remote_config(vault_dir: Path) -> RemoteConfig | None:
     url, token = values["url"].strip(), values["token"].strip()
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
-        raise ValueError("remote url must be an HTTP(S) URL without embedded credentials")
+        raise ValueError(
+            "remote url must be an HTTP(S) URL without embedded credentials"
+        )
     if parsed.query or parsed.fragment:
         raise ValueError("remote url must not contain a query or fragment")
     if not token:
@@ -99,8 +107,12 @@ class RemoteCairnClient:
 
     remote = True
 
-    def __init__(self, config: RemoteConfig, vault_dir: Path,
-                 expected_agent_id: str | None = None):
+    def __init__(
+        self,
+        config: RemoteConfig,
+        vault_dir: Path,
+        expected_agent_id: str | None = None,
+    ):
         self.config = config
         self.vault_dir = vault_dir
         identity = self._request("whoami", {})
@@ -117,12 +129,17 @@ class RemoteCairnClient:
     def _request(self, operation: str, params: dict):
         data = json.dumps({"operation": operation, "params": params}).encode("utf-8")
         req = request.Request(
-            self.config.url + "/rpc", data=data,
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {self.config.token}"},
+            self.config.url + "/rpc",
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.config.token}",
+            },
         )
         try:
-            with request.urlopen(req, timeout=60, context=_context(self.config)) as response:
+            with request.urlopen(
+                req, timeout=60, context=_context(self.config)
+            ) as response:
                 return json.load(response)
         except error.HTTPError as exc:
             try:
@@ -140,25 +157,53 @@ class RemoteCairnClient:
     def _record(value: dict | None) -> MemoryRecord | None:
         return MemoryRecord(**value) if value is not None else None
 
-    def store_memory(self, content: str, team_id: str, task_id: str,
-                     memory_type: str = "semantic", origin: str = "agent",
-                     supersedes_key: str | None = None, mode: str = "auto",
-                     provenance: str | None = None, vector=None) -> StoreResult:
-        result = self._request("store", {
-            "content": content, "team_id": team_id, "task_id": task_id,
-            "memory_type": memory_type, "origin": origin,
-            "supersedes_key": supersedes_key, "mode": mode,
-            "provenance": provenance,
-        })
+    def store_memory(
+        self,
+        content: str,
+        team_id: str,
+        task_id: str,
+        memory_type: str = "semantic",
+        origin: str = "agent",
+        supersedes_key: str | None = None,
+        mode: str = "auto",
+        provenance: str | None = None,
+        vector=None,
+    ) -> StoreResult:
+        result = self._request(
+            "store",
+            {
+                "content": content,
+                "team_id": team_id,
+                "task_id": task_id,
+                "memory_type": memory_type,
+                "origin": origin,
+                "supersedes_key": supersedes_key,
+                "mode": mode,
+                "provenance": provenance,
+            },
+        )
         result["action"] = StoreAction(result["action"])
-        result["near_duplicates"] = [MemoryRecord(**record)
-                                     for record in result.get("near_duplicates", [])]
+        result["near_duplicates"] = [
+            MemoryRecord(**record) for record in result.get("near_duplicates", [])
+        ]
         return StoreResult(**result)
 
-    def retrieve_memory(self, query: str, filters: dict | None = None,
-                        top_k: int = 5, min_similarity: float | None = None):
-        rows = self._request("retrieve", {"query": query, "filters": filters or {},
-                                          "top_k": top_k, "min_similarity": min_similarity})
+    def retrieve_memory(
+        self,
+        query: str,
+        filters: dict | None = None,
+        top_k: int = 5,
+        min_similarity: float | None = None,
+    ):
+        rows = self._request(
+            "retrieve",
+            {
+                "query": query,
+                "filters": filters or {},
+                "top_k": top_k,
+                "min_similarity": min_similarity,
+            },
+        )
         return [MemoryRecord(**row) for row in rows]
 
     def list_memories(self, filters: dict, limit: int = 100):
@@ -194,21 +239,24 @@ class _EmbedderInfo:
     dims: int
 
 
-def dispatch_remote(client, operation: str, params: dict,
-                    agent_id: str, curator: bool):
+def dispatch_remote(client, operation: str, params: dict, agent_id: str, curator: bool):
     """Run one authenticated remote memory operation against the server client."""
     if operation == "whoami":
         identity = client.vault.vault_identity
         return {
-            "agent_id": agent_id, "curator": curator,
-            "vault_id": identity.vault_id, "vault_name": identity.name,
-            "memories": client.vault.count(), "embedder": client.embedder.name,
+            "agent_id": agent_id,
+            "curator": curator,
+            "vault_id": identity.vault_id,
+            "vault_name": identity.name,
+            "memories": client.vault.count(),
+            "embedder": client.embedder.name,
             "dims": client.embedder.dims,
         }
     if operation == "by_hash":
         return _remote_by_hash(client, params)
-    remote_client = CairnClient(client.vault, agent_id, client.embedder,
-                                audit_path=client.audit_path)
+    remote_client = CairnClient(
+        client.vault, agent_id, client.embedder, audit_path=client.audit_path
+    )
     handlers = {
         "store": _remote_store,
         "retrieve": _remote_retrieve,
@@ -235,13 +283,17 @@ def _remote_store(client, remote_client, params, agent_id, curator):
         if target is None:
             raise KeyError(f"supersedes target not found: {supersedes_key}")
         if target["agent_id"] != agent_id and not curator:
-            raise PermissionError("curator permission is required to supersede another agent's memory")
+            raise PermissionError(
+                "curator permission is required to supersede another agent's memory"
+            )
     return remote_client.store_memory(
-        _required_text(params, "content"), _required_text(params, "team_id"),
+        _required_text(params, "content"),
+        _required_text(params, "team_id"),
         _required_text(params, "task_id"),
         memory_type=_optional_text(params, "memory_type", "semantic"),
         origin=_optional_text(params, "origin", "agent"),
-        supersedes_key=supersedes_key, mode=mode,
+        supersedes_key=supersedes_key,
+        mode=mode,
         provenance=_optional_text(params, "provenance", None),
     ).to_dict()
 
@@ -259,9 +311,15 @@ def _remote_retrieve(_client, remote_client, params, _agent_id, _curator):
         isinstance(min_similarity, bool) or not isinstance(min_similarity, (int, float))
     ):
         raise ValueError("min_similarity must be a number")
-    return [row.to_dict() for row in remote_client.retrieve_memory(
-        query, filters, top_k, min_similarity,
-    )]
+    return [
+        row.to_dict()
+        for row in remote_client.retrieve_memory(
+            query,
+            filters,
+            top_k,
+            min_similarity,
+        )
+    ]
 
 
 def _remote_list(_client, remote_client, params, _agent_id, _curator):
@@ -279,11 +337,15 @@ def _remote_get(_client, remote_client, params, _agent_id, _curator):
 
 
 def _remote_archive(client, remote_client, params, agent_id, curator):
-    return _remote_change_status(client, remote_client, params, agent_id, curator, "archive")
+    return _remote_change_status(
+        client, remote_client, params, agent_id, curator, "archive"
+    )
 
 
 def _remote_restore(client, remote_client, params, agent_id, curator):
-    return _remote_change_status(client, remote_client, params, agent_id, curator, "restore")
+    return _remote_change_status(
+        client, remote_client, params, agent_id, curator, "restore"
+    )
 
 
 def _remote_change_status(client, remote_client, params, agent_id, curator, operation):
@@ -293,7 +355,11 @@ def _remote_change_status(client, remote_client, params, agent_id, curator, oper
         raise KeyError(f"not found: {key}")
     if row["agent_id"] != agent_id and not curator:
         raise PermissionError("token is restricted to its assigned agent")
-    method = remote_client.archive_memory if operation == "archive" else remote_client.restore_memory
+    method = (
+        remote_client.archive_memory
+        if operation == "archive"
+        else remote_client.restore_memory
+    )
     return method(key)
 
 
@@ -303,7 +369,9 @@ def _remote_purge(client, remote_client, params, agent_id, curator):
     if len(rows) > 1000:
         raise ValueError("purge group exceeds the 1000 memory limit")
     if any(row["agent_id"] != agent_id for row in rows) and not curator:
-        raise PermissionError("curator permission is required to purge another agent's memory")
+        raise PermissionError(
+            "curator permission is required to purge another agent's memory"
+        )
     return remote_client.purge_memory(canonical_id)
 
 

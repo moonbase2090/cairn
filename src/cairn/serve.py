@@ -311,17 +311,28 @@ class _Handler(BaseHTTPRequestHandler):
             if not authorized:
                 self._send(401, {"error": "unauthorized"})
                 return
-            if getattr(self.server, "token_mode", "shared") != "per-agent" or not agent_id:
-                self._send(403, {"error": "remote client operations require per-agent token mode"})
+            if (
+                getattr(self.server, "token_mode", "shared") != "per-agent"
+                or not agent_id
+            ):
+                self._send(
+                    403,
+                    {"error": "remote client operations require per-agent token mode"},
+                )
                 return
             request_client = CairnClient(
-                server_client.vault, agent_id, server_client.embedder,
+                server_client.vault,
+                agent_id,
+                server_client.embedder,
                 audit_path=server_client.audit_path,
             )
             try:
                 result = dispatch_remote(
-                    request_client, request_data["operation"], request_data["params"],
-                    agent_id, curator,
+                    request_client,
+                    request_data["operation"],
+                    request_data["params"],
+                    agent_id,
+                    curator,
                 )
             except PermissionError as exc:
                 self._send(403, {"error": str(exc)})
@@ -347,7 +358,9 @@ class _Handler(BaseHTTPRequestHandler):
         except (ValueError, OSError):
             self._send(400, {"error": "invalid JSON request"})
             return None
-        if not isinstance(request_data, dict) or not isinstance(request_data.get("params", {}), dict):
+        if not isinstance(request_data, dict) or not isinstance(
+            request_data.get("params", {}), dict
+        ):
             self._send(400, {"error": "request must contain an object of params"})
             return None
         operation = request_data.get("operation")
