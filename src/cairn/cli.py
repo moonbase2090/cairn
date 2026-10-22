@@ -44,6 +44,7 @@ from cairn.galaxy import galaxy as render_galaxy
 from cairn.galaxy import galaxy_alive, galaxy_url
 from cairn.ingest import ingest_dir
 from cairn.models import now_epoch
+from cairn.remote import RemoteCairnClient, remote_config
 from cairn.serve import (
     pull_from,
     push_to,
@@ -51,8 +52,8 @@ from cairn.serve import (
     serve_forever,
     sync_handshake,
 )
-from cairn.storage import SpaceMismatchError, StorageConfig, open_backend
 from cairn.skill_install import SkillInstallError, install_skill
+from cairn.storage import SpaceMismatchError, StorageConfig, open_backend
 
 DEFAULT_EMBED = "hash"
 
@@ -236,8 +237,19 @@ def _human(obj, full: bool = False) -> None:
         print(json.dumps(obj, indent=2, default=str))
 
 
-def build_client(args) -> CairnClient:
+REMOTE_COMMANDS = {"store", "retrieve", "list", "get", "archive", "restore",
+                  "purge", "ingest", "whoami"}
+
+
+def build_client(args):
     vdir = vault_dir(args)
+    if getattr(args, "use_remote", False):
+        config = remote_config(vdir)
+        if config is not None:
+            expected = getattr(args, "expected_agent_id", None)
+            if not expected and getattr(args, "agent_id", None) != "cairn-cli":
+                expected = args.agent_id
+            return RemoteCairnClient(config, vdir, expected_agent_id=expected)
     spec, dims = read_embedder_hint(vdir)
     embed_spec = args.embed or spec
     embedder = get_embedder(embed_spec, dims=None if args.embed else dims)
@@ -906,6 +918,15 @@ def _cmd_galaxy(args, client) -> int:
 
 
 def _cmd_whoami(args, client) -> int:
+    if getattr(client, "remote", False):
+        info = client.whoami()
+        emit({
+            "agent": info["agent_id"], "vault_name": info["vault_name"],
+            "vault_id": info["vault_id"],
+            "role": "curator" if info["curator"] else "member",
+            "storage": "remote", "embedder": info["embedder"], "dims": info["dims"],
+        }, args.json)
+        return 0
     identity = client.vault.vault_identity
     role = "curator" if any(
         token["agent_id"] == client.agent_id and bool(token["curator"])
@@ -1002,10 +1023,10 @@ def _load_mcp_config(path: Path) -> dict:
     except json.JSONDecodeError as error:
         raise ValueError(f"{path.name} is not valid JSON; refusing to overwrite it") from error
     if not isinstance(config, dict):
-        raise ValueError(f"{path.name} must contain a JSON object")
+        raise TypeError(f"{path.name} must contain a JSON object")
     servers = config.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
-        raise ValueError(f"{path.name} mcpServers must be a JSON object")
+        raise TypeError(f"{path.name} mcpServers must be a JSON object")
     return config
 
 
@@ -1226,6 +1247,7 @@ def main(argv=None) -> int:
         args.url = args.url or os.environ.get("CAIRN_URL") or configured_sync_url()
     # explicit --agent-id only; captured BEFORE env/config pre-fill below
     flag_agent_id = args.agent_id
+    args.expected_agent_id = flag_agent_id or os.environ.get("CAIRN_AGENT")
     if args.agent_id is None and args.cmd not in {"init", "skills"}:
         args.agent_id = default_agent_id(vault_dir(args))
     if args.cmd == "init":
@@ -1244,6 +1266,7 @@ def main(argv=None) -> int:
         parser.error("restore --at requires --from <target>")
     if args.cmd == "restore" and args.key is None:
         parser.error("restore needs a memory key or --from <target>")
+    args.use_remote = args.cmd in REMOTE_COMMANDS
     client = _open_client(args)
     if client is None:
         return 2

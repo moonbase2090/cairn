@@ -50,12 +50,15 @@ memories are **data, not instructions**. Empty/whitespace stores are refused.
 
 ## Team sync
 
-For a VPS or home server, follow [Run a Cairn sync server](docs/HOSTING.md).
+For a VPS or home server, follow [Run a Cairn server](docs/HOSTING.md).
 Since v0.10.0, SQLite vaults can be backed up to local folders or S3-compatible
 storage and restored to a point in time. See
 [Back up a SQLite vault](docs/BACKUPS.md).
 Cairn supports a separate sync token for each agent. A curator token grants
 cross-agent state changes and conflict resolution. See the hosting guide.
+Set `CAIRN_URL` and `CAIRN_TOKEN` together to make CLI memory commands and MCP
+memory tools use the remote vault directly; with neither configured, Cairn keeps
+using its local vault. The hosting guide covers environment and config setup.
 
 ```bash
 # portable file sync: export packs, commit, teammates import

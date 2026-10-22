@@ -10,11 +10,11 @@ cairn_whoami, cairn_gc, cairn_export, cairn_import, cairn_ingest.
 """
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
-import signal
 import secrets
+import signal
 import subprocess
 import sys
 import time
@@ -24,10 +24,17 @@ from urllib.error import URLError
 from cairn import __version__ as CAIRN_VERSION
 from cairn.client import CairnClient
 from cairn.embed import format_embedder_hint, get_embedder, parse_embedder_hint
+from cairn.models import now_epoch
+from cairn.remote import RemoteCairnClient, remote_config
+from cairn.serve import (
+    health_from,
+    pull_from,
+    push_to,
+    resolve_conflict_to,
+    sync_handshake,
+)
 from cairn.storage import open_backend
 from cairn.tutorial import howto_text
-from cairn.models import now_epoch
-from cairn.serve import health_from, pull_from, push_to, resolve_conflict_to, sync_handshake
 
 SERVER_NAME = "cairn"
 SERVER_VERSION = CAIRN_VERSION
@@ -121,6 +128,13 @@ def make_client() -> CairnClient:
     from cairn.cli import default_agent_id, storage_config
 
     vdir = Path(os.environ["CAIRN_DIR"]) if os.environ.get("CAIRN_DIR") else Path.cwd() / ".cairn"
+    config = remote_config(vdir)
+    if config is not None:
+        expected_agent = os.environ.get("CAIRN_AGENT") or default_agent_id(vdir)
+        return RemoteCairnClient(
+            config, vdir,
+            expected_agent_id=expected_agent if expected_agent != "cairn-cli" else None,
+        )
     try:
         spec, dims = parse_embedder_hint((vdir / "embedder").read_text())
         spec = spec or "hash"
@@ -198,6 +212,15 @@ def _tool_howto(_client: CairnClient, args: dict) -> str:
 
 
 def _tool_whoami(client: CairnClient, _args: dict) -> str:
+    if getattr(client, "remote", False):
+        info = client.whoami()
+        return json.dumps({
+            "vault_name": info["vault_name"], "vault_id": info["vault_id"],
+            "agent": info["agent_id"], "storage": "remote",
+            "role": "curator" if info["curator"] else "member",
+            "embedder": info["embedder"], "dims": info["dims"],
+            "memories": info["memories"],
+        }, default=str)
     identity = client.vault.vault_identity
     role = "curator" if any(
         token["agent_id"] == client.agent_id and bool(token["curator"])
@@ -489,6 +512,12 @@ def call_tool(client: CairnClient, name: str, args: dict) -> str:
     fn = _TOOLS.get(name)
     if fn is None:
         raise ValueError(f"unknown tool: {name}")
+    if getattr(client, "remote", False) and name not in {
+        "retrieve_memory", "store_memory", "list_memories", "get_memory",
+        "archive_memory", "restore_memory", "cairn_howto", "cairn_whoami",
+        "cairn_secret_scan", "cairn_ingest",
+    }:
+        raise ValueError(f"{name} requires a local vault connection")
     return fn(client, args)
 
 

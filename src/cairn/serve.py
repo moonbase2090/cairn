@@ -24,6 +24,7 @@ from urllib import request as urlrequest
 from urllib.parse import urlparse
 
 from .client import CairnClient
+from .remote import dispatch_remote
 from .sync_auth import sync_pack_matches_agent
 
 
@@ -138,6 +139,10 @@ class _Handler(BaseHTTPRequestHandler):
                         "vault_name": identity.name,
                         "origin_id": client.vault.sync_origin_id(),
                         "token_id": token_id,
+                        "agent_id": _agent_id,
+                        "curator": _curator,
+                        "embedder": client.embedder.name,
+                        "dims": client.embedder.dims,
                     })
                 self._send(200, result)
             return
@@ -171,6 +176,12 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        if self.path == "/rpc":
+            self._remote_call()
+            return
+        self._sync_post()
+
+    def _sync_post(self):
         if self.path not in {"/push", "/conflicts/resolve"}:
             self._send(404, {"error": "not found"})
             return
@@ -240,6 +251,60 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(400, {"error": str(e)})
                 return
         self._send(200, out)
+
+    def _remote_call(self) -> None:
+        request_data = self._read_remote_request()
+        if request_data is None:
+            return
+        with _request_client(self.server) as server_client:
+            authorized, agent_id, curator, _token_id = self._authorize(server_client)
+            if not authorized:
+                self._send(401, {"error": "unauthorized"})
+                return
+            if getattr(self.server, "token_mode", "shared") != "per-agent" or not agent_id:
+                self._send(403, {"error": "remote client operations require per-agent token mode"})
+                return
+            request_client = CairnClient(
+                server_client.vault, agent_id, server_client.embedder,
+                audit_path=server_client.audit_path,
+            )
+            try:
+                result = dispatch_remote(
+                    request_client, request_data["operation"], request_data["params"],
+                    agent_id, curator,
+                )
+            except PermissionError as exc:
+                self._send(403, {"error": str(exc)})
+                return
+            except KeyError as exc:
+                self._send(404, {"error": str(exc)})
+                return
+            except (TypeError, ValueError) as exc:
+                self._send(400, {"error": str(exc)})
+                return
+            self._send(200, result)
+
+    def _read_remote_request(self) -> dict | None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 5_000_000:
+            self._send(413, {"error": "request body must be between 1 byte and 5 MB"})
+            return None
+        try:
+            request_data = json.loads(self.rfile.read(length))
+        except (ValueError, OSError):
+            self._send(400, {"error": "invalid JSON request"})
+            return None
+        if not isinstance(request_data, dict) or not isinstance(request_data.get("params", {}), dict):
+            self._send(400, {"error": "request must contain an object of params"})
+            return None
+        operation = request_data.get("operation")
+        if not isinstance(operation, str):
+            self._send(400, {"error": "operation must be a string"})
+            return None
+        return {"operation": operation, "params": request_data.get("params", {})}
 
 
 def _is_loopback(host: str) -> bool:

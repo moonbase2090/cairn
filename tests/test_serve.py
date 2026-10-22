@@ -12,6 +12,7 @@ import pytest
 from cairn import cli
 from cairn.client import CairnClient
 from cairn.embed import HashEmbedder
+from cairn.remote import RemoteCairnClient, RemoteConfig
 from cairn.serve import pull_from, push_to, start_background, sync_handshake
 from cairn.storage import MemoryQuery
 from cairn.store import Vault
@@ -236,6 +237,78 @@ def test_per_agent_tokens_bind_pushes_and_allow_shared_rows_to_round_trip(tmp_pa
             push_to(url, source_a.export(), token=token_a)
         assert revoked_push.value.code == 401
         assert server_client.vault.get_server_token(digest_a) is None
+    finally:
+        srv.shutdown()
+
+
+def test_remote_client_uses_token_identity_and_enforces_memory_ownership(tmp_path):
+    server = make_client(tmp_path / "server" / "vault.db", "server")
+    add_server_token(server, "ct_a", "token-a", "agent-a")
+    add_server_token(server, "ct_b", "token-b", "agent-b")
+    srv = start_background(server, token_mode="per-agent")
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        agent_a = RemoteCairnClient(RemoteConfig(url, "token-a"), tmp_path / "a")
+        agent_b = RemoteCairnClient(RemoteConfig(url, "token-b"), tmp_path / "b")
+
+        stored = agent_a.store_memory(
+            "Remote memories keep the token's assigned identity.", "team", "remote",
+            mode="new",
+        )
+        assert stored.key
+        assert server.get_memory(stored.key).agent_id == "agent-a"
+        assert agent_b.retrieve_memory("assigned identity", {"task_id": "remote"})[0].key == stored.key
+        assert agent_b.list_memories({"task_id": "remote"})[0].key == stored.key
+        assert agent_b.get_memory(stored.key).agent_id == "agent-a"
+        scan = agent_a.preflight_secret_scan()
+        assert scan["findings"] == {} and scan["safe"]
+        with pytest.raises(ValueError, match="curator permission"):
+            agent_b.store_memory(
+                "A cross-agent correction is denied.", "team", "remote",
+                supersedes_key=stored.key, mode="new",
+            )
+        with pytest.raises(ValueError, match="restricted to its assigned agent"):
+            agent_b.archive_memory(stored.key)
+        assert agent_a.archive_memory(stored.key)["status"] == "archived"
+        assert agent_a.restore_memory(stored.key)["status"] == "active"
+        assert agent_a.purge_memory(stored.canonical_id) == {
+            "canonical_id": stored.canonical_id, "deleted": 1,
+        }
+    finally:
+        srv.shutdown()
+
+
+def test_remote_client_requires_per_agent_server_tokens(tmp_path):
+    server = make_client(tmp_path / "server" / "vault.db", "server")
+    srv = start_background(server, token="shared-token")
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        with pytest.raises(ValueError, match="per-agent token mode"):
+            RemoteCairnClient(RemoteConfig(url, "shared-token"), tmp_path / "client")
+    finally:
+        srv.shutdown()
+
+
+def test_remote_endpoint_rejects_malformed_requests(tmp_path):
+    server = make_client(tmp_path / "server" / "vault.db", "server")
+    add_server_token(server, "ct_a", "token-a", "agent-a")
+    srv = start_background(server, token_mode="per-agent")
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}/rpc"
+        cases = [
+            (b"", 413),
+            (b"{", 400),
+            (b"[]", 400),
+            (b'{"operation": 12}', 400),
+            (b'{"operation":"retrieve","params":[]}', 400),
+        ]
+        for body, status in cases:
+            req = urllib.request.Request(
+                url, data=body, headers={"Authorization": "Bearer token-a"}, method="POST",
+            )
+            with pytest.raises(urllib.error.HTTPError) as rejected:
+                urllib.request.urlopen(req, timeout=5)
+            assert rejected.value.code == status
     finally:
         srv.shutdown()
 
