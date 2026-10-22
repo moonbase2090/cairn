@@ -94,6 +94,19 @@ def _context(config: RemoteConfig):
     return None
 
 
+class _RejectRedirects(request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_request(req, config: RemoteConfig):
+    handlers = [_RejectRedirects()]
+    context = _context(config)
+    if context is not None:
+        handlers.append(request.HTTPSHandler(context=context))
+    return request.build_opener(*handlers).open(req, timeout=60)
+
+
 class _RemoteVault:
     name = "remote"
 
@@ -137,9 +150,7 @@ class RemoteCairnClient:
             },
         )
         try:
-            with request.urlopen(
-                req, timeout=60, context=_context(self.config)
-            ) as response:
+            with _open_request(req, self.config) as response:
                 return json.load(response)
         except error.HTTPError as exc:
             try:

@@ -1,11 +1,13 @@
 import hashlib
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from cairn import cli
 from cairn.client import CairnClient
 from cairn.embed import HashEmbedder
 from cairn.mcp_server import call_tool, make_client
-from cairn.remote import RemoteConfig, remote_config
+from cairn.remote import RemoteCairnClient, RemoteConfig, remote_config
 from cairn.serve import start_background
 from cairn.store import Vault
 from cairn.vault_identity import VaultIdentity
@@ -48,6 +50,57 @@ def test_remote_config_reads_vault_config(tmp_path, monkeypatch):
         "https://vault.example",
         "config-token",
     )
+
+
+def test_remote_client_does_not_forward_token_to_redirect_target():
+    target_requests = []
+
+    class TargetHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            target_requests.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
+    target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+    target_thread.start()
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(302)
+            self.send_header(
+                "Location", f"http://127.0.0.1:{target.server_address[1]}/rpc"
+            )
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    redirector = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    redirect_thread = threading.Thread(target=redirector.serve_forever, daemon=True)
+    redirect_thread.start()
+    client = RemoteCairnClient.__new__(RemoteCairnClient)
+    client.config = RemoteConfig(
+        f"http://127.0.0.1:{redirector.server_address[1]}", "secret-token"
+    )
+    try:
+        try:
+            client._request("whoami", {})
+        except ValueError as exc:
+            assert "remote request failed" in str(exc)
+        else:
+            raise AssertionError("redirected remote request unexpectedly succeeded")
+        assert target_requests == []
+    finally:
+        redirector.shutdown()
+        redirector.server_close()
+        redirect_thread.join(timeout=2)
+        target.shutdown()
+        target.server_close()
+        target_thread.join(timeout=2)
 
 
 def test_cli_and_mcp_route_memory_operations_to_remote_vault(
