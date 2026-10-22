@@ -4,6 +4,7 @@ TestStorageContract runs once per name in CONTRACT_BACKENDS. A new backend
 adds its name there (with a skip mark when its server is not configured) and
 must pass unchanged. Nothing in the contract may touch a database driver.
 """
+
 from __future__ import annotations
 
 import os
@@ -46,12 +47,25 @@ def unit(i: int) -> np.ndarray:
 
 def record(key: str, content: str, **over) -> dict:
     rec = {
-        "key": key, "canonical_id": over.pop("canonical_id", f"canon-{key}"),
-        "content": content, "content_summary": content[:200], "memory_type": "semantic",
-        "status": "active", "origin": "agent", "task_id": "task", "agent_id": "agent-a",
-        "team_id": "team", "version": 1, "created_at": NOW, "updated_at": NOW,
-        "expires_at": None, "archived_at": None, "supersedes": None, "parent_key": None,
-        "provenance": None, "confidence": None,
+        "key": key,
+        "canonical_id": over.pop("canonical_id", f"canon-{key}"),
+        "content": content,
+        "content_summary": content[:200],
+        "memory_type": "semantic",
+        "status": "active",
+        "origin": "agent",
+        "task_id": "task",
+        "agent_id": "agent-a",
+        "team_id": "team",
+        "version": 1,
+        "created_at": NOW,
+        "updated_at": NOW,
+        "expires_at": None,
+        "archived_at": None,
+        "supersedes": None,
+        "parent_key": None,
+        "provenance": None,
+        "confidence": None,
         "content_hash": f"sha256:{content_digest(content)}",
     }
     rec.update(over)
@@ -62,15 +76,25 @@ FIND_CASES = [
     pytest.param(MemoryQuery(), 100, ["a", "b", "c"], id="all-by-created"),
     pytest.param(MemoryQuery(), 2, ["a", "b"], id="limit"),
     pytest.param(MemoryQuery(eq={"canonical_id": "c1"}), 100, ["a", "b"], id="eq"),
-    pytest.param(MemoryQuery(eq={"canonical_id": "c1", "status": "active"}), 100, ["a"],
-                 id="eq-and"),
+    pytest.param(
+        MemoryQuery(eq={"canonical_id": "c1", "status": "active"}),
+        100,
+        ["a"],
+        id="eq-and",
+    ),
     pytest.param(MemoryQuery(eq={"team_id": "t2"}), 100, ["c"], id="eq-team"),
-    pytest.param(MemoryQuery(eq={"canonical_id": "c1"}, exclude_key="a"), 100, ["b"],
-                 id="exclude-key"),
+    pytest.param(
+        MemoryQuery(eq={"canonical_id": "c1"}, exclude_key="a"),
+        100,
+        ["b"],
+        id="exclude-key",
+    ),
     pytest.param(MemoryQuery(updated_before=NOW), 100, ["a", "b"], id="updated-before"),
     pytest.param(MemoryQuery(updated_since=NOW), 100, ["b", "c"], id="updated-since"),
     pytest.param(MemoryQuery(archived_before=NOW), 100, ["c"], id="archived-before"),
-    pytest.param(MemoryQuery(archived_before=NOW - 51), 100, [], id="archived-before-none"),
+    pytest.param(
+        MemoryQuery(archived_before=NOW - 51), 100, [], id="archived-before-none"
+    ),
     pytest.param(MemoryQuery(expired_by=NOW), 100, ["c"], id="expired-by"),
     pytest.param(MemoryQuery(expired_by=NOW - 2), 100, [], id="expired-by-none"),
 ]
@@ -93,16 +117,18 @@ def interface_members():
 
 
 class TestStorageContract:
-    @pytest.fixture(params=[
-        pytest.param(
-            backend_name,
-            marks=pytest.mark.skipif(
-                backend_name == "aws" and not AWS_CONFIG_PATH,
-                reason="CAIRN_TEST_AWS_CONFIG is not set",
-            ),
-        )
-        for backend_name in CONTRACT_BACKENDS
-    ])
+    @pytest.fixture(
+        params=[
+            pytest.param(
+                backend_name,
+                marks=pytest.mark.skipif(
+                    backend_name == "aws" and not AWS_CONFIG_PATH,
+                    reason="CAIRN_TEST_AWS_CONFIG is not set",
+                ),
+            )
+            for backend_name in CONTRACT_BACKENDS
+        ]
+    )
     def backend_name(self, request):
         return request.param
 
@@ -137,10 +163,20 @@ class TestStorageContract:
         else:
             config = StorageConfig(backend=backend_name)
 
-        def _open(create: bool = False, embed: str = EMBED, dims: int = DIMS,
-                  doc_threshold: int | None = 64) -> StorageBackend:
-            b = open_backend(tmp_path / "vault", embed, dims, config=config,
-                             create=create, doc_threshold=doc_threshold)
+        def _open(
+            create: bool = False,
+            embed: str = EMBED,
+            dims: int = DIMS,
+            doc_threshold: int | None = 64,
+        ) -> StorageBackend:
+            b = open_backend(
+                tmp_path / "vault",
+                embed,
+                dims,
+                config=config,
+                create=create,
+                doc_threshold=doc_threshold,
+            )
             opened.append(b)
             return b
 
@@ -164,8 +200,11 @@ class TestStorageContract:
         assert vault.vault_dir.is_dir()
 
     def test_overrides_every_interface_member(self, vault):
-        missing = [name for name, member in interface_members()
-                   if getattr(type(vault), name) is member]
+        missing = [
+            name
+            for name, member in interface_members()
+            if getattr(type(vault), name) is member
+        ]
         assert missing == []
 
     def test_open_missing_vault_fails(self, open_vault):
@@ -192,8 +231,9 @@ class TestStorageContract:
         assert pack["events"][0]["kind"] == "snapshot"
         assert pack["events"][0]["snapshot"]["key"] == "sync-k1"
         vault.set_sync_cursor("peer-a", "pull", pack["cursor"], NOW)
-        vault.set_sync_cursor("peer-a", "pull", pack["cursor"] + 1, NOW + 1,
-                              token_id="ct-other")
+        vault.set_sync_cursor(
+            "peer-a", "pull", pack["cursor"] + 1, NOW + 1, token_id="ct-other"
+        )
         vault.close()
         again = open_vault()
         assert again.get_sync_cursor("peer-a", "pull") == pack["cursor"]
@@ -201,13 +241,19 @@ class TestStorageContract:
         assert again.list_sync_cursors() == [
             {
                 "vault_id": again.vault_identity.vault_id,
-                "peer": "peer-a", "token_id": "", "direction": "pull",
-                "cursor": pack["cursor"], "updated_at": NOW,
+                "peer": "peer-a",
+                "token_id": "",
+                "direction": "pull",
+                "cursor": pack["cursor"],
+                "updated_at": NOW,
             },
             {
                 "vault_id": again.vault_identity.vault_id,
-                "peer": "peer-a", "token_id": "ct-other", "direction": "pull",
-                "cursor": pack["cursor"] + 1, "updated_at": NOW + 1,
+                "peer": "peer-a",
+                "token_id": "ct-other",
+                "direction": "pull",
+                "cursor": pack["cursor"] + 1,
+                "updated_at": NOW + 1,
             },
         ]
 
@@ -239,7 +285,9 @@ class TestStorageContract:
 
     # -- memories --------------------------------------------------------------------
     def test_insert_and_get_round_trip(self, vault):
-        rec = record("k1", "the manifold reads 40 psi", confidence=0.5, provenance="gauge")
+        rec = record(
+            "k1", "the manifold reads 40 psi", confidence=0.5, provenance="gauge"
+        )
         vault.insert(rec, unit(0))
         row = vault.get("k1")
         for f in MEMORY_FIELDS:
@@ -264,17 +312,31 @@ class TestStorageContract:
     def test_server_token_lifecycle(self, vault):
         with vault.transaction():
             vault.create_server_token("ct_a", "digest-a", "agent-a", NOW)
-            vault.create_server_token("ct_b", "digest-b", "agent-b", NOW + 1, curator=True)
+            vault.create_server_token(
+                "ct_b", "digest-b", "agent-b", NOW + 1, curator=True
+            )
 
         token = vault.get_server_token("digest-a")
-        assert dict(token) == {"token_id": "ct_a", "agent_id": "agent-a",
-                               "curator": False, "created_at": NOW}
+        assert dict(token) == {
+            "token_id": "ct_a",
+            "agent_id": "agent-a",
+            "curator": False,
+            "created_at": NOW,
+        }
         listed = [dict(row) for row in vault.list_server_tokens()]
         assert listed == [
-            {"token_id": "ct_a", "agent_id": "agent-a", "curator": False,
-             "created_at": NOW},
-            {"token_id": "ct_b", "agent_id": "agent-b", "curator": True,
-             "created_at": NOW + 1},
+            {
+                "token_id": "ct_a",
+                "agent_id": "agent-a",
+                "curator": False,
+                "created_at": NOW,
+            },
+            {
+                "token_id": "ct_b",
+                "agent_id": "agent-b",
+                "curator": True,
+                "created_at": NOW + 1,
+            },
         ]
         assert vault.get_server_token("unknown") is None
         assert vault.get_agent_ids(["missing"]) == {}
@@ -299,13 +361,36 @@ class TestStorageContract:
 
     @pytest.mark.parametrize(("query", "limit", "want"), FIND_CASES)
     def test_find_filters(self, vault, query, limit, want):
-        vault.insert(record("a", "alpha", created_at=NOW, updated_at=NOW - 100,
-                            canonical_id="c1"), unit(0))
-        vault.insert(record("b", "beta", created_at=NOW + 1, updated_at=NOW,
-                            canonical_id="c1", status="superseded"), unit(1))
-        vault.insert(record("c", "gamma", created_at=NOW + 2, updated_at=NOW + 100,
-                            team_id="t2", status="archived", archived_at=NOW - 50,
-                            expires_at=NOW - 1), unit(2))
+        vault.insert(
+            record(
+                "a", "alpha", created_at=NOW, updated_at=NOW - 100, canonical_id="c1"
+            ),
+            unit(0),
+        )
+        vault.insert(
+            record(
+                "b",
+                "beta",
+                created_at=NOW + 1,
+                updated_at=NOW,
+                canonical_id="c1",
+                status="superseded",
+            ),
+            unit(1),
+        )
+        vault.insert(
+            record(
+                "c",
+                "gamma",
+                created_at=NOW + 2,
+                updated_at=NOW + 100,
+                team_id="t2",
+                status="archived",
+                archived_at=NOW - 50,
+                expires_at=NOW - 1,
+            ),
+            unit(2),
+        )
         assert [r["key"] for r in vault.find(query, limit)] == want
 
     def test_find_rejects_unknown_columns(self):
@@ -324,7 +409,11 @@ class TestStorageContract:
         vault.insert(record("a", "alpha"), unit(0))
         assert vault.set_status("a", "archived", NOW + 5, archived_at=NOW + 5) == 1
         row = vault.get("a")
-        assert (row["status"], row["updated_at"], row["archived_at"]) == ("archived", NOW + 5, NOW + 5)
+        assert (row["status"], row["updated_at"], row["archived_at"]) == (
+            "archived",
+            NOW + 5,
+            NOW + 5,
+        )
 
     def test_set_status_clears_archived_at(self, vault):
         vault.insert(record("a", "alpha", status="archived", archived_at=NOW), unit(0))
@@ -425,10 +514,14 @@ class TestStorageContract:
             vault.insert(record(f"noise{i}", f"noise {i}", team_id="noise"), unit(0))
         vault.insert(record("want", "wanted", team_id="mine"), unit(1))
         vault.insert(record("gone", "expired", team_id="mine", expires_at=NOW), unit(0))
-        vault.insert(record("old", "archived", team_id="mine", status="archived"), unit(0))
+        vault.insert(
+            record("old", "archived", team_id="mine", status="archived"), unit(0)
+        )
         hits = vault.knn(unit(0), 1, filters={"team_id": "mine"}, now=NOW)
         assert [r["key"] for r, _ in hits] == ["want"]
-        assert [r["key"] for r, _ in vault.knn(unit(0), 1, status="archived")] == ["old"]
+        assert [r["key"] for r, _ in vault.knn(unit(0), 1, status="archived")] == [
+            "old"
+        ]
 
     def test_vec_status_reports_sync(self, vault):
         vault.insert(record("a", "alpha"), unit(0))
@@ -449,7 +542,7 @@ class TestStorageContract:
         assert vault.read_content(vault.get("b")) == big
         assert vault.doc_stats()["files"] == 1
 
-    def test_documents_are_refcounted(self, vault):
+    def test_documents_are_refcounted(self, vault, backend_name):
         big = "y" * 200
         vault.insert(record("a", big), unit(0))
         vault.insert(record("b", big, task_id="t2"), unit(1))
@@ -458,6 +551,9 @@ class TestStorageContract:
         assert vault.read_content(vault.get("b")) == big
         vault.delete_by_keys(["b"])
         assert vault.doc_stats()["files"] == 0
+        # AWS document objects remain until the explicit orphan sweep or the
+        # scheduled tombstone cleaner removes them from the versioned bucket.
+        assert vault.sweep_orphan_docs() == (1 if backend_name == "aws" else 0)
         assert vault.sweep_orphan_docs() == 0
 
     def test_missing_document_is_loud(self, vault):
@@ -492,7 +588,10 @@ def test_backend_keyword_remains_supported(tmp_path):
 
 
 def test_unknown_backend_is_a_clear_error(tmp_path):
-    with pytest.raises(UnknownBackendError, match="unknown storage backend 'nosuch'.*postgres.*sqlite"):
-        open_backend(tmp_path, EMBED, DIMS,
-                     config=StorageConfig(backend="nosuch"), create=True)
+    with pytest.raises(
+        UnknownBackendError, match="unknown storage backend 'nosuch'.*postgres.*sqlite"
+    ):
+        open_backend(
+            tmp_path, EMBED, DIMS, config=StorageConfig(backend="nosuch"), create=True
+        )
     assert not (tmp_path / "vault.db").exists()

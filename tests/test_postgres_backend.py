@@ -1,4 +1,5 @@
 """PostgreSQL integration tests run against the pgvector CI service."""
+
 from __future__ import annotations
 
 import json
@@ -40,7 +41,11 @@ def test_concurrent_postgres_initializers_converge(tmp_path, postgres_url):
 
     def initialize():
         return open_backend(
-            tmp_path / "vault", embedder.name, 8, config=config, create=True,
+            tmp_path / "vault",
+            embedder.name,
+            8,
+            config=config,
+            create=True,
         )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -49,7 +54,10 @@ def test_concurrent_postgres_initializers_converge(tmp_path, postgres_url):
     try:
         writer = CairnClient(vaults[0], "writer", embedder)
         writer.store_memory(
-            "created after two initializers", "team", "task", mode="new",
+            "created after two initializers",
+            "team",
+            "task",
+            mode="new",
             vector=np.array([1, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32),
         )
         assert vaults[1].count() == 1
@@ -61,8 +69,14 @@ def test_concurrent_postgres_initializers_converge(tmp_path, postgres_url):
 def test_two_serve_instances_share_postgres(tmp_path, postgres_url):
     config = StorageConfig(backend="postgres", url=postgres_url)
     embedder = get_embedder("hash", dims=8)
-    vault_a = open_backend(tmp_path / "node-a", embedder.name, 8, config=config,
-                           create=True, doc_threshold=10)
+    vault_a = open_backend(
+        tmp_path / "node-a",
+        embedder.name,
+        8,
+        config=config,
+        create=True,
+        doc_threshold=10,
+    )
     vault_b = open_backend(tmp_path / "node-b", embedder.name, 8, config=config)
     client_a = CairnClient(vault_a, "agent-a", embedder)
     client_b = CairnClient(vault_b, "agent-b", embedder)
@@ -80,13 +94,21 @@ def test_two_serve_instances_share_postgres(tmp_path, postgres_url):
     try:
         for index, vector in enumerate(vectors):
             source_vault = open_backend(
-                tmp_path / f"source-{index}", embedder.name, 8,
-                config=StorageConfig(), create=True, doc_threshold=10,
+                tmp_path / f"source-{index}",
+                embedder.name,
+                8,
+                config=StorageConfig(),
+                create=True,
+                doc_threshold=10,
             )
             sources.append(source_vault)
             source_client = CairnClient(source_vault, f"source-{index}", embedder)
             result = source_client.store_memory(
-                f"written by server {index}", "team", "shared", mode="new", vector=vector,
+                f"written by server {index}",
+                "team",
+                "shared",
+                mode="new",
+                vector=vector,
             )
             keys.append(result.key)
             packs.append(source_client.export())
@@ -103,14 +125,19 @@ def test_two_serve_instances_share_postgres(tmp_path, postgres_url):
         assert {row["key"] for row in pack_b["memories"]} == set(keys)
 
         local_vault = open_backend(
-            tmp_path / "sqlite-destination", embedder.name, 8,
-            config=StorageConfig(), create=True, doc_threshold=10,
+            tmp_path / "sqlite-destination",
+            embedder.name,
+            8,
+            config=StorageConfig(),
+            create=True,
+            doc_threshold=10,
         )
         try:
             local_client = CairnClient(local_vault, "local", embedder)
             assert local_client.import_pack(pack_a) == {"added": 2, "skipped": 0}
             assert [local_client.get_memory(key).content for key in keys] == [
-                "written by server 0", "written by server 1",
+                "written by server 0",
+                "written by server 1",
             ]
         finally:
             local_vault.close()
@@ -126,7 +153,10 @@ def test_two_serve_instances_share_postgres(tmp_path, postgres_url):
 
 
 def test_cli_and_mcp_open_postgres_from_config(
-    tmp_path, monkeypatch, capsys, postgres_url,
+    tmp_path,
+    monkeypatch,
+    capsys,
+    postgres_url,
 ):
     home = tmp_path / "home"
     vdir = tmp_path / ".cairn"

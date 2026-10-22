@@ -3,6 +3,8 @@
 #
 #   curl -fsSL https://cairncli.com/install.sh | sh
 #   CAIRN_REF=main sh install.sh        # pin a branch, tag, or sha
+#   CAIRN_INSTALL_EMBED=fastembed sh install.sh  # include fastembed support
+#   CAIRN_INSTALL_AWS=1 sh install.sh           # include the AWS SDK
 #
 # NOTE: plain `uv tool install cairn` pulls an unrelated same-named package
 # from PyPI — always install moonbase2090/cairn from git (the default below).
@@ -14,8 +16,19 @@ set -eu
 CAIRN_REF="${CAIRN_REF:-main}"
 BIN_DIR="${UV_TOOL_BIN_DIR:-$HOME/.local/bin}"
 SPEC="git+https://github.com/moonbase2090/cairn.git@${CAIRN_REF}"
+INSTALL_EMBED="${CAIRN_INSTALL_EMBED:-none}"
+INSTALL_AWS="${CAIRN_INSTALL_AWS:-0}"
 
 die() { printf 'cairn-install: %s\n' "$*" >&2; exit 1; }
+
+case "$INSTALL_EMBED" in
+  none|fastembed) ;;
+  *) die "CAIRN_INSTALL_EMBED must be 'none' or 'fastembed'." ;;
+esac
+case "$INSTALL_AWS" in
+  0|1) ;;
+  *) die "CAIRN_INSTALL_AWS must be 0 or 1." ;;
+esac
 
 if [ "${CAIRN_NO_AGENT_SKILLS:-0}" = "1" ]; then
   SKIP_AGENT_SKILLS=1
@@ -40,12 +53,20 @@ else
 fi
 
 # 3. cairn ------------------------------------------------------------
+set --
+if [ "$INSTALL_EMBED" = "fastembed" ]; then
+  set -- "$@" --with 'fastembed>=0.3'
+fi
+if [ "$INSTALL_AWS" = "1" ]; then
+  set -- "$@" --with 'boto3>=1.40' --with 'botocore>=1.40'
+fi
+
 if uv tool list 2>/dev/null | grep -q '^cairn '; then
   printf 'cairn-install: upgrading cairn to %s...\n' "$SPEC"
-  uv tool install --force "$SPEC"
+  uv tool install --force "$@" "$SPEC"
 else
   printf 'cairn-install: installing %s...\n' "$SPEC"
-  uv tool install "$SPEC"
+  uv tool install "$@" "$SPEC"
 fi
 
 # 4. verify -----------------------------------------------------------
@@ -68,4 +89,14 @@ case ":$PATH:" in
 esac
 
 printf 'cairn-install: GUI editors (Cursor, etc.) may not see %s — use the absolute binary path in .mcp.json "command".\n' "$BIN_DIR"
+if [ "$INSTALL_EMBED" = "fastembed" ] || [ "$INSTALL_AWS" = "1" ]; then
+  printf 'cairn-install: optional packages installed:'
+  [ "$INSTALL_EMBED" != "fastembed" ] || printf ' fastembed'
+  [ "$INSTALL_AWS" != "1" ] || printf ' AWS SDK (boto3, botocore)'
+  printf '\n'
+  printf 'cairn-install: repeat the same CAIRN_INSTALL_* flags when upgrading to retain these optional packages.\n'
+fi
+if [ "$INSTALL_AWS" = "1" ]; then
+  printf 'cairn-install: AWS deployment also needs the AWS CLI, Node.js, and npm; Cairn installs its pinned CDK npm dependencies on demand.\n'
+fi
 printf 'cairn-install: next, per project: cairn init --yes && cairn bootstrap\n'

@@ -68,6 +68,116 @@ test("creates isolated on-demand metadata, cache, content, and vector resources"
   });
 });
 
+test("cleanup Lambda does not reserve account concurrency", () => {
+  const template = synth(vaultA);
+  const [cleanup] = Object.values(template.findResources("AWS::Lambda::Function"));
+
+  assert.ok(cleanup);
+  assert.equal(cleanup.Properties.ReservedConcurrentExecutions, undefined);
+});
+
+test("limits cleanup KMS decryption to its DynamoDB table", () => {
+  const template = synth(vaultA);
+  const keyId = Object.keys(template.findResources("AWS::KMS::Key"))[0];
+
+  template.hasResourceProperties("AWS::IAM::Policy", {
+    PolicyDocument: {
+      Statement: assertions.Match.arrayWith([
+        {
+          Sid: "CairnCleanupKmsDecrypt",
+          Effect: "Allow",
+          Action: "kms:Decrypt",
+          Resource: { "Fn::GetAtt": [keyId, "Arn"] },
+          Condition: {
+            StringEquals: {
+              "kms:ViaService": "dynamodb.us-west-2.amazonaws.com",
+              "kms:EncryptionContext:aws:dynamodb:tableName": {
+                Ref: assertions.Match.stringLikeRegexp("VaultTable"),
+              },
+              "kms:EncryptionContext:aws:dynamodb:subscriberId": "123456789012",
+            },
+          },
+        },
+      ]),
+    },
+  });
+});
+
+test("grants cleanup vector deletion scoped KMS decryption", () => {
+  const template = synth(vaultA);
+  const keyId = Object.keys(template.findResources("AWS::KMS::Key"))[0];
+
+  template.hasResourceProperties("AWS::IAM::Policy", {
+    PolicyDocument: {
+      Statement: assertions.Match.arrayWith([
+        {
+          Sid: "CairnCleanupVectorKmsDecrypt",
+          Effect: "Allow",
+          Action: "kms:Decrypt",
+          Resource: { "Fn::GetAtt": [keyId, "Arn"] },
+          Condition: {
+            StringEquals: {
+              "kms:ViaService": "s3vectors.us-west-2.amazonaws.com",
+            },
+            "ForAnyValue:StringEquals": {
+              "kms:EncryptionContextKeys": ["aws:s3vectors:arn", "aws:s3vectors:resource-id"],
+            },
+          },
+        },
+      ]),
+    },
+  });
+});
+
+test("scopes the cleanup lease to its vault partition", () => {
+  const template = synth(vaultA);
+
+  template.hasResourceProperties("AWS::IAM::Policy", {
+    PolicyDocument: {
+      Statement: assertions.Match.arrayWith([
+        assertions.Match.objectLike({
+          Sid: "CairnCleanupLease",
+          Effect: "Allow",
+          Action: ["dynamodb:DeleteItem", "dynamodb:UpdateItem"],
+          Condition: {
+            "ForAllValues:StringLike": {
+              "dynamodb:LeadingKeys": [
+                `VAULT#${vaultA}#CLEANUP#LOCK`,
+                `VAULT#${vaultA}#CONTENT#LOCK#*`,
+              ],
+            },
+          },
+        }),
+      ]),
+    },
+  });
+});
+
+test("scopes cleanup tombstone access to tombstone rows in its vault", () => {
+  const template = synth(vaultA);
+
+  template.hasResourceProperties("AWS::IAM::Policy", {
+    PolicyDocument: {
+      Statement: assertions.Match.arrayWith([
+        assertions.Match.objectLike({
+          Sid: "CairnCleanupTombstones",
+          Effect: "Allow",
+          Action: ["dynamodb:Query", "dynamodb:UpdateItem"],
+          Condition: {
+            "ForAllValues:StringLike": {
+              "dynamodb:LeadingKeys": [
+                `VAULT#${vaultA}#TOMBSTONE`,
+                `VAULT#${vaultA}#TOMBSTONE#*`,
+                `VAULT#${vaultA}#MEMORY#*`,
+              ],
+            },
+          },
+        }),
+      ]),
+    },
+  });
+});
+
 test("rejects unsafe embed model context before synthesis", () => {
   assert.throws(() => parseStackConfig({
     vaultId: vaultA,
@@ -98,6 +208,53 @@ test("adds an authenticated sync API only when explicitly enabled", () => {
   assert.match(synthesized, /dynamodb:GetItem/);
   assert.match(synthesized, /VAULT#0123456789abcdef0123456789abcdef#TOKEN#/);
   assert.match(synthesized, /CairnTokenTableKeyDecrypt/);
+});
+
+test("grants the S3 Vectors indexer scoped decrypt access to the vault key", () => {
+  const template = synth(vaultA);
+  const key = Object.values(template.findResources("AWS::KMS::Key"))[0] as {
+    Properties: { KeyPolicy: { Statement: unknown[] } };
+  };
+  const statements = key.Properties.KeyPolicy.Statement;
+
+  assert.equal(statements.length, 2);
+  assert.deepEqual(statements[1], {
+    Sid: "AllowS3VectorsIndexMaintenance",
+    Effect: "Allow",
+    Principal: { Service: "indexing.s3vectors.amazonaws.com" },
+    Action: "kms:Decrypt",
+    Resource: "*",
+    Condition: {
+      ArnEquals: {
+        "aws:SourceArn": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                { Ref: "AWS::Partition" },
+                ":s3vectors:us-west-2:123456789012:bucket/cairn-vault-0123456789abcdef0123456789abcdef-vectors",
+              ],
+            ],
+          },
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                { Ref: "AWS::Partition" },
+                ":s3vectors:us-west-2:123456789012:bucket/cairn-vault-0123456789abcdef0123456789abcdef-vectors/index/cairn-vault-0123456789abcdef0123456789abcdef-index",
+              ],
+            ],
+          },
+        ],
+      },
+      StringEquals: { "aws:SourceAccount": "123456789012" },
+      "ForAnyValue:StringEquals": {
+        "kms:EncryptionContextKeys": ["aws:s3vectors:arn", "aws:s3vectors:resource-id"],
+      },
+    },
+  });
 });
 
 test("qualifies physical data resources and policy partition keys by vault ID", () => {

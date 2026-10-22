@@ -46,7 +46,7 @@ dest="$prefix/lib/cairn"
 mkdir -p "$dest" "$prefix/bin"
 rm -rf "$dest/python" "$dest/app" "$dest/bin"
 cp -a python app bin "$dest/"
-cp -a VERSION TARGET MPL-2.0.txt INSTALL.txt "$dest/"
+cp -a VERSION TARGET MIT.txt INSTALL.txt "$dest/"
 for name in cairn cairn-mcp cairn-embedd; do
   ln -sfn "$dest/bin/$name" "$prefix/bin/$name"
 done

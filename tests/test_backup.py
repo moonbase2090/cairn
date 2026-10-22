@@ -35,7 +35,9 @@ def config(path, text):
 
 
 def local_target(vault: Path, target_path: Path) -> BackupTarget:
-    config(vault / "config.toml", f'[[backup]]\nkind = "file"\npath = "{target_path}"\n')
+    config(
+        vault / "config.toml", f'[[backup]]\nkind = "file"\npath = "{target_path}"\n'
+    )
     return backup_settings(vault, home=vault.parent / "home").targets[0]
 
 
@@ -43,7 +45,9 @@ def sqlite_refs(path: Path, refs=()) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as connection:
         connection.execute("CREATE TABLE memories (content_ref TEXT)")
-        connection.executemany("INSERT INTO memories VALUES (?)", ((ref,) for ref in refs))
+        connection.executemany(
+            "INSERT INTO memories VALUES (?)", ((ref,) for ref in refs)
+        )
 
 
 def put_source_document(vault: Path, content: str) -> str:
@@ -58,7 +62,9 @@ def put_source_document(vault: Path, content: str) -> str:
 def test_backup_targets_read_from_vault_before_home(tmp_path):
     vault = tmp_path / "project" / ".cairn"
     home = tmp_path / "home"
-    config(home / ".cairn" / "config.toml", '[[backup]]\nkind = "file"\npath = "~/old"\n')
+    config(
+        home / ".cairn" / "config.toml", '[[backup]]\nkind = "file"\npath = "~/old"\n'
+    )
     config(vault / "config.toml", '[[backup]]\nkind = "s3"\nbucket = "cairn"\n')
 
     settings = backup_settings(vault, home=home)
@@ -115,7 +121,9 @@ def test_backup_config_rejects_inline_credentials(tmp_path):
         '[[backup]]\nkind = "s3"\nbucket = "cairn"\nsecret_access_key = "secret"\n',
     )
 
-    with pytest.raises(ValueError, match="credentials belong in standard environment or profile"):
+    with pytest.raises(
+        ValueError, match="credentials belong in standard environment or profile"
+    ):
         backup_settings(vault, home=tmp_path / "home")
 
 
@@ -163,7 +171,10 @@ def test_external_error_text_redacts_standard_credentials(monkeypatch):
 
 def test_litestream_config_contains_target_settings_but_no_secrets(tmp_path):
     vault = tmp_path / "vault"
-    config(vault / "config.toml", '[[backup]]\nkind = "s3"\nbucket = "cairn"\nendpoint = "http://127.0.0.1:9000"\n')
+    config(
+        vault / "config.toml",
+        '[[backup]]\nkind = "s3"\nbucket = "cairn"\nendpoint = "http://127.0.0.1:9000"\n',
+    )
     target = backup_settings(vault, home=tmp_path / "home").targets[0]
 
     rendered = _config_text(target, vault / "vault.db", vault / "backup" / "s3")
@@ -192,10 +203,15 @@ def test_backup_status_reports_configured_targets_without_opening_vault(tmp_path
 
     assert status == {
         "running": False,
-        "targets": [{
-            "name": "local", "kind": "file", "last_success": None,
-            "last_error": None, "last_snapshot": None,
-        }],
+        "targets": [
+            {
+                "name": "local",
+                "kind": "file",
+                "last_success": None,
+                "last_error": None,
+                "last_snapshot": None,
+            }
+        ],
     }
     assert not vault.exists()
 
@@ -231,7 +247,9 @@ def test_document_refs_handle_old_schema_and_reject_unknown_hashes(tmp_path):
         _document_refs(current_db)
 
 
-def test_run_target_once_resyncs_documents_committed_during_replication(tmp_path, monkeypatch):
+def test_run_target_once_resyncs_documents_committed_during_replication(
+    tmp_path, monkeypatch
+):
     vault = tmp_path / "vault"
     vault.mkdir()
     database = vault / "vault.db"
@@ -258,7 +276,9 @@ def test_run_target_once_resyncs_documents_committed_during_replication(tmp_path
     _run_target_once(target, database, vault, "litestream", state)
 
     digest = content_digest(content)
-    remote = tmp_path / "replica" / "cairn-docs" / digest[:2] / digest[2:4] / f"{digest}.md"
+    remote = (
+        tmp_path / "replica" / "cairn-docs" / digest[:2] / digest[2:4] / f"{digest}.md"
+    )
     assert len(sync_calls) == 2
     assert remote.read_text() == content
     assert state["targets"]["local"]["last_success"]
@@ -345,7 +365,9 @@ def test_restore_rebuilds_metadata_from_database(tmp_path, monkeypatch):
     database = vault / "vault.db"
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE meta (k TEXT, v TEXT)")
-        connection.executemany("INSERT INTO meta VALUES (?, ?)", [("embed_model", "hash"), ("dims", "8")])
+        connection.executemany(
+            "INSERT INTO meta VALUES (?, ?)", [("embed_model", "hash"), ("dims", "8")]
+        )
         connection.execute("CREATE TABLE memories (team_id TEXT, agent_id TEXT)")
         connection.execute("INSERT INTO memories VALUES ('team-a', 'agent-a')")
 
@@ -355,7 +377,9 @@ def test_restore_rebuilds_metadata_from_database(tmp_path, monkeypatch):
     assert project["team"] == "team-a"
     assert project["agent_id"] == "agent-a"
     assert (vault / "embedder").read_text()
-    assert {"vault.db-wal", "vault.db-shm"} <= set((vault / ".gitignore").read_text().splitlines())
+    assert {"vault.db-wal", "vault.db-shm"} <= set(
+        (vault / ".gitignore").read_text().splitlines()
+    )
 
 
 def test_restore_uses_litestream_output_without_overwriting(tmp_path, monkeypatch):
@@ -368,8 +392,12 @@ def test_restore_uses_litestream_output_without_overwriting(tmp_path, monkeypatc
         output = args[args.index("-o") + 1]
         with sqlite3.connect(output) as connection:
             connection.execute("CREATE TABLE meta (k TEXT, v TEXT)")
-            connection.execute("CREATE TABLE memories (team_id TEXT, agent_id TEXT, content_ref TEXT)")
-            connection.execute("INSERT INTO memories VALUES ('team-b', 'agent-b', NULL)")
+            connection.execute(
+                "CREATE TABLE memories (team_id TEXT, agent_id TEXT, content_ref TEXT)"
+            )
+            connection.execute(
+                "INSERT INTO memories VALUES ('team-b', 'agent-b', NULL)"
+            )
         return 0, ""
 
     monkeypatch.setattr(backup, "_run_litestream", write_restored_database)
@@ -383,12 +411,28 @@ def test_restore_uses_litestream_output_without_overwriting(tmp_path, monkeypatc
 
 def test_backup_cli_status_supports_text_and_json(tmp_path, monkeypatch, capsys):
     vault = tmp_path / "vault"
-    config(vault / "config.toml", f'[[backup]]\nkind = "file"\npath = "{tmp_path / "replica"}"\n')
-    monkeypatch.setattr(cli, "backup_status", lambda *_: {
-        "running": True,
-        "targets": [{"name": "local", "kind": "file", "last_success": "now", "last_error": None}],
-    })
-    args = type("Args", (), {"vault": str(vault), "backup_action": "status", "json": False})()
+    config(
+        vault / "config.toml",
+        f'[[backup]]\nkind = "file"\npath = "{tmp_path / "replica"}"\n',
+    )
+    monkeypatch.setattr(
+        cli,
+        "backup_status",
+        lambda *_: {
+            "running": True,
+            "targets": [
+                {
+                    "name": "local",
+                    "kind": "file",
+                    "last_success": "now",
+                    "last_error": None,
+                }
+            ],
+        },
+    )
+    args = type(
+        "Args", (), {"vault": str(vault), "backup_action": "status", "json": False}
+    )()
 
     assert cli._run_backup_command(args) == 0
     assert "local (file): now" in capsys.readouterr().out

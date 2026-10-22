@@ -1,4 +1,5 @@
 """[storage] backend selection from vault, generated AWS, and home settings."""
+
 import json
 
 import pytest
@@ -6,6 +7,23 @@ import pytest
 from cairn.cli import main, storage_config
 from cairn.mcp_server import make_client
 from cairn.storage import StorageConfig, UnknownBackendError
+
+
+def valid_aws_settings(**overrides):
+    settings = {
+        "backend": "aws",
+        "region": "us-west-2",
+        "vault_id": "0123456789abcdef0123456789abcdef",
+        "vault_name": "work-vault",
+        "table": "memory",
+        "cache_table": "cache",
+        "content_bucket": "content",
+        "vector_bucket": "vectors",
+        "vector_index": "index",
+        "vector_index_arn": "arn:aws:s3vectors:us-west-2:123456789012:index/mock",
+    }
+    settings.update(overrides)
+    return settings
 
 
 @pytest.fixture
@@ -28,6 +46,58 @@ def run(argv, capsys):
 def test_default_is_sqlite(dirs):
     _, vdir = dirs
     assert storage_config(vdir) == StorageConfig()
+
+
+@pytest.mark.parametrize("backend", [None, ""])
+def test_storage_config_requires_non_empty_string_backend(backend):
+    with pytest.raises(ValueError, match="backend must be a non-empty string"):
+        StorageConfig(backend=backend)
+
+
+def test_storage_config_requires_string_url():
+    with pytest.raises(ValueError, match="url must be a string"):
+        StorageConfig(url=123)
+
+
+def test_storage_config_only_allows_url_for_postgres():
+    with pytest.raises(ValueError, match="only supported when backend = 'postgres'"):
+        StorageConfig(url="postgresql://localhost/cairn")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"region": "not-a-region"}, "region must be an AWS region name"),
+        ({"vault_id": "invalid"}, "vault_id must be a 32-character logical vault ID"),
+        ({"vault_name": "team/work-vault"}, "vault_name must be a safe display name"),
+        ({"profile": "bad profile"}, "profile contains unsupported characters"),
+    ],
+)
+def test_aws_config_rejects_invalid_resource_values(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        StorageConfig(**valid_aws_settings(**overrides))
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://user@example.test",
+        "https://user:pass@example.test",
+        "https://example.test?mode=sync",
+        "https://example.test#fragment",
+        "https://example.test/v1",
+    ],
+)
+def test_aws_sync_endpoint_rejects_credentials_and_paths(endpoint):
+    with pytest.raises(ValueError, match="HTTPS API base URL"):
+        StorageConfig(**valid_aws_settings(sync_endpoint=endpoint))
+
+
+def test_aws_fields_are_rejected_for_other_backends():
+    with pytest.raises(
+        ValueError, match="AWS resource settings require backend = 'aws'"
+    ):
+        StorageConfig(region="us-west-2")
 
 
 def test_home_config_selects_backend(dirs):
@@ -71,11 +141,14 @@ def test_generated_aws_settings_fall_after_vault_and_before_home(dirs):
     assert storage_config(vdir) == StorageConfig()
 
 
-@pytest.mark.parametrize("body", [
-    pytest.param("[storage\n", id="bad-toml"),
-    pytest.param('storage = "sqlite"\n', id="not-a-table"),
-    pytest.param("[storage]\nbackend = 3\n", id="not-a-string"),
-])
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("[storage\n", id="bad-toml"),
+        pytest.param('storage = "sqlite"\n', id="not-a-table"),
+        pytest.param("[storage]\nbackend = 3\n", id="not-a-string"),
+    ],
+)
 def test_malformed_config_is_an_error(dirs, body):
     _, vdir = dirs
     (vdir / "config.toml").write_text(body)
@@ -85,9 +158,12 @@ def test_malformed_config_is_an_error(dirs, body):
 
 def test_postgres_config_reads_connection_url(dirs):
     home_cfg, vdir = dirs
-    home_cfg.write_text('[storage]\nbackend = "postgres"\nurl = "postgresql://localhost/cairn"\n')
+    home_cfg.write_text(
+        '[storage]\nbackend = "postgres"\nurl = "postgresql://localhost/cairn"\n'
+    )
     assert storage_config(vdir) == StorageConfig(
-        backend="postgres", url="postgresql://localhost/cairn")
+        backend="postgres", url="postgresql://localhost/cairn"
+    )
 
 
 def test_postgres_config_requires_url(dirs):
@@ -100,7 +176,7 @@ def test_postgres_config_requires_url(dirs):
 def test_aws_config_reads_resource_names_without_credentials(dirs):
     home_cfg, _ = dirs
     home_cfg.write_text(
-        '[storage]\n'
+        "[storage]\n"
         'backend = "aws"\n'
         'region = "us-west-2"\n'
         'profile = "work"\n'
@@ -115,11 +191,16 @@ def test_aws_config_reads_resource_names_without_credentials(dirs):
         'sync_endpoint = "https://abc123.execute-api.us-west-2.amazonaws.com"\n'
     )
     assert storage_config(dirs[1]) == StorageConfig(
-        backend="aws", region="us-west-2", profile="work",
-        vault_id="0123456789abcdef0123456789abcdef", vault_name="work-vault",
+        backend="aws",
+        region="us-west-2",
+        profile="work",
+        vault_id="0123456789abcdef0123456789abcdef",
+        vault_name="work-vault",
         table="cairn-memory",
-        cache_table="cairn-cache", content_bucket="cairn-content",
-        vector_bucket="cairn-vectors", vector_index="cairn-index",
+        cache_table="cairn-cache",
+        content_bucket="cairn-content",
+        vector_bucket="cairn-vectors",
+        vector_index="cairn-index",
         vector_index_arn="arn:aws:s3vectors:us-west-2:123456789012:index/example",
         sync_endpoint="https://abc123.execute-api.us-west-2.amazonaws.com",
     )
@@ -155,7 +236,9 @@ def test_aws_resource_setting_without_backend_is_an_error(dirs):
 
 def test_storage_url_without_backend_is_an_error(dirs):
     _, vdir = dirs
-    (vdir / "config.toml").write_text('[storage]\nurl = "postgresql://localhost/cairn"\n')
+    (vdir / "config.toml").write_text(
+        '[storage]\nurl = "postgresql://localhost/cairn"\n'
+    )
     with pytest.raises(ValueError, match="url requires backend"):
         storage_config(vdir)
 

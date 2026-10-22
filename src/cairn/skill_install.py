@@ -1,4 +1,5 @@
 """Install the bundled Cairn Agent Skill for supported coding agents."""
+
 from __future__ import annotations
 
 import json
@@ -66,7 +67,9 @@ def detected_targets(
         if codex_dir.is_dir():
             targets.append(FileTarget("codex", "codex", codex_dir / "skills" / "cairn"))
         if shared_dir.is_dir():
-            targets.append(FileTarget("codex", "shared", shared_dir / "skills" / "cairn"))
+            targets.append(
+                FileTarget("codex", "shared", shared_dir / "skills" / "cairn")
+            )
         if not codex_dir.is_dir() and not shared_dir.is_dir():
             targets.append(FileTarget("codex", "codex", codex_dir / "skills" / "cairn"))
 
@@ -104,7 +107,9 @@ def file_targets(home: Path, agent: str) -> list[FileTarget]:
     targets = []
     for name in names:
         for label, directory in roots[name]:
-            targets.append(FileTarget(name, label, home / directory / "skills" / "cairn"))
+            targets.append(
+                FileTarget(name, label, home / directory / "skills" / "cairn")
+            )
     return targets
 
 
@@ -145,7 +150,9 @@ def muse_skill_path(home: Path) -> str | None:
     try:
         response = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
-        raise SkillInstallError("parse JSON from muse skills list --source user --json") from error
+        raise SkillInstallError(
+            "parse JSON from muse skills list --source user --json"
+        ) from error
     if not isinstance(response, dict):
         raise SkillInstallError("Muse skill list did not return a JSON object")
     skills = response.get("skills")
@@ -158,7 +165,10 @@ def muse_skill_path(home: Path) -> str | None:
             path = skill.get("path")
             if not isinstance(path, str):
                 raise SkillInstallError("Muse listed cairn without a skill path")
-            if path in ("$CONFIG_DIR/skills/cairn", "$CONFIG_DIR/skills/cairn/SKILL.md"):
+            if path in (
+                "$CONFIG_DIR/skills/cairn",
+                "$CONFIG_DIR/skills/cairn/SKILL.md",
+            ):
                 return path
     diagnostics = response.get("diagnostics", [])
     if not isinstance(diagnostics, list):
@@ -177,8 +187,14 @@ def install_muse(home: Path, force: bool) -> None:
         source = Path(temp)
         (source / "SKILL.md").write_bytes(SKILL)
         command = [
-            "muse", "skills", "install", str(source),
-            "--scope", "user", "--name", "cairn",
+            "muse",
+            "skills",
+            "install",
+            str(source),
+            "--scope",
+            "user",
+            "--name",
+            "cairn",
         ]
         if force:
             command.append("--force")
@@ -253,7 +269,9 @@ def install_skill(
     config_home: Path | None = None,
 ) -> list[InstallResult]:
     """Install or inspect selected user-scope skill destinations."""
-    config_home = config_home or Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
+    config_home = config_home or Path(
+        os.environ.get("XDG_CONFIG_HOME", home / ".config")
+    )
     include_muse = agent in ("all", "muse")
     if agent == "detected":
         targets, include_muse = detected_targets(
@@ -272,8 +290,10 @@ def install_skill(
     if check:
         for target, state in states:
             status = (
-                "current" if state == "current"
-                else "would replace" if state == "different" and force
+                "current"
+                if state == "current"
+                else "would replace"
+                if state == "different" and force
                 else "missing"
             )
             results.append(
@@ -281,8 +301,10 @@ def install_skill(
             )
         if include_muse:
             status = (
-                "would replace" if muse_path and force
-                else "present; left in place" if muse_path
+                "would replace"
+                if muse_path and force
+                else "present; left in place"
+                if muse_path
                 else "missing"
             )
             results.append(
@@ -300,9 +322,13 @@ def install_skill(
         status = "already current" if state == "current" else "installed"
         if state == "different":
             status = "replaced"
-        results.append(InstallResult(target.label, status, str(target.skill_dir / "SKILL.md")))
+        results.append(
+            InstallResult(target.label, status, str(target.skill_dir / "SKILL.md"))
+        )
     if include_muse:
-        status = "already present; left in place" if muse_path and not force else "installed"
+        status = (
+            "already present; left in place" if muse_path and not force else "installed"
+        )
         results.append(
             InstallResult(
                 "muse", status, muse_path or "$CONFIG_DIR/skills/cairn/SKILL.md"

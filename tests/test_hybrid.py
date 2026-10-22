@@ -1,4 +1,5 @@
 """Hybrid vault storage tests — threshold spill, refcounts, integrity, migration."""
+
 import json
 import sqlite3
 
@@ -8,13 +9,18 @@ from cairn.client import CairnClient
 from cairn.embed import HashEmbedder
 from cairn.store import ContentIntegrityError, Vault
 
-BIG = "# Runbook\n\n" + "Step `Restart` the **flapjack** array. " * 60  # mixed-case markdown
+BIG = (
+    "# Runbook\n\n" + "Step `Restart` the **flapjack** array. " * 60
+)  # mixed-case markdown
 
 
 def make_client(db_path, agent="doc-bot", threshold=100):
     emb = HashEmbedder()
-    return CairnClient(Vault(db_path, emb.name, emb.dims, create=True, doc_threshold=threshold),
-                       agent, emb)
+    return CairnClient(
+        Vault(db_path, emb.name, emb.dims, create=True, doc_threshold=threshold),
+        agent,
+        emb,
+    )
 
 
 def test_small_stays_inline(tmp_path):
@@ -44,7 +50,11 @@ def test_boundary_is_inline(tmp_path):
 def test_reads_resolve_everywhere(tmp_path):
     c = make_client(tmp_path / "v.db")
     r = c.store_memory(BIG + " zebra", team_id="t", task_id="k")
-    assert c.retrieve_memory("zebra")[0].content == c.get_memory(r.key).content == BIG + " zebra"
+    assert (
+        c.retrieve_memory("zebra")[0].content
+        == c.get_memory(r.key).content
+        == BIG + " zebra"
+    )
     assert c.list_memories({"search": "zebra"})[0].content.endswith("zebra")
     from cairn.galaxy import to_points
 
@@ -111,6 +121,38 @@ def test_export_import_roundtrip_preserves_big_docs(tmp_path):
     assert sorted(m.content for m in got) == sorted(["small", BIG])
 
 
+def test_import_rejects_forged_document_path_without_writing_outside_vault(tmp_path):
+    source = make_client(tmp_path / "source.db", threshold=10)
+    source.store_memory("large portable memory body", team_id="t", task_id="k")
+    pack = source.export()
+
+    outside = tmp_path / "outside" / "PLANTED"
+    pack["memories"][0]["content_hash"] = str(outside)
+
+    destination = make_client(tmp_path / "destination.db", threshold=10)
+    with pytest.raises(ValueError, match="content hash"):
+        destination.import_pack(pack)
+
+    assert not outside.with_suffix(".md").exists()
+    assert not outside.parent.exists()
+    assert destination.vault.count() == 0
+
+
+def test_rejected_multi_record_import_leaves_no_spilled_documents(tmp_path):
+    source = make_client(tmp_path / "source" / "vault.db", threshold=10)
+    source.store_memory("first large imported memory", team_id="t", task_id="one")
+    source.store_memory("second large imported memory", team_id="t", task_id="two")
+    pack = source.export()
+    pack["memories"][1]["status"] = None
+
+    destination = make_client(tmp_path / "destination" / "vault.db", threshold=10)
+    with pytest.raises(sqlite3.IntegrityError):
+        destination.import_pack(pack)
+
+    assert destination.vault.count() == 0
+    assert destination.stats()["docs"] == {"files": 0, "bytes": 0}
+
+
 def test_old_pack_without_content_ref_imports(tmp_path):
     c = make_client(tmp_path / "v.db")
     c.store_memory(BIG, team_id="t", task_id="k")
@@ -156,7 +198,8 @@ def _build_v1_db(path):
         "INSERT INTO memories(key, canonical_id, content, memory_type, task_id, agent_id,"
         " team_id, created_at, updated_at, content_hash, embedding)"
         " VALUES('k1', 'c1', 'legacy hello world', 'semantic', 't', 'a', 'team', 1, 1, 'sha256:x', ?)",
-        (blob,))
+        (blob,),
+    )
     con.commit()
     con.close()
 
@@ -172,10 +215,17 @@ def test_v1_migrates_with_backup_and_triggers(tmp_path):
     assert v.vault_identity.name
     row = v.get("k1")
     assert row["content"] == "legacy hello world" and row["content_ref"] is None
-    trigs = {r["sql"] for r in v.conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='trigger'").fetchall()}
-    assert trigs and all("WHEN NEW.content IS NOT NULL" in (s or "") for s in trigs
-                         if "mem_fts_ai" in (s or "") or "mem_fts_au" in (s or ""))
+    trigs = {
+        r["sql"]
+        for r in v.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger'"
+        ).fetchall()
+    }
+    assert trigs and all(
+        "WHEN NEW.content IS NOT NULL" in (s or "")
+        for s in trigs
+        if "mem_fts_ai" in (s or "") or "mem_fts_au" in (s or "")
+    )
     assert v.fts_search("legacy")[0]["key"] == "k1"  # old rows stay searchable
     v.close()
     # reopen is a clean no-op; new big rows spill, small rows index via trigger

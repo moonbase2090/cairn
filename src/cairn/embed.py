@@ -3,13 +3,16 @@
 - HashEmbedder: deterministic feature hash (token + character trigram).
   Zero deps beyond numpy, zero downloads. Exact matches score 1.0.
   Name is hash-v2. A hash-v1 vault does not open: the spaces differ.
-- FastEmbedder: `pip install cairn[embed]`, ONNX BGE model, still keyless/local.
+- FastEmbedder: install the optional `fastembed` package with
+  `CAIRN_INSTALL_EMBED=fastembed` in the Cairn shell installer; source checkouts
+  can use `pip install -e '.[embed]'`. ONNX BGE model, still keyless/local.
   CLI/MCP prefer `cairn-embedd` (one ONNX process) and fall back in-process.
 - OllamaEmbedder: local Ollama server (`ollama pull mxbai-embed-large`), keyless.
 
 Each collection is tagged with its embed model + dims; vectors from different
 spaces are never compared (cross-space queries are refused at open/import).
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -54,7 +57,7 @@ class HashEmbedder(Embedder):
             self._accumulate(vec, tok.encode())
         encoded = raw.encode()
         for i in range(max(0, len(encoded) - 2)):
-            self._accumulate(vec, encoded[i:i + 3])
+            self._accumulate(vec, encoded[i : i + 3])
         norm = float(np.linalg.norm(vec))
         if norm > 0:
             vec /= norm
@@ -74,8 +77,10 @@ class FastEmbedder(Embedder):
             from fastembed import TextEmbedding  # lazy — optional dep
         except ImportError:
             raise ImportError(
-                'fastembed is not installed — run `pip install -e ".[embed]"` '
-                "or init with `--embed-spec hash`"
+                "fastembed is not installed — run the Cairn installer with "
+                "`CAIRN_INSTALL_EMBED=fastembed`; for a source checkout, "
+                '`pip install -e ".[embed]"` also works. This vault was initialized '
+                "with fastembed, so keep that embedder selected."
             ) from None
 
         self._model = TextEmbedding(model)
@@ -95,8 +100,12 @@ class FastEmbedder(Embedder):
 
 
 class OllamaEmbedder(Embedder):
-    def __init__(self, model: str = "mxbai-embed-large", host: str = "http://localhost:11434",
-                 dims: int | None = None):
+    def __init__(
+        self,
+        model: str = "mxbai-embed-large",
+        host: str = "http://localhost:11434",
+        dims: int | None = None,
+    ):
         self.model_id = model
         self.name = f"ollama-{model}"
         self.host = host.rstrip("/")
@@ -140,7 +149,12 @@ def format_embedder_hint(spec: str, dims: int | None = None) -> str:
 
 
 def _socket_disabled() -> bool:
-    return os.environ.get("CAIRN_EMBEDD", "1").strip().lower() in {"0", "off", "false", "no"}
+    return os.environ.get("CAIRN_EMBEDD", "1").strip().lower() in {
+        "0",
+        "off",
+        "false",
+        "no",
+    }
 
 
 def _model_id(spec: str, default: str) -> str:
@@ -160,13 +174,16 @@ def _try_socket_embedder(spec: str, dims: int | None):
         return embedder
     except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
         import sys
+
         sys.stderr.write(
             f"cairn-embedd unavailable ({exc}); loading fastembed in-process\n"
         )
         return None
 
 
-def get_embedder(spec: str, dims: int | None = None, skip_socket: bool = False) -> Embedder:
+def get_embedder(
+    spec: str, dims: int | None = None, skip_socket: bool = False
+) -> Embedder:
     """`hash` (default) | `fastembed[:model]` | `ollama[:model]`.
 
     Pass cached `dims` to skip the FastEmbed/Ollama probe embed on process start.

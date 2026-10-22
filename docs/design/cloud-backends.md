@@ -30,7 +30,7 @@ Firestore transactions retry when a read document changes. They allow a 10 MiB r
 
 Use Firestore native vector search for the first GCP search adapter. It keeps metadata and vectors in one document store. Standard edition returns at most 1,000 nearest-neighbor results and supports vectors up to 2,048 dimensions. Firestore does not create embeddings. Cairn supplies the same embedder it uses locally. See [Firestore vector search](https://cloud.google.com/firestore/native/docs/vector-search).
 
-Use [Vertex AI Vector Search](https://cloud.google.com/vertex-ai/docs/vector-search/overview) when a workload needs a separate managed index or exceeds Firestore's documented search limits. It supports streaming index updates, but adds deployed index nodes and separate build and update charges. Check the [Vertex AI quotas](https://cloud.google.com/vertex-ai/docs/quotas) and [Vertex AI pricing](https://cloud.google.com/vertex-ai/pricing) during setup.
+Use a managed vector search service when a workload needs a separate index or exceeds the database search limits. These services support streaming index updates, but add deployed index nodes and separate build and update charges. Check service quotas and pricing during setup.
 
 The quota page lists 5 concurrent index creations and 5 concurrent index updates. It allows 100 indexes and 50 deployed index nodes per project and region. It also allows 6,000 streaming update requests or 120,000 KB of streaming update throughput per minute. Check the live quota page before deployment because quotas can change.
 
@@ -45,7 +45,7 @@ Firestore bills for reads, writes, index reads, storage, and network use. Cloud 
 - [Firestore pricing](https://cloud.google.com/firestore/pricing)
 - [Cloud Storage pricing](https://cloud.google.com/storage/pricing)
 - [Cloud Run pricing](https://cloud.google.com/run/pricing)
-- [Vertex AI pricing](https://cloud.google.com/vertex-ai/pricing)
+- Review service pricing during setup.
 
 ## Design Azure for the same data contract
 

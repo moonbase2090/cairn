@@ -1,4 +1,5 @@
 """Authorization rules for importing Cairn's shared-vault event packs."""
+
 from __future__ import annotations
 
 
@@ -14,8 +15,11 @@ def _snapshot_matches_agent(event: dict, agent_id: str, curator: bool, vault) ->
     if not isinstance(snapshot, dict):
         return False
     owner = snapshot.get("agent_id")
-    if (not isinstance(owner, str) or not isinstance(key, str)
-            or not key.startswith(f"mem_{owner}_")):
+    if (
+        not isinstance(owner, str)
+        or not isinstance(key, str)
+        or not key.startswith(f"mem_{owner}_")
+    ):
         return False
 
     existing = vault.get(key)
@@ -42,7 +46,9 @@ def _state_matches_agent(event: dict, agent_id: str, curator: bool, vault) -> bo
 
 
 def _event_matches_agent(event: dict, agent_id: str, curator: bool, vault) -> bool:
-    if not _resolution_matches_agent(event.get("conflict_resolution"), agent_id, curator):
+    if not _resolution_matches_agent(
+        event.get("conflict_resolution"), agent_id, curator
+    ):
         return False
     kind = event.get("kind")
     if kind == "snapshot":

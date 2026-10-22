@@ -1,4 +1,5 @@
 """Init-default tests — fastembed-first with hash fallback. Pass in any env."""
+
 import json
 
 import cairn.cli as cli_mod
@@ -19,7 +20,10 @@ def test_init_defaults_to_fastembed_when_available(tmp_path, monkeypatch, capsys
     # either fastembed (extra installed) or hash (fallback) — but never an error,
     # and the hint file always agrees with the vault
     assert body["embedder"] in ("fastembed-bge-small", "hash-v2")
-    assert (tmp_path / ".cairn" / "embedder").read_text().splitlines()[0].strip() in ("fastembed", "hash")
+    assert (tmp_path / ".cairn" / "embedder").read_text().splitlines()[0].strip() in (
+        "fastembed",
+        "hash",
+    )
     gi = (tmp_path / ".cairn" / ".gitignore").read_text()
     assert "vault.db-wal" in gi and "vault.db-shm" in gi
     rc, out, _ = run(["whoami", "--json"], capsys)
@@ -42,7 +46,9 @@ def test_init_falls_back_to_hash_with_notice(tmp_path, monkeypatch, capsys):
     body = json.loads(out)
     assert body["embedder"] == "hash-v2"
     assert "notice" in body and "fastembed" in body["notice"]
-    assert (tmp_path / ".cairn" / "embedder").read_text().splitlines()[0].strip() == "hash"
+    assert (tmp_path / ".cairn" / "embedder").read_text().splitlines()[
+        0
+    ].strip() == "hash"
 
 
 def test_init_explicit_spec_is_hard_error(tmp_path, monkeypatch, capsys):

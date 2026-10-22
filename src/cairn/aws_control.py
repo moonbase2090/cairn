@@ -1,4 +1,5 @@
 """Opt-in AWS setup control plane; importing Cairn never imports an AWS SDK."""
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -14,7 +15,9 @@ from collections import Counter
 
 
 AWS_ACCOUNT_CONFIRMATION = "904233124492"
-AWS_CLI_INSTALL = "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+AWS_CLI_INSTALL = (
+    "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+)
 CDK_PRICING_LINKS = {
     "S3": "https://aws.amazon.com/s3/pricing/",
     "S3 Vectors": "https://aws.amazon.com/s3/pricing/",
@@ -64,8 +67,11 @@ def _infra_hash() -> str:
     root = _repo_root()
     infra = root / "aws" / "infra"
     files = [
-        root / "pyproject.toml", root / "README.md",
-        infra / "cdk.json", infra / "package.json", infra / "package-lock.json",
+        root / "pyproject.toml",
+        root / "README.md",
+        infra / "cdk.json",
+        infra / "package.json",
+        infra / "package-lock.json",
         infra / "lambda" / "Dockerfile",
     ]
     files.extend(sorted((infra / "bin").rglob("*.ts")))
@@ -98,8 +104,12 @@ def _command_env(profile: str | None, region: str | None = None) -> dict[str, st
     return env
 
 
-def _run(command: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
-    return subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, check=False)
+def _run(
+    command: list[str], *, cwd: Path, env: dict[str, str]
+) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command, cwd=cwd, env=env, capture_output=True, text=True, check=False
+    )
 
 
 def _aws_identity(profile: str | None, region: str) -> dict[str, str]:
@@ -107,7 +117,15 @@ def _aws_identity(profile: str | None, region: str) -> dict[str, str]:
         raise ValueError(
             "AWS CLI is required for AWS setup; install it from " + AWS_CLI_INSTALL
         )
-    command = ["aws", "sts", "get-caller-identity", "--output", "json", "--region", region]
+    command = [
+        "aws",
+        "sts",
+        "get-caller-identity",
+        "--output",
+        "json",
+        "--region",
+        region,
+    ]
     if profile:
         command.extend(["--profile", profile])
     result = _run(command, cwd=_repo_root(), env=_command_env(profile, region))
@@ -116,7 +134,9 @@ def _aws_identity(profile: str | None, region: str) -> dict[str, str]:
     try:
         identity = json.loads(result.stdout)
     except ValueError as error:
-        raise ValueError("AWS CLI returned an invalid caller identity response") from error
+        raise ValueError(
+            "AWS CLI returned an invalid caller identity response"
+        ) from error
     account = identity.get("Account")
     arn = identity.get("Arn")
     if not isinstance(account, str) or not re.fullmatch(r"\d{12}", account):
@@ -129,20 +149,27 @@ def _aws_identity(profile: str | None, region: str) -> dict[str, str]:
 def check_tools() -> dict[str, str]:
     """Report tool versions without installing packages or contacting AWS services."""
     versions: dict[str, str] = {}
-    for name, args in (("aws", ["--version"]), ("node", ["--version"]),
-                       ("npm", ["--version"])):
+    for name, args in (
+        ("aws", ["--version"]),
+        ("node", ["--version"]),
+        ("npm", ["--version"]),
+    ):
         executable = shutil.which(name)
         if executable is None:
             versions[name] = "missing"
             continue
         result = _run([executable, *args], cwd=_repo_root(), env=os.environ.copy())
         output = (result.stdout or result.stderr).strip().splitlines()
-        versions[name] = output[0] if result.returncode == 0 and output else "unavailable"
+        versions[name] = (
+            output[0] if result.returncode == 0 and output else "unavailable"
+        )
     infra = _repo_root() / "aws" / "infra"
     cdk = infra / "node_modules" / ".bin" / "cdk"
     if cdk.exists():
         result = _run([str(cdk), "--version"], cwd=infra, env=os.environ.copy())
-        versions["cdk"] = result.stdout.strip() if result.returncode == 0 else "unavailable"
+        versions["cdk"] = (
+            result.stdout.strip() if result.returncode == 0 else "unavailable"
+        )
     else:
         versions["cdk"] = "needs local npm install"
     return versions
@@ -171,7 +198,10 @@ def _ensure_cdk() -> Path:
     lock_hash = hashlib.sha256((infra / "package-lock.json").read_bytes()).hexdigest()
     marker = infra / "node_modules" / ".cairn-lock-hash"
     installed_hash = marker.read_text().strip() if marker.exists() else ""
-    if installed_hash != lock_hash or not (infra / "node_modules" / ".bin" / "cdk").exists():
+    if (
+        installed_hash != lock_hash
+        or not (infra / "node_modules" / ".bin" / "cdk").exists()
+    ):
         result = _run(["npm", "ci"], cwd=infra, env=_command_env(None))
         if result.returncode:
             raise ValueError("could not install the pinned local CDK dependencies")
@@ -186,28 +216,45 @@ def _synthesize(plan: AwsPlan, infra: Path) -> None:
     command = ["npm", "run", "synth", "--", *_context_args(plan)]
     result = _run(command, cwd=infra, env=env)
     if result.returncode:
-        raise ValueError("local AWS CDK synthesis failed; no AWS resources were changed")
+        raise ValueError(
+            "local AWS CDK synthesis failed; no AWS resources were changed"
+        )
 
 
 def _context_args(plan: AwsPlan) -> list[str]:
     return [
-        "--context", f"vaultId={plan.vault_id}",
-        "--context", f"vaultName={plan.vault_name}",
-        "--context", f"dimensions={plan.dimensions}",
-        "--context", f"region={plan.region}",
-        "--context", f"embedModel={plan.embed_model}",
-        "--context", f"enableSyncEndpoint={str(plan.enable_sync_endpoint).lower()}",
+        "--context",
+        f"vaultId={plan.vault_id}",
+        "--context",
+        f"vaultName={plan.vault_name}",
+        "--context",
+        f"dimensions={plan.dimensions}",
+        "--context",
+        f"region={plan.region}",
+        "--context",
+        f"embedModel={plan.embed_model}",
+        "--context",
+        f"enableSyncEndpoint={str(plan.enable_sync_endpoint).lower()}",
     ]
 
 
 def _stack_outputs(plan: AwsPlan) -> dict[str, str]:
     command = [
-        "aws", "cloudformation", "describe-stacks", "--stack-name", plan.stack_name,
-        "--region", plan.region, "--output", "json",
+        "aws",
+        "cloudformation",
+        "describe-stacks",
+        "--stack-name",
+        plan.stack_name,
+        "--region",
+        plan.region,
+        "--output",
+        "json",
     ]
     if plan.profile:
         command.extend(["--profile", plan.profile])
-    result = _run(command, cwd=_repo_root(), env=_command_env(plan.profile, plan.region))
+    result = _run(
+        command, cwd=_repo_root(), env=_command_env(plan.profile, plan.region)
+    )
     if result.returncode:
         raise ValueError("AWS stack outputs could not be read after deployment")
     try:
@@ -216,13 +263,21 @@ def _stack_outputs(plan: AwsPlan) -> dict[str, str]:
     except (ValueError, KeyError, IndexError, TypeError) as error:
         raise ValueError("AWS returned an invalid stack output response") from error
     required = {
-        "VaultId", "VaultName", "MemoryTableName", "EmbeddingCacheTableName",
-        "ContentBucketName", "VectorBucketName", "VectorIndexName", "VectorIndexArn",
+        "VaultId",
+        "VaultName",
+        "MemoryTableName",
+        "EmbeddingCacheTableName",
+        "ContentBucketName",
+        "VectorBucketName",
+        "VectorIndexName",
+        "VectorIndexArn",
     }
     if plan.enable_sync_endpoint:
         required.add("SyncApiUrl")
     if not required.issubset(values):
-        raise ValueError("AWS stack is missing outputs required to configure Cairn storage")
+        raise ValueError(
+            "AWS stack is missing outputs required to configure Cairn storage"
+        )
     if values["VaultId"] != plan.vault_id or values["VaultName"] != plan.vault_name:
         raise ValueError("AWS stack outputs do not match the reviewed vault identity")
     if plan.enable_sync_endpoint and not values["SyncApiUrl"].startswith("https://"):
@@ -230,7 +285,9 @@ def _stack_outputs(plan: AwsPlan) -> dict[str, str]:
     return values
 
 
-def _write_storage_config(vault_dir: Path, plan: AwsPlan, outputs: dict[str, str]) -> Path:
+def _write_storage_config(
+    vault_dir: Path, plan: AwsPlan, outputs: dict[str, str]
+) -> Path:
     settings = {
         "backend": "aws",
         "region": plan.region,
@@ -277,9 +334,13 @@ def _migration_preflight(source) -> dict:
     """Hash and scan SQLite contents without returning text or memory identifiers."""
     if source.name == "aws":
         return {
-            "source_backend": "aws", "memory_count": source.count(),
-            "event_count": 0, "content_scanned": 0, "findings": {},
-            "safe": True, "fingerprint": "aws-existing",
+            "source_backend": "aws",
+            "memory_count": source.count(),
+            "event_count": 0,
+            "content_scanned": 0,
+            "findings": {},
+            "safe": True,
+            "fingerprint": "aws-existing",
         }
     if source.name != "sqlite":
         raise ValueError("AWS setup can migrate only a SQLite vault in this release")
@@ -299,12 +360,17 @@ def _migration_preflight(source) -> dict:
         if category:
             findings[category] += 1
         vector_row = source.conn.execute(
-            "SELECT embedding FROM memories WHERE key=?", (row["key"],),
+            "SELECT embedding FROM memories WHERE key=?",
+            (row["key"],),
         ).fetchone()
-        fingerprint.update(json.dumps(
-            {field: row[field] for field in MEMORY_FIELDS},
-            sort_keys=True, separators=(",", ":"), default=str,
-        ).encode())
+        fingerprint.update(
+            json.dumps(
+                {field: row[field] for field in MEMORY_FIELDS},
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode()
+        )
         if vector_row is not None:
             fingerprint.update(hashlib.sha256(bytes(vector_row["embedding"])).digest())
         memory_count += 1
@@ -315,40 +381,65 @@ def _migration_preflight(source) -> dict:
             for content in (
                 event.get("content"),
                 event.get("snapshot", {}).get("content")
-                if isinstance(event.get("snapshot"), dict) else None,
+                if isinstance(event.get("snapshot"), dict)
+                else None,
             ):
                 if isinstance(content, str):
                     content_scanned += 1
                     category = find_secret_category(content)
                     if category:
                         findings[category] += 1
-            fingerprint.update(json.dumps(
-                event, sort_keys=True, separators=(",", ":"), default=str,
-            ).encode())
+            fingerprint.update(
+                json.dumps(
+                    event,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode()
+            )
             event_count += 1
     cursor_rows = source.list_sync_cursors()
     for cursor in cursor_rows:
-        fingerprint.update(json.dumps(
-            cursor, sort_keys=True, separators=(",", ":"), default=str,
-        ).encode())
+        fingerprint.update(
+            json.dumps(
+                cursor,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode()
+        )
     token_rows = source.conn.execute(
         "SELECT token_id, token_hash, agent_id, created_at, curator FROM server_tokens",
     ).fetchall()
     for token in token_rows:
-        fingerprint.update(json.dumps(
-            dict(token), sort_keys=True, separators=(",", ":"), default=str,
-        ).encode())
+        fingerprint.update(
+            json.dumps(
+                dict(token),
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode()
+        )
     conflicts = source.list_sync_conflicts(include_resolved=True)
     for conflict in conflicts:
-        fingerprint.update(json.dumps(
-            conflict, sort_keys=True, separators=(",", ":"), default=str,
-        ).encode())
+        fingerprint.update(
+            json.dumps(
+                conflict,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode()
+        )
     return {
-        "source_backend": "sqlite", "memory_count": memory_count,
-        "event_count": event_count, "content_scanned": content_scanned,
-        "cursor_count": len(cursor_rows), "token_count": len(token_rows),
+        "source_backend": "sqlite",
+        "memory_count": memory_count,
+        "event_count": event_count,
+        "content_scanned": content_scanned,
+        "cursor_count": len(cursor_rows),
+        "token_count": len(token_rows),
         "conflict_count": len(conflicts),
-        "findings": dict(sorted(findings.items())), "safe": not findings,
+        "findings": dict(sorted(findings.items())),
+        "safe": not findings,
         "fingerprint": fingerprint.hexdigest(),
     }
 
@@ -376,7 +467,8 @@ def _migrate_sqlite_to_aws(source, destination) -> dict:
         if destination.get(key) is not None:
             continue
         local = source.conn.execute(
-            "SELECT embedding FROM memories WHERE key=?", (key,),
+            "SELECT embedding FROM memories WHERE key=?",
+            (key,),
         ).fetchone()
         if local is None:
             raise ValueError("SQLite migration could not read a local embedding")
@@ -390,8 +482,11 @@ def _migrate_sqlite_to_aws(source, destination) -> dict:
     copied_cursors = 0
     for cursor in source.list_sync_cursors():
         destination.set_sync_cursor(
-            cursor["peer"], cursor["direction"], int(cursor["cursor"]),
-            int(cursor["updated_at"]), cursor.get("token_id", ""),
+            cursor["peer"],
+            cursor["direction"],
+            int(cursor["cursor"]),
+            int(cursor["updated_at"]),
+            cursor.get("token_id", ""),
         )
         copied_cursors += 1
 
@@ -402,14 +497,19 @@ def _migrate_sqlite_to_aws(source, destination) -> dict:
     for token in token_rows:
         existing = destination.get_server_token(token["token_hash"])
         if existing is not None:
-            if (existing.get("token_id") != token["token_id"]
-                    or existing.get("agent_id") != token["agent_id"]
-                    or bool(existing.get("curator")) != bool(token["curator"])):
+            if (
+                existing.get("token_id") != token["token_id"]
+                or existing.get("agent_id") != token["agent_id"]
+                or bool(existing.get("curator")) != bool(token["curator"])
+            ):
                 raise ValueError("AWS token records conflict with the SQLite vault")
             continue
         destination.create_server_token(
-            token["token_id"], token["token_hash"], token["agent_id"],
-            int(token["created_at"]), bool(token["curator"]),
+            token["token_id"],
+            token["token_hash"],
+            token["agent_id"],
+            int(token["created_at"]),
+            bool(token["curator"]),
         )
         copied_tokens += 1
 
@@ -418,25 +518,33 @@ def _migrate_sqlite_to_aws(source, destination) -> dict:
         base_key = str(conflict.get("base_key", ""))
         if not base_key:
             continue
-        destination._table.put_item(Item={
-            "PK": f"VAULT#{destination.vault_identity.vault_id}#CONFLICTS",
-            "SK": f"BASE#{base_key}",
-            "recordType": "sync-conflict",
-            "vault_id": destination.vault_identity.vault_id,
-            **conflict,
-        })
+        destination._table.put_item(
+            Item={
+                "PK": f"VAULT#{destination.vault_identity.vault_id}#CONFLICTS",
+                "SK": f"BASE#{base_key}",
+                "recordType": "sync-conflict",
+                "vault_id": destination.vault_identity.vault_id,
+                **conflict,
+            }
+        )
 
     actual = {
-        str(row["key"]): str(row["content_hash"])
-        for row in destination._memory_items()
+        str(row["key"]): str(row["content_hash"]) for row in destination._memory_items()
     }
     if actual != expected:
         raise ValueError("AWS migration verification failed; storage was not switched")
-    if not destination.vec_status()["vec_in_sync"] and not destination.rebuild_vec()["vec_in_sync"]:
-        raise ValueError("AWS vector migration verification failed; storage was not switched")
+    if (
+        not destination.vec_status()["vec_in_sync"]
+        and not destination.rebuild_vec()["vec_in_sync"]
+    ):
+        raise ValueError(
+            "AWS vector migration verification failed; storage was not switched"
+        )
     return {
-        "memories": len(expected), "events": copied_events,
-        "cursors": copied_cursors, "tokens": copied_tokens,
+        "memories": len(expected),
+        "events": copied_events,
+        "cursors": copied_cursors,
+        "tokens": copied_tokens,
         "conflicts": len(conflicts),
     }
 
@@ -451,7 +559,11 @@ def _plan_data(plan: AwsPlan) -> dict:
     )
     services = CDK_PRICING_LINKS
     if not plan.enable_sync_endpoint:
-        services = {name: url for name, url in CDK_PRICING_LINKS.items() if name != "API Gateway"}
+        services = {
+            name: url
+            for name, url in CDK_PRICING_LINKS.items()
+            if name != "API Gateway"
+        }
     result["pricing_preview"] = [
         {"service": service, "units": CDK_PRICING_UNITS[service], "url": url}
         for service, url in services.items()
@@ -489,15 +601,28 @@ def create_plan(
     if not isinstance(embed_model, str) or not embed_model.strip():
         raise ValueError("embed model must be a non-empty string")
     embed_model = embed_model.strip()
-    if len(embed_model) > 256 or any(ord(character) < 32 or ord(character) == 127 for character in embed_model):
+    if len(embed_model) > 256 or any(
+        ord(character) < 32 or ord(character) == 127 for character in embed_model
+    ):
         raise ValueError("embed model must be at most 256 printable characters")
     if not isinstance(enable_sync_endpoint, bool):
         raise ValueError("enable_sync_endpoint must be a boolean")
 
     identity = _aws_identity(profile, region)
-    plan_material = "|".join((identity["account"], region, profile or "", vault_id,
-                               vault_name, str(dimensions), embed_model, str(enable_sync_endpoint),
-                               _infra_hash(), source_fingerprint))
+    plan_material = "|".join(
+        (
+            identity["account"],
+            region,
+            profile or "",
+            vault_id,
+            vault_name,
+            str(dimensions),
+            embed_model,
+            str(enable_sync_endpoint),
+            _infra_hash(),
+            source_fingerprint,
+        )
+    )
     plan_id = hashlib.sha256(plan_material.encode("utf-8")).hexdigest()[:16]
     stack_name = f"cairn-vault-{vault_id}-{vault_id[:8]}"
     plan = AwsPlan(
@@ -526,7 +651,9 @@ def create_plan(
     preview = _plan_data(plan)
     preview["caller_arn"] = identity["arn"]
     preview["plan_file"] = str(path)
-    preview["synthesis"] = "complete; this is not an AWS change set and no resources were changed"
+    preview["synthesis"] = (
+        "complete; this is not an AWS change set and no resources were changed"
+    )
     return preview
 
 
@@ -536,7 +663,9 @@ def _load_plan(vault_dir: Path, plan_id: str) -> AwsPlan:
         raw = json.loads(path.read_text())
         return AwsPlan(**raw)
     except FileNotFoundError as error:
-        raise ValueError("AWS plan was not found; create a new plan before applying") from error
+        raise ValueError(
+            "AWS plan was not found; create a new plan before applying"
+        ) from error
     except (TypeError, ValueError, KeyError) as error:
         raise ValueError("saved AWS plan is invalid; create a new plan") from error
 
@@ -551,10 +680,18 @@ def apply_plan(
     source_vault=None,
 ) -> dict:
     plan = _load_plan(vault_dir, plan_id)
-    if plan.vault_id != vault_id or plan.vault_name != vault_name or plan.dimensions != dimensions:
-        raise ValueError("AWS plan does not match the current vault identity or embedder")
+    if (
+        plan.vault_id != vault_id
+        or plan.vault_name != vault_name
+        or plan.dimensions != dimensions
+    ):
+        raise ValueError(
+            "AWS plan does not match the current vault identity or embedder"
+        )
     if plan.infra_hash != _infra_hash():
-        raise ValueError("AWS infrastructure changed since the plan; create a new plan before applying")
+        raise ValueError(
+            "AWS infrastructure changed since the plan; create a new plan before applying"
+        )
     expected = _plan_data(plan)["confirmation_phrase"]
     if confirm != expected:
         return {
@@ -570,37 +707,59 @@ def apply_plan(
                 "AWS migration is blocked by secret-scan findings; remove them and create a new plan"
             )
         if source_preflight["fingerprint"] != plan.source_fingerprint:
-            raise ValueError("vault data changed since the plan; create a new plan before applying")
+            raise ValueError(
+                "vault data changed since the plan; create a new plan before applying"
+            )
         if source_vault.name == "sqlite":
             try:
                 import boto3  # noqa: F401
             except ImportError as error:
                 raise ValueError(
-                    "AWS migration needs the optional SDK; install cairn with `pip install 'cairn[aws]'`"
+                    "AWS migration needs boto3 and botocore; rerun the Cairn installer "
+                    "with `CAIRN_INSTALL_AWS=1` (source checkout: `pip install -e '.[aws]'`)"
                 ) from error
     identity = _aws_identity(plan.profile, plan.region)
     if identity["account"] != plan.account:
-        raise ValueError("AWS caller account changed since the plan was created; make a new plan")
+        raise ValueError(
+            "AWS caller account changed since the plan was created; make a new plan"
+        )
     infra = _ensure_cdk()
     env = _command_env(plan.profile, plan.region)
     env["CDK_DEFAULT_ACCOUNT"] = plan.account
     command = ["npm", "run", "synth", "--", *_context_args(plan)]
     result = _run(command, cwd=infra, env=env)
     if result.returncode:
-        raise ValueError("local AWS CDK synthesis failed; no AWS resources were changed")
-    deploy = ["npm", "exec", "--offline", "--", "cdk", "deploy", plan.stack_name,
-              "--require-approval", "never", *_context_args(plan)]
+        raise ValueError(
+            "local AWS CDK synthesis failed; no AWS resources were changed"
+        )
+    deploy = [
+        "npm",
+        "exec",
+        "--offline",
+        "--",
+        "cdk",
+        "deploy",
+        plan.stack_name,
+        "--require-approval",
+        "never",
+        *_context_args(plan),
+    ]
     result = _run(deploy, cwd=infra, env=env)
     if result.returncode:
-        raise ValueError("AWS CDK deployment failed; inspect AWS CloudFormation for its status")
+        raise ValueError(
+            "AWS CDK deployment failed; inspect AWS CloudFormation for its status"
+        )
     outputs = _stack_outputs(plan)
     migration = None
     if source_vault is not None and source_vault.name == "sqlite":
         from .storage import StorageConfig, open_backend
 
         config = StorageConfig(
-            backend="aws", region=plan.region, profile=plan.profile,
-            vault_id=plan.vault_id, vault_name=plan.vault_name,
+            backend="aws",
+            region=plan.region,
+            profile=plan.profile,
+            vault_id=plan.vault_id,
+            vault_name=plan.vault_name,
             table=outputs["MemoryTableName"],
             cache_table=outputs["EmbeddingCacheTableName"],
             content_bucket=outputs["ContentBucketName"],
@@ -609,8 +768,11 @@ def apply_plan(
             vector_index_arn=outputs["VectorIndexArn"],
         )
         destination = open_backend(
-            vault_dir, source_vault._embed_name, dimensions,
-            config=config, create=True,
+            vault_dir,
+            source_vault._embed_name,
+            dimensions,
+            config=config,
+            create=True,
         )
         try:
             migration = _migrate_sqlite_to_aws(source_vault, destination)
@@ -618,8 +780,11 @@ def apply_plan(
             destination.close()
     config_path = _write_storage_config(vault_dir, plan, outputs)
     return {
-        "applied": True, "plan_id": plan.plan_id, "stack_name": plan.stack_name,
-        "storage_config": str(config_path), "migration": migration,
+        "applied": True,
+        "plan_id": plan.plan_id,
+        "stack_name": plan.stack_name,
+        "storage_config": str(config_path),
+        "migration": migration,
     }
 
 
@@ -635,15 +800,27 @@ def teardown(vault_dir: Path, plan_id: str, confirm: str) -> dict:
         }
     identity = _aws_identity(plan.profile, plan.region)
     if identity["account"] != plan.account:
-        raise ValueError("AWS caller account changed since the plan was created; make a new plan")
+        raise ValueError(
+            "AWS caller account changed since the plan was created; make a new plan"
+        )
     infra = _ensure_cdk()
     env = _command_env(plan.profile, plan.region)
     env["CDK_DEFAULT_ACCOUNT"] = plan.account
-    command = ["npm", "exec", "--offline", "--", "cdk", "destroy", plan.stack_name,
-               "--force"]
+    command = [
+        "npm",
+        "exec",
+        "--offline",
+        "--",
+        "cdk",
+        "destroy",
+        plan.stack_name,
+        "--force",
+    ]
     result = _run(command, cwd=infra, env=env)
     if result.returncode:
-        raise ValueError("AWS CDK teardown failed; inspect AWS CloudFormation for its status")
+        raise ValueError(
+            "AWS CDK teardown failed; inspect AWS CloudFormation for its status"
+        )
     return {
         "destroyed": True,
         "plan_id": plan.plan_id,
@@ -662,9 +839,14 @@ def run_action(client, args: dict) -> dict:
     if action == "plan":
         preflight = _migration_preflight(client.vault)
         plan = create_plan(
-            vault_dir, identity.vault_id, identity.name, dimensions,
-            args.get("region", ""), args.get("profile"),
-            preflight["fingerprint"], preflight["memory_count"],
+            vault_dir,
+            identity.vault_id,
+            identity.name,
+            dimensions,
+            args.get("region", ""),
+            args.get("profile"),
+            preflight["fingerprint"],
+            preflight["memory_count"],
             preflight["event_count"],
             client.embedder.name,
             args.get("enable_sync_endpoint", False),
@@ -675,34 +857,59 @@ def run_action(client, args: dict) -> dict:
         return plan
     if action == "apply":
         return apply_plan(
-            vault_dir, identity.vault_id, identity.name, dimensions,
-            args.get("plan_id", ""), args.get("confirm", ""),
+            vault_dir,
+            identity.vault_id,
+            identity.name,
+            dimensions,
+            args.get("plan_id", ""),
+            args.get("confirm", ""),
             source_vault=client.vault,
         )
     if action == "teardown":
         return teardown(
-            vault_dir, args.get("plan_id", ""), args.get("confirm", ""),
+            vault_dir,
+            args.get("plan_id", ""),
+            args.get("confirm", ""),
         )
     if action == "status":
         plan = _load_plan(vault_dir, args.get("plan_id", ""))
         identity_result = _aws_identity(plan.profile, plan.region)
         if identity_result["account"] != plan.account:
             raise ValueError("AWS caller account changed since the plan was created")
-        command = ["aws", "cloudformation", "describe-stacks", "--stack-name", plan.stack_name,
-                   "--region", plan.region, "--output", "json"]
+        command = [
+            "aws",
+            "cloudformation",
+            "describe-stacks",
+            "--stack-name",
+            plan.stack_name,
+            "--region",
+            plan.region,
+            "--output",
+            "json",
+        ]
         if plan.profile:
             command.extend(["--profile", plan.profile])
-        result = _run(command, cwd=_repo_root(), env=_command_env(plan.profile, plan.region))
+        result = _run(
+            command, cwd=_repo_root(), env=_command_env(plan.profile, plan.region)
+        )
         if result.returncode:
-            return {"stack_name": plan.stack_name, "deployed": False, "status": "not found"}
+            return {
+                "stack_name": plan.stack_name,
+                "deployed": False,
+                "status": "not found",
+            }
         try:
             stack = json.loads(result.stdout)["Stacks"][0]
         except (ValueError, KeyError, IndexError, TypeError) as error:
-            raise ValueError("AWS CLI returned an invalid stack status response") from error
+            raise ValueError(
+                "AWS CLI returned an invalid stack status response"
+            ) from error
         return {
             "stack_name": plan.stack_name,
             "deployed": True,
             "status": stack.get("StackStatus", "unknown"),
             "outputs": stack.get("Outputs", []),
         }
-    raise ValueError("cairn_aws_storage action must be check, plan, apply, status, or teardown")
+    raise ValueError(
+        "cairn_aws_storage action must be check, plan, apply, status, or teardown"
+    )

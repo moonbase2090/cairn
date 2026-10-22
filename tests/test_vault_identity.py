@@ -1,4 +1,5 @@
 """Persistent logical vault identity and its one-time legacy migration."""
+
 from __future__ import annotations
 
 import sqlite3
@@ -47,9 +48,7 @@ def test_v3_vault_migration_preserves_cursor_and_splits_token_scope(tmp_path):
           updated_at INTEGER NOT NULL, PRIMARY KEY(peer, direction)
         )
     """)
-    connection.execute(
-        "INSERT INTO sync_cursors VALUES('old-peer', 'pull', 17, 23)"
-    )
+    connection.execute("INSERT INTO sync_cursors VALUES('old-peer', 'pull', 17, 23)")
     connection.execute(
         "INSERT INTO sync_cursors VALUES('ct_abc123:old-origin', 'push', 19, 29)"
     )

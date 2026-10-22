@@ -81,16 +81,57 @@ jobs:
     needs: package
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           path: dist
           merge-multiple: true
+
+      - name: Check release text
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_DENYLIST: ${{ secrets.RELEASE_DENYLIST }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/release-text"
+          mkdir -p "$metadata"
+          printf '%s' "$GITHUB_REF_NAME" > "$metadata/tag-title.txt"
+          if [ "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag ]; then
+            git for-each-ref --format='%(contents)' "refs/tags/$GITHUB_REF_NAME" > "$metadata/tag-message.txt"
+          else
+            : > "$metadata/tag-message.txt"
+          fi
+
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json name,body > "$metadata/release.json" 2>/dev/null; then
+            jq -r '.name // ""' "$metadata/release.json" > "$metadata/release-title.txt"
+            jq -r '.body // ""' "$metadata/release.json" > "$metadata/release-body.txt"
+          else
+            gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+              --method POST \
+              -f "tag_name=$GITHUB_REF_NAME" \
+              -f "target_commitish=$GITHUB_SHA" > "$metadata/release.json"
+            jq -r '.name // ""' "$metadata/release.json" > "$metadata/release-title.txt"
+            jq -r '.body // ""' "$metadata/release.json" > "$metadata/release-body.txt"
+            python3 scripts/release/clean_release_notes.py "$metadata/release-body.txt"
+          fi
+
+          scripts/check-release-text.sh \
+            "$metadata/tag-title.txt" \
+            "$metadata/release-title.txt" \
+            "$metadata/release-body.txt" \
+            "$metadata/tag-message.txt" \
+            dist
 
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          metadata="$RUNNER_TEMP/release-text"
           cd dist
           rm -f SHA256SUMS
           sha256sum cairn-* | sort -k2 > SHA256SUMS
@@ -105,10 +146,18 @@ jobs:
               gh release edit "$GITHUB_REF_NAME" "$@" --prerelease
             fi
           else
-            flags="--verify-tag --title $GITHUB_REF_NAME --generate-notes"
             if [ "$prerelease" = true ]; then
-              flags="$flags --prerelease"
+              gh release create "$GITHUB_REF_NAME" "$@" \
+                --verify-tag \
+                --title "$(cat "$metadata/release-title.txt")" \
+                --notes-file "$metadata/release-body.txt" \
+                --prerelease \
+                cairn-* SHA256SUMS
+            else
+              gh release create "$GITHUB_REF_NAME" "$@" \
+                --verify-tag \
+                --title "$(cat "$metadata/release-title.txt")" \
+                --notes-file "$metadata/release-body.txt" \
+                cairn-* SHA256SUMS
             fi
-            # shellcheck disable=SC2086
-            gh release create "$GITHUB_REF_NAME" "$@" $flags cairn-* SHA256SUMS
           fi

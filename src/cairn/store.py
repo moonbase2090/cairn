@@ -4,12 +4,15 @@ One file per vault: `<dir>/vault.db`. The collection is tagged with its embed
 model + dims at init; opening with a mismatched embedder is refused so vector
 spaces are never mixed.
 """
+
 from __future__ import annotations
 
 import logging
 import base64
 import json
+import os
 import sqlite3
+import stat
 import time
 import uuid
 from contextlib import contextmanager
@@ -39,6 +42,18 @@ try:
     _HAS_VEC = True
 except ImportError:  # pragma: no cover
     _HAS_VEC = False
+
+
+def _load_vector_extension(connection) -> bool:
+    if not _HAS_VEC:
+        return False
+    try:
+        connection.enable_load_extension(True)
+        sqlite_vec.load(connection)
+    except (AttributeError, sqlite3.Error):
+        return False
+    return True
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT NOT NULL);
@@ -127,11 +142,32 @@ END;
 """
 
 COLUMNS = [
-    "rowid", "key", "canonical_id", "content", "content_ref", "content_summary", "memory_type",
-    "status", "origin", "task_id", "agent_id", "team_id", "version",
-    "state_revision", "state_origin", "state_event_id",
-    "created_at", "updated_at", "expires_at", "archived_at", "supersedes",
-    "parent_key",     "provenance", "confidence", "content_hash", "embedding",
+    "rowid",
+    "key",
+    "canonical_id",
+    "content",
+    "content_ref",
+    "content_summary",
+    "memory_type",
+    "status",
+    "origin",
+    "task_id",
+    "agent_id",
+    "team_id",
+    "version",
+    "state_revision",
+    "state_origin",
+    "state_event_id",
+    "created_at",
+    "updated_at",
+    "expires_at",
+    "archived_at",
+    "supersedes",
+    "parent_key",
+    "provenance",
+    "confidence",
+    "content_hash",
+    "embedding",
 ]
 # MemoryQuery bounds: field name -> SQL condition on one bound value.
 QUERY_BOUNDS = (
@@ -149,7 +185,8 @@ DEFAULT_DOC_THRESHOLD = 2048  # memories larger than this spill content to docs/
 
 def _sync_event_order(event: dict) -> tuple[int, int, str, str]:
     return (
-        int(event.get("state_revision", 0)), int(event.get("updated_at", 0)),
+        int(event.get("state_revision", 0)),
+        int(event.get("updated_at", 0)),
         str(event.get("state_origin") or event.get("origin_id") or ""),
         str(event.get("state_event_id") or event.get("event_id") or ""),
     )
@@ -157,8 +194,10 @@ def _sync_event_order(event: dict) -> tuple[int, int, str, str]:
 
 def _sync_row_order(row) -> tuple[int, int, str, str]:
     return (
-        int(row["state_revision"] or 0), int(row["updated_at"] or 0),
-        str(row["state_origin"] or ""), str(row["state_event_id"] or ""),
+        int(row["state_revision"] or 0),
+        int(row["updated_at"] or 0),
+        str(row["state_origin"] or ""),
+        str(row["state_event_id"] or ""),
     )
 
 
@@ -167,8 +206,14 @@ class Vault(StorageBackend):
 
     name = "sqlite"
 
-    def __init__(self, db_path: str | Path, embed_name: str, dims: int, create: bool = False,
-                 doc_threshold: int | None = None):
+    def __init__(
+        self,
+        db_path: str | Path,
+        embed_name: str,
+        dims: int,
+        create: bool = False,
+        doc_threshold: int | None = None,
+    ):
         self.db_path = Path(db_path)
         self._embed_name, self._dims = embed_name, dims
         if not create and not self.db_path.exists():
@@ -184,14 +229,7 @@ class Vault(StorageBackend):
         self.conn.execute("PRAGMA mmap_size=268435456")
         self.conn.execute("PRAGMA cache_size=-8000")
         self.conn.execute("PRAGMA busy_timeout=5000")
-        self._vec = False
-        if _HAS_VEC:
-            try:
-                self.conn.enable_load_extension(True)
-                sqlite_vec.load(self.conn)
-                self._vec = True
-            except sqlite3.Error:
-                self._vec = False
+        self._vec = _load_vector_extension(self.conn)
         self.conn.executescript(SCHEMA)
         self.docs_root = self.db_path.parent / "docs"
         self._fts = True
@@ -205,7 +243,9 @@ class Vault(StorageBackend):
         # idx_mem_ref lives here (not SCHEMA): SCHEMA must apply cleanly to
         # pre-migration v1 tables that have no content_ref column yet.
         try:
-            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_mem_ref ON memories(content_ref)")
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mem_ref ON memories(content_ref)"
+            )
             self.conn.commit()
         except sqlite3.Error:
             log.warning("content_ref index was not created", exc_info=True)
@@ -222,8 +262,10 @@ class Vault(StorageBackend):
             self._set_meta("embed_model", embed_name)
             self._set_meta("dims", str(dims))
             self._set_meta("schema", "4")
-            self._set_meta("doc_threshold",
-                           str(DEFAULT_DOC_THRESHOLD if doc_threshold is None else doc_threshold))
+            self._set_meta(
+                "doc_threshold",
+                str(DEFAULT_DOC_THRESHOLD if doc_threshold is None else doc_threshold),
+            )
             self.conn.commit()
         else:
             got_model = self._get_meta("embed_model")
@@ -235,10 +277,13 @@ class Vault(StorageBackend):
                     "Use the original embedder or `cairn init` a new vault."
                 )
         try:
-            self._doc_threshold = int(self._get_meta("doc_threshold") or DEFAULT_DOC_THRESHOLD)
+            self._doc_threshold = int(
+                self._get_meta("doc_threshold") or DEFAULT_DOC_THRESHOLD
+            )
         except ValueError:
             self._doc_threshold = DEFAULT_DOC_THRESHOLD
         self._txn = False
+        self._txn_doc_hashes: set[str] = set()
         self._vec_ok = self._vec_index_ok()
 
     @property
@@ -261,39 +306,103 @@ class Vault(StorageBackend):
     # (original bytes; filename is content_hash of the normalized text).
     # Rows keep content=NULL + content_ref=hash; small memories stay inline.
     def doc_path(self, content_hash: str) -> Path:
-        h = content_hash.split(":", 1)[-1]  # bare hex: no scheme, no colons on disk
-        return self.docs_root / h[:2] / h[2:4] / (h + ".md")
+        if not isinstance(content_hash, str):
+            raise ValueError("invalid content hash")
+        h = content_hash.removeprefix("sha256:")
+        if len(h) != 64 or any(char not in "0123456789abcdef" for char in h):
+            raise ValueError("invalid content hash")
+        path = self.docs_root / h[:2] / h[2:4] / (h + ".md")
+        try:
+            path.parent.resolve().relative_to(self.docs_root.resolve())
+        except ValueError as error:
+            raise ValueError(
+                "document path escapes the vault docs directory"
+            ) from error
+        return path
 
-    def write_doc(self, content_hash: str, content: str) -> None:
-        p = self.doc_path(content_hash)
-        if p.exists():
-            return  # dedupe: same hash, same bytes
+    def write_doc(self, content_hash: str, content: str) -> bool:
+        from .models import content_digest
+
+        path = self.doc_path(content_hash)
+        digest = path.stem
+        if digest != content_digest(content):
+            raise ValueError("content hash does not match document content")
+        p = path
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
+        try:
+            p.parent.resolve().relative_to(self.docs_root.resolve())
+        except ValueError as error:
+            raise ValueError(
+                "document path escapes the vault docs directory"
+            ) from error
+        if p.exists() and not p.is_symlink():
+            try:
+                fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    os.close(fd)
+                    raise OSError("document is not a regular file")
+                with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                    existing = stream.read()
+            except OSError as error:
+                raise ContentIntegrityError(
+                    "existing document is not a regular file"
+                ) from error
+            if content_digest(existing) != digest:
+                raise ContentIntegrityError(
+                    "existing document does not match its content hash"
+                )
+            return False  # dedupe: same hash, same normalized text
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(p, flags, 0o600)
+        except FileExistsError as error:
+            raise ContentIntegrityError(
+                "document path already exists but is not a regular file"
+            ) from error
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(content)
+        except Exception:
+            p.unlink(missing_ok=True)
+            raise
+        return True
 
     def read_content(self, row) -> str:
         """Resolve a memory row to full text (inline or docs/). Verifies hash."""
         if row["content"] is not None:
             return row["content"]
         ref = row["content_ref"]
-        p = self.doc_path(ref)
         try:
-            text = p.read_text(encoding="utf-8")
+            p = self.doc_path(ref)
+        except ValueError as error:
+            raise ContentIntegrityError("invalid document reference") from error
+        try:
+            fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                raise OSError("document is not a regular file")
+            with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                text = stream.read()
         except OSError:
             raise ContentIntegrityError(
-                f"document missing for {row['key']}: expected {p} — "
-                "restore it from a peer pack (`cairn export`/`import`) or purge the memory")
+                f"document missing or invalid for {row['key']} — "
+                "restore it from a peer pack (`cairn export`/`import`) or purge the memory"
+            )
         from .models import content_digest  # local import: models has no store dep
 
-        if f"sha256:{content_digest(text)}" != ref:  # content_hash carries the scheme prefix
+        if (
+            f"sha256:{content_digest(text)}" != ref
+        ):  # content_hash carries the scheme prefix
             raise ContentIntegrityError(
                 f"document for {row['key']} fails its hash check ({p}) — "
-                "file changed under us; restore from a peer pack or purge the memory")
+                "file changed under us; restore from a peer pack or purge the memory"
+            )
         return text
 
     def content_refcount(self, content_hash: str) -> int:
         return self.conn.execute(
-            "SELECT COUNT(*) c FROM memories WHERE content_hash=?", (content_hash,)).fetchone()["c"]
+            "SELECT COUNT(*) c FROM memories WHERE content_hash=?", (content_hash,)
+        ).fetchone()["c"]
 
     def delete_doc_if_orphan(self, content_hash: str) -> bool:
         """Unlink the doc file when no row references its hash. Returns True if removed."""
@@ -302,6 +411,8 @@ class Vault(StorageBackend):
         try:
             self.doc_path(content_hash).unlink()
             return True
+        except ValueError:
+            return False
         except FileNotFoundError:
             return False
         except OSError:
@@ -368,7 +479,9 @@ class Vault(StorageBackend):
                 ).fetchall()
                 for r in missing:
                     try:
-                        text = self.doc_path(r["content_ref"]).read_text(encoding="utf-8")
+                        text = self.doc_path(r["content_ref"]).read_text(
+                            encoding="utf-8"
+                        )
                     except OSError:
                         continue
                     self.conn.execute(
@@ -387,25 +500,32 @@ class Vault(StorageBackend):
         backup is the safety net and orphan memories_new is cleaned on failure.
         Loud on error — a half-migrated vault must never look healthy.
         """
-        cols = [r["name"] for r in self.conn.execute("PRAGMA table_info(memories)").fetchall()]
-        if cols and "content_ref" not in cols:  # existing v1 table; fresh DBs already have v2
-                backup = self.db_path.parent / (self.db_path.name + ".pre2.bak")
-                try:
-                    import sqlite3 as _sq
+        cols = [
+            r["name"]
+            for r in self.conn.execute("PRAGMA table_info(memories)").fetchall()
+        ]
+        if (
+            cols and "content_ref" not in cols
+        ):  # existing v1 table; fresh DBs already have v2
+            backup = self.db_path.parent / (self.db_path.name + ".pre2.bak")
+            try:
+                import sqlite3 as _sq
 
-                    src = _sq.connect(str(self.db_path))
-                    try:
-                        dst = _sq.connect(str(backup))
-                        try:
-                            src.backup(dst)
-                        finally:
-                            dst.close()
-                    finally:
-                        src.close()
-                except (OSError, sqlite3.Error) as e:
-                    raise RuntimeError(f"pre-migration backup failed, refusing to migrate: {e}") from e
+                src = _sq.connect(str(self.db_path))
                 try:
-                    self.conn.executescript("""
+                    dst = _sq.connect(str(backup))
+                    try:
+                        src.backup(dst)
+                    finally:
+                        dst.close()
+                finally:
+                    src.close()
+            except (OSError, sqlite3.Error) as e:
+                raise RuntimeError(
+                    f"pre-migration backup failed, refusing to migrate: {e}"
+                ) from e
+            try:
+                self.conn.executescript("""
                         CREATE TABLE memories_new(
                           rowid INTEGER PRIMARY KEY,
                           key TEXT UNIQUE NOT NULL,
@@ -448,16 +568,23 @@ class Vault(StorageBackend):
                         CREATE INDEX IF NOT EXISTS idx_mem_status ON memories(status);
                         CREATE INDEX IF NOT EXISTS idx_mem_ref ON memories(content_ref);
                     """)
+            except sqlite3.Error:
+                try:
+                    self.conn.execute("DROP TABLE IF EXISTS memories_new")
+                    self.conn.commit()
                 except sqlite3.Error:
-                    try:
-                        self.conn.execute("DROP TABLE IF EXISTS memories_new")
-                        self.conn.commit()
-                    except sqlite3.Error:
-                        log.warning("could not drop memories_new after a failed migration", exc_info=True)
-                    raise
+                    log.warning(
+                        "could not drop memories_new after a failed migration",
+                        exc_info=True,
+                    )
+                raise
         if self._fts:
-            trigs = {r["name"] for r in self.conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='trigger'").fetchall()}
+            trigs = {
+                r["name"]
+                for r in self.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='trigger'"
+                ).fetchall()
+            }
             if not {"mem_fts_ai", "mem_fts_ad", "mem_fts_au"} <= trigs:
                 self.conn.execute("DROP TRIGGER IF EXISTS mem_fts_ai")
                 self.conn.execute("DROP TRIGGER IF EXISTS mem_fts_ad")
@@ -477,10 +604,16 @@ class Vault(StorageBackend):
             ("state_event_id", "TEXT NOT NULL DEFAULT ''"),
         ):
             if name not in cols:
-                self.conn.execute(f"ALTER TABLE memories ADD COLUMN {name} {declaration}")
-        token_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(server_tokens)")}
+                self.conn.execute(
+                    f"ALTER TABLE memories ADD COLUMN {name} {declaration}"
+                )
+        token_cols = {
+            r["name"] for r in self.conn.execute("PRAGMA table_info(server_tokens)")
+        }
         if "curator" not in token_cols:
-            self.conn.execute("ALTER TABLE server_tokens ADD COLUMN curator INTEGER NOT NULL DEFAULT 0")
+            self.conn.execute(
+                "ALTER TABLE server_tokens ADD COLUMN curator INTEGER NOT NULL DEFAULT 0"
+            )
         self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS sync_events(
               seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -509,11 +642,18 @@ class Vault(StorageBackend):
             "SELECT * FROM memories WHERE state_origin='' OR state_event_id='' ORDER BY rowid"
         ).fetchall()
         for row in pending:
-            event = self._new_sync_event("snapshot", row["key"], int(row["state_revision"]),
-                                         int(row["updated_at"]), origin)
+            event = self._new_sync_event(
+                "snapshot",
+                row["key"],
+                int(row["state_revision"]),
+                int(row["updated_at"]),
+                origin,
+            )
             snapshot = {field: row[field] for field in MEMORY_FIELDS}
             snapshot["content"] = self.read_content(row)
-            snapshot["embedding"] = base64.b64encode(bytes(row["embedding"])).decode("ascii")
+            snapshot["embedding"] = base64.b64encode(bytes(row["embedding"])).decode(
+                "ascii"
+            )
             snapshot["state_origin"] = origin
             snapshot["state_event_id"] = event["event_id"]
             event["snapshot"] = snapshot
@@ -531,20 +671,30 @@ class Vault(StorageBackend):
         """Add stable vault identity and scope sync cursors by vault and token."""
         schema = int(self._get_meta("schema") or 0)
         if schema > 4:
-            raise RuntimeError(f"SQLite vault schema {schema} is newer than this Cairn version")
+            raise RuntimeError(
+                f"SQLite vault schema {schema} is newer than this Cairn version"
+            )
         if schema == 4:
             self._vault_identity = load_vault_identity(self._get_meta)
-            columns = {r["name"] for r in self.conn.execute("PRAGMA table_info(sync_cursors)")}
+            columns = {
+                r["name"] for r in self.conn.execute("PRAGMA table_info(sync_cursors)")
+            }
             if not {"vault_id", "token_id"} <= columns:
-                raise RuntimeError("vault cursor schema is incomplete; refusing to use this vault")
+                raise RuntimeError(
+                    "vault cursor schema is incomplete; refusing to use this vault"
+                )
             return
 
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             self._vault_identity = ensure_vault_identity(
-                self._get_meta, self._set_meta, self.vault_dir,
+                self._get_meta,
+                self._set_meta,
+                self.vault_dir,
             )
-            columns = {r["name"] for r in self.conn.execute("PRAGMA table_info(sync_cursors)")}
+            columns = {
+                r["name"] for r in self.conn.execute("PRAGMA table_info(sync_cursors)")
+            }
             if not {"vault_id", "token_id"} <= columns:
                 rows = self.conn.execute(
                     "SELECT peer, direction, cursor, updated_at FROM sync_cursors"
@@ -559,30 +709,50 @@ class Vault(StorageBackend):
                 """)
                 for row in rows:
                     peer, token_id = split_legacy_cursor_peer(row["peer"])
-                    self.conn.execute("""
+                    self.conn.execute(
+                        """
                         INSERT INTO sync_cursors(
                           vault_id, peer, token_id, direction, cursor, updated_at
                         ) VALUES(?, ?, ?, ?, ?, ?)
                         ON CONFLICT(vault_id, peer, token_id, direction) DO UPDATE SET
                           cursor=MAX(sync_cursors.cursor, excluded.cursor),
                           updated_at=MAX(sync_cursors.updated_at, excluded.updated_at)
-                    """, (self._vault_identity.vault_id, peer, token_id,
-                          row["direction"], row["cursor"], row["updated_at"]))
+                    """,
+                        (
+                            self._vault_identity.vault_id,
+                            peer,
+                            token_id,
+                            row["direction"],
+                            row["cursor"],
+                            row["updated_at"],
+                        ),
+                    )
             self._set_meta("schema", "4")
             self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise
 
-    def _new_sync_event(self, kind: str, key: str, revision: int, updated_at: int,
-                        origin: str | None = None) -> dict:
+    def _new_sync_event(
+        self,
+        kind: str,
+        key: str,
+        revision: int,
+        updated_at: int,
+        origin: str | None = None,
+    ) -> dict:
         origin = origin or self._get_meta("sync_origin_id")
         seq = int(self._get_meta("sync_origin_seq") or "0") + 1
         self._set_meta("sync_origin_seq", str(seq))
         return {
-            "event_id": f"{origin}:{seq}", "origin_id": origin, "origin_seq": seq,
-            "kind": kind, "key": key, "state_revision": revision,
-            "updated_at": updated_at, "state_origin": origin,
+            "event_id": f"{origin}:{seq}",
+            "origin_id": origin,
+            "origin_seq": seq,
+            "kind": kind,
+            "key": key,
+            "state_revision": revision,
+            "updated_at": updated_at,
+            "state_origin": origin,
             "state_event_id": f"{origin}:{seq}",
         }
 
@@ -618,7 +788,9 @@ class Vault(StorageBackend):
         rows = None
         if self._vec_table():
             try:
-                rows = self.conn.execute("SELECT COUNT(*) c FROM mem_vec").fetchone()["c"]
+                rows = self.conn.execute("SELECT COUNT(*) c FROM mem_vec").fetchone()[
+                    "c"
+                ]
             except sqlite3.Error:
                 rows = None
         return {
@@ -667,14 +839,24 @@ class Vault(StorageBackend):
             yield
             return
         self._txn = True
+        self._txn_doc_hashes = set()
         try:
             yield
             self.conn.commit()
         except Exception:
             self.conn.rollback()
+            for content_hash in self._txn_doc_hashes:
+                try:
+                    self.delete_doc_if_orphan(content_hash)
+                except Exception:
+                    log.warning(
+                        "failed to remove a document from a rolled-back transaction",
+                        exc_info=True,
+                    )
             raise
         finally:
             self._txn = False
+            self._txn_doc_hashes.clear()
 
     # -- writes ------------------------------------------------------------
     def insert(self, rec: dict, vector: np.ndarray) -> int:
@@ -686,18 +868,31 @@ class Vault(StorageBackend):
             origin = self._get_meta("sync_origin_id")
             revision = int(rec.get("state_revision", 1))
             local_event = self._new_sync_event(
-                "snapshot", rec["key"], revision, int(rec["updated_at"]), origin,
+                "snapshot",
+                rec["key"],
+                revision,
+                int(rec["updated_at"]),
+                origin,
             )
-            rec.update({"state_revision": revision, "state_origin": origin,
-                        "state_event_id": local_event["event_id"]})
+            rec.update(
+                {
+                    "state_revision": revision,
+                    "state_origin": origin,
+                    "state_event_id": local_event["event_id"],
+                }
+            )
         text = rec["content"]
-        digest = rec.get("content_hash")
-        if digest is None:
-            from .models import content_digest
+        from .models import content_digest
 
-            digest = content_digest(text)
+        digest = rec.get("content_hash")
+        expected_digest = content_digest(text)
+        if digest is None:
+            digest = f"sha256:{expected_digest}"
+        elif digest not in {f"sha256:{expected_digest}", expected_digest}:
+            raise ValueError("content hash does not match document content")
+        else:
+            digest = f"sha256:{expected_digest}"
         if len(text.encode("utf-8")) > self._doc_threshold:
-            self.write_doc(digest, text)
             content, ref = None, digest
         else:
             content, ref = text, None
@@ -717,7 +912,12 @@ class Vault(StorageBackend):
             else:
                 vals.append(rec[c])
         cols = [c for c in COLUMNS if c != "rowid"]
+        created_doc = False
         try:
+            if ref is not None:
+                created_doc = self.write_doc(digest, text)
+                if created_doc and self._txn:
+                    self._txn_doc_hashes.add(digest)
             cur = self.conn.execute(
                 f"INSERT INTO memories({','.join(cols)}) VALUES({','.join('?' for _ in cols)})",
                 vals,
@@ -737,7 +937,12 @@ class Vault(StorageBackend):
 
                 self.conn.execute(
                     "INSERT INTO mem_vec(rowid, embedding) VALUES(?, ?)",
-                    (rowid, _sv.serialize_float32(np.asarray(vector, dtype=np.float32).tolist())),
+                    (
+                        rowid,
+                        _sv.serialize_float32(
+                            np.asarray(vector, dtype=np.float32).tolist()
+                        ),
+                    ),
                 )
             if local_event is not None:
                 snapshot = {field: rec.get(field) for field in MEMORY_FIELDS}
@@ -751,10 +956,18 @@ class Vault(StorageBackend):
         except Exception:
             if not self._txn:
                 self.conn.rollback()
+                if created_doc:
+                    self.delete_doc_if_orphan(digest)
             raise
 
-    def set_status(self, key: str, status: str, now: int, archived_at: int | None = None,
-                   event_metadata: dict | None = None) -> int:
+    def set_status(
+        self,
+        key: str,
+        status: str,
+        now: int,
+        archived_at: int | None = None,
+        event_metadata: dict | None = None,
+    ) -> int:
         row = self.conn.execute("SELECT * FROM memories WHERE key=?", (key,)).fetchone()
         if row is None:
             return 0
@@ -767,7 +980,15 @@ class Vault(StorageBackend):
         cur = self.conn.execute(
             "UPDATE memories SET status=?, updated_at=?, archived_at=?, state_revision=?, "
             "state_origin=?, state_event_id=? WHERE key=?",
-            (status, now, archived_at, revision, event["state_origin"], event["event_id"], key),
+            (
+                status,
+                now,
+                archived_at,
+                revision,
+                event["state_origin"],
+                event["event_id"],
+                key,
+            ),
         )
         self._append_sync_event(event)
         self._record_resolution_event(event)
@@ -787,15 +1008,23 @@ class Vault(StorageBackend):
             hashes = [r["content_hash"] for r in rows]
             for row in rows:
                 event = self._new_sync_event(
-                    "tombstone", row["key"], int(row["state_revision"]) + 1,
+                    "tombstone",
+                    row["key"],
+                    int(row["state_revision"]) + 1,
                     int(time.time()),
                 )
-                event.update({"canonical_id": row["canonical_id"],
-                              "agent_id": row["agent_id"], "reason": reason})
+                event.update(
+                    {
+                        "canonical_id": row["canonical_id"],
+                        "agent_id": row["agent_id"],
+                        "reason": reason,
+                    }
+                )
                 self._append_sync_event(event)
                 self._remember_tombstone(event)
             self.conn.execute(
-                f"DELETE FROM memories WHERE key IN ({','.join('?' for _ in keys)})", keys
+                f"DELETE FROM memories WHERE key IN ({','.join('?' for _ in keys)})",
+                keys,
             )
             if self._vec_ok and rowids:
                 self.conn.execute(
@@ -809,7 +1038,9 @@ class Vault(StorageBackend):
                 self.conn.rollback()
             raise
         if not self._txn:
-            for h in dict.fromkeys(hashes):  # refcounted: file goes only with its last row
+            for h in dict.fromkeys(
+                hashes
+            ):  # refcounted: file goes only with its last row
                 try:
                     self.delete_doc_if_orphan(h)
                 except OSError:
@@ -832,15 +1063,23 @@ class Vault(StorageBackend):
             f"SELECT {cols} FROM memories WHERE key=?", (key,)
         ).fetchone()
 
-    def by_hash(self, content_hash: str, task_id: str, status: str = "active") -> list[sqlite3.Row]:
+    def by_hash(
+        self, content_hash: str, task_id: str, status: str = "active"
+    ) -> list[sqlite3.Row]:
         cols = ", ".join(READ_COLUMNS)
         return self.conn.execute(
             f"SELECT {cols} FROM memories WHERE content_hash=? AND task_id=? AND status=?",
             (content_hash, task_id, status),
         ).fetchall()
 
-    def create_server_token(self, token_id: str, token_hash: str, agent_id: str,
-                            created_at: int, curator: bool = False) -> None:
+    def create_server_token(
+        self,
+        token_id: str,
+        token_hash: str,
+        agent_id: str,
+        created_at: int,
+        curator: bool = False,
+    ) -> None:
         self.conn.execute(
             "INSERT INTO server_tokens(token_id, token_hash, agent_id, curator, created_at) "
             "VALUES(?, ?, ?, ?, ?)",
@@ -852,7 +1091,7 @@ class Vault(StorageBackend):
             "SELECT token_id, agent_id, curator, created_at FROM server_tokens WHERE token_hash=?",
             (token_hash,),
         ).fetchone()
-        return ({**dict(row), "curator": bool(row["curator"])} if row else None)
+        return {**dict(row), "curator": bool(row["curator"])} if row else None
 
     def list_server_tokens(self) -> list[dict]:
         rows = self.conn.execute(
@@ -862,13 +1101,15 @@ class Vault(StorageBackend):
         return [{**dict(row), "curator": bool(row["curator"])} for row in rows]
 
     def delete_server_token(self, token_id: str) -> int:
-        cur = self.conn.execute("DELETE FROM server_tokens WHERE token_id=?", (token_id,))
+        cur = self.conn.execute(
+            "DELETE FROM server_tokens WHERE token_id=?", (token_id,)
+        )
         return cur.rowcount
 
     def get_agent_ids(self, keys: list[str]) -> dict[str, str]:
         agents: dict[str, str] = {}
         for start in range(0, len(keys), 500):
-            batch = keys[start:start + 500]
+            batch = keys[start : start + 500]
             marks = ",".join("?" for _ in batch)
             rows = self.conn.execute(
                 f"SELECT key, agent_id FROM memories WHERE key IN ({marks})", batch
@@ -886,20 +1127,34 @@ class Vault(StorageBackend):
             (after, limit + 1),
         ).fetchall()
         rows = rows[:limit]
-        events = [{**json.loads(row["event_json"]), "feed_seq": row["seq"]} for row in rows]
+        events = [
+            {**json.loads(row["event_json"]), "feed_seq": row["seq"]} for row in rows
+        ]
         cursor = rows[-1]["seq"] if rows else after
-        return {"pack": "cairn-sync-2", "after": after, "cursor": cursor,
-                "events": events}
+        return {
+            "pack": "cairn-sync-2",
+            "after": after,
+            "cursor": cursor,
+            "events": events,
+        }
 
     def has_sync_event(self, event_id: str) -> bool:
-        return self.conn.execute(
-            "SELECT 1 FROM sync_events WHERE event_id=?", (event_id,),
-        ).fetchone() is not None
+        return (
+            self.conn.execute(
+                "SELECT 1 FROM sync_events WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            is not None
+        )
 
     def has_sync_tombstone(self, key: str) -> bool:
-        return self.conn.execute(
-            "SELECT 1 FROM sync_tombstones WHERE key=?", (key,),
-        ).fetchone() is not None
+        return (
+            self.conn.execute(
+                "SELECT 1 FROM sync_tombstones WHERE key=?",
+                (key,),
+            ).fetchone()
+            is not None
+        )
 
     def _remember_tombstone(self, event: dict) -> None:
         self.conn.execute(
@@ -914,77 +1169,120 @@ class Vault(StorageBackend):
                 return self.apply_sync_event(event)
         if not isinstance(event, dict) or not isinstance(event.get("event_id"), str):
             raise ValueError("invalid sync event: missing event_id")
-        if self.conn.execute("SELECT 1 FROM sync_events WHERE event_id=?", (event["event_id"],)).fetchone():
+        if self.conn.execute(
+            "SELECT 1 FROM sync_events WHERE event_id=?", (event["event_id"],)
+        ).fetchone():
             return "skipped"
         kind = event.get("kind")
         key = event.get("key")
         if kind not in {"snapshot", "state", "tombstone"} or not isinstance(key, str):
             raise ValueError("invalid sync event kind or key")
-        existing = self.conn.execute("SELECT * FROM memories WHERE key=?", (key,)).fetchone()
+        existing = self.conn.execute(
+            "SELECT * FROM memories WHERE key=?", (key,)
+        ).fetchone()
         incoming_order = _sync_event_order(event)
         current_order = _sync_row_order(existing) if existing else None
         resolution = event.get("conflict_resolution")
-        if resolution is not None and not (kind == "state" and existing is None
-                                            and self.has_sync_tombstone(key)):
+        if resolution is not None and not (
+            kind == "state" and existing is None and self.has_sync_tombstone(key)
+        ):
             self._validate_resolution_event(event, resolution)
-        changed = False
         if kind == "snapshot":
-            snapshot = event.get("snapshot")
-            if not isinstance(snapshot, dict) or snapshot.get("key") != key:
-                raise ValueError("invalid snapshot sync event")
-            if existing and existing["content_hash"] != snapshot.get("content_hash"):
-                raise ValueError(f"sync integrity conflict for {key}: content hash changed")
-            if not existing:
-                if self.has_sync_tombstone(key):
-                    self._append_sync_event(event)
-                    return "skipped"
-                raw = snapshot.get("embedding")
-                if not isinstance(raw, str):
-                    raise ValueError(f"sync snapshot for {key} has no embedding")
-                vector = np.frombuffer(base64.b64decode(raw), dtype=np.float32).copy()
-                rec = {field: snapshot.get(field) for field in MEMORY_FIELDS}
-                rec["content"] = snapshot.get("content")
-                self.insert(rec, vector)
-                changed = True
-            elif incoming_order > current_order:
-                self.conn.execute(
-                    "UPDATE memories SET status=?, updated_at=?, archived_at=?, expires_at=?, "
-                    "state_revision=?, state_origin=?, state_event_id=? WHERE key=?",
-                    (snapshot.get("status"), event.get("updated_at"), snapshot.get("archived_at"),
-                     snapshot.get("expires_at"), event.get("state_revision"),
-                     event.get("state_origin", event.get("origin_id")),
-                     event.get("state_event_id", event["event_id"]), key),
-                )
-                changed = True
+            changed, tombstone_precedence = self._apply_snapshot_sync_event(
+                event, key, existing, incoming_order, current_order
+            )
         elif kind == "state":
-            if existing is None:
-                if self.has_sync_tombstone(key):
-                    self._append_sync_event(event)
-                    return "skipped"
-                raise ValueError(f"state event for missing key {key}; send a snapshot first")
-            if incoming_order > current_order:
-                self.conn.execute(
-                    "UPDATE memories SET status=?, updated_at=?, archived_at=?, state_revision=?, "
-                    "state_origin=?, state_event_id=? WHERE key=?",
-                    (event.get("status"), event.get("updated_at"), event.get("archived_at"),
-                     event.get("state_revision"), event.get("state_origin", event.get("origin_id")),
-                     event.get("state_event_id", event["event_id"]), key),
-                )
-                changed = True
+            changed, tombstone_precedence = self._apply_state_sync_event(
+                event, key, existing, incoming_order, current_order
+            )
         else:
-            self._remember_tombstone(event)
-            if existing is not None:
-                rowid, content_hash = existing["rowid"], existing["content_hash"]
-                self.conn.execute("DELETE FROM memories WHERE key=?", (key,))
-                if self._vec_ok:
-                    self.conn.execute("DELETE FROM mem_vec WHERE rowid=?", (rowid,))
-                self.delete_doc_if_orphan(content_hash)
-                changed = True
+            changed = self._apply_tombstone_sync_event(event, key, existing)
+            tombstone_precedence = False
+        if tombstone_precedence:
+            self._append_sync_event(event)
+            return "skipped"
         self._append_sync_event(event)
         if changed:
             self._record_resolution_event(event)
-        return "added" if kind == "snapshot" and changed and existing is None else (
-            "updated" if changed else "skipped")
+        return (
+            "added"
+            if kind == "snapshot" and changed and existing is None
+            else ("updated" if changed else "skipped")
+        )
+
+    def _apply_snapshot_sync_event(
+        self, event: dict, key: str, existing, incoming_order, current_order
+    ) -> tuple[bool, bool]:
+        snapshot = event.get("snapshot")
+        if not isinstance(snapshot, dict) or snapshot.get("key") != key:
+            raise ValueError("invalid snapshot sync event")
+        if existing and existing["content_hash"] != snapshot.get("content_hash"):
+            raise ValueError(f"sync integrity conflict for {key}: content hash changed")
+        if not existing:
+            if self.has_sync_tombstone(key):
+                return False, True
+            raw = snapshot.get("embedding")
+            if not isinstance(raw, str):
+                raise ValueError(f"sync snapshot for {key} has no embedding")
+            vector = np.frombuffer(base64.b64decode(raw), dtype=np.float32).copy()
+            rec = {field: snapshot.get(field) for field in MEMORY_FIELDS}
+            rec["content"] = snapshot.get("content")
+            self.insert(rec, vector)
+            return True, False
+        if incoming_order > current_order:
+            self.conn.execute(
+                "UPDATE memories SET status=?, updated_at=?, archived_at=?, expires_at=?, "
+                "state_revision=?, state_origin=?, state_event_id=? WHERE key=?",
+                (
+                    snapshot.get("status"),
+                    event.get("updated_at"),
+                    snapshot.get("archived_at"),
+                    snapshot.get("expires_at"),
+                    event.get("state_revision"),
+                    event.get("state_origin", event.get("origin_id")),
+                    event.get("state_event_id", event["event_id"]),
+                    key,
+                ),
+            )
+            return True, False
+        return False, False
+
+    def _apply_state_sync_event(
+        self, event: dict, key: str, existing, incoming_order, current_order
+    ) -> tuple[bool, bool]:
+        if existing is None:
+            if self.has_sync_tombstone(key):
+                return False, True
+            raise ValueError(
+                f"state event for missing key {key}; send a snapshot first"
+            )
+        if incoming_order > current_order:
+            self.conn.execute(
+                "UPDATE memories SET status=?, updated_at=?, archived_at=?, state_revision=?, "
+                "state_origin=?, state_event_id=? WHERE key=?",
+                (
+                    event.get("status"),
+                    event.get("updated_at"),
+                    event.get("archived_at"),
+                    event.get("state_revision"),
+                    event.get("state_origin", event.get("origin_id")),
+                    event.get("state_event_id", event["event_id"]),
+                    key,
+                ),
+            )
+            return True, False
+        return False, False
+
+    def _apply_tombstone_sync_event(self, event: dict, key: str, existing) -> bool:
+        self._remember_tombstone(event)
+        if existing is None:
+            return False
+        rowid, content_hash = existing["rowid"], existing["content_hash"]
+        self.conn.execute("DELETE FROM memories WHERE key=?", (key,))
+        if self._vec_ok:
+            self.conn.execute("DELETE FROM mem_vec WHERE rowid=?", (rowid,))
+        self.delete_doc_if_orphan(content_hash)
+        return True
 
     def _record_resolution_event(self, event: dict) -> None:
         resolution = event.get("conflict_resolution")
@@ -1001,40 +1299,72 @@ class Vault(StorageBackend):
             "winner_key, resolved_by) VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(base_key) DO UPDATE SET "
             "competitor_keys=excluded.competitor_keys, resolved_at=excluded.resolved_at, "
             "winner_key=excluded.winner_key, resolved_by=excluded.resolved_by",
-            (base_key, json.dumps(competitors), event.get("updated_at", 0),
-             event.get("updated_at", 0), winner_key, resolved_by),
+            (
+                base_key,
+                json.dumps(competitors),
+                event.get("updated_at", 0),
+                event.get("updated_at", 0),
+                winner_key,
+                resolved_by,
+            ),
         )
 
     def _validate_resolution_event(self, event: dict, resolution: dict) -> None:
-        if (event.get("kind") != "state" or event.get("status") != "superseded"
-                or not isinstance(resolution, dict)):
+        if (
+            event.get("kind") != "state"
+            or event.get("status") != "superseded"
+            or not isinstance(resolution, dict)
+        ):
             raise ValueError("conflict resolution must be a supersede state event")
         base_key = resolution.get("base_key")
         winner_key = resolution.get("winner_key")
         competitors = resolution.get("competitor_keys")
-        if (not isinstance(base_key, str) or not isinstance(winner_key, str)
-                or not isinstance(competitors, list) or len(competitors) < 2
-                or any(not isinstance(key, str) for key in competitors)
-                or len(set(competitors)) != len(competitors)
-                or not isinstance(resolution.get("resolved_by"), str)
-                or not resolution["resolved_by"]
-                or event.get("key") not in competitors
-                or winner_key not in competitors or event.get("key") == winner_key):
+        if (
+            not isinstance(base_key, str)
+            or not isinstance(winner_key, str)
+            or not isinstance(competitors, list)
+            or len(competitors) < 2
+            or any(not isinstance(key, str) for key in competitors)
+            or len(set(competitors)) != len(competitors)
+            or not isinstance(resolution.get("resolved_by"), str)
+            or not resolution["resolved_by"]
+            or event.get("key") not in competitors
+            or winner_key not in competitors
+            or event.get("key") == winner_key
+        ):
             raise ValueError("invalid competing correction resolution")
-        stored = next((item for item in self.list_sync_conflicts(include_resolved=True)
-                       if item["base_key"] == base_key
-                       and set(item["competitor_keys"]) == set(competitors)), None)
-        dynamic = next((item for item in self.list_competing_corrections()
-                        if item["base_key"] == base_key
-                        and set(item["competitor_keys"]) == set(competitors)), None)
+        stored = next(
+            (
+                item
+                for item in self.list_sync_conflicts(include_resolved=True)
+                if item["base_key"] == base_key
+                and set(item["competitor_keys"]) == set(competitors)
+            ),
+            None,
+        )
+        dynamic = next(
+            (
+                item
+                for item in self.list_competing_corrections()
+                if item["base_key"] == base_key
+                and set(item["competitor_keys"]) == set(competitors)
+            ),
+            None,
+        )
         winner = self.get(winner_key)
         parents_match = all(
             (row := self.get(key)) is not None and row["supersedes"] == base_key
             for key in competitors
         )
-        if ((stored is None and dynamic is None) or winner is None
-                or winner["status"] != "active" or not parents_match):
-            raise ValueError("conflict resolution does not match an active competing correction")
+        if (
+            (stored is None and dynamic is None)
+            or winner is None
+            or winner["status"] != "active"
+            or not parents_match
+        ):
+            raise ValueError(
+                "conflict resolution does not match an active competing correction"
+            )
 
     def get_sync_cursor(self, peer: str, direction: str, token_id: str = "") -> int:
         row = self.conn.execute(
@@ -1044,13 +1374,17 @@ class Vault(StorageBackend):
         return int(row["cursor"]) if row else 0
 
     def list_sync_cursors(self) -> list[dict]:
-        return [dict(row) for row in self.conn.execute(
-            "SELECT vault_id, peer, token_id, direction, cursor, updated_at FROM sync_cursors "
-            "ORDER BY vault_id, peer, token_id, direction"
-        ).fetchall()]
+        return [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT vault_id, peer, token_id, direction, cursor, updated_at FROM sync_cursors "
+                "ORDER BY vault_id, peer, token_id, direction"
+            ).fetchall()
+        ]
 
-    def set_sync_cursor(self, peer: str, direction: str, cursor: int, now: int,
-                        token_id: str = "") -> None:
+    def set_sync_cursor(
+        self, peer: str, direction: str, cursor: int, now: int, token_id: str = ""
+    ) -> None:
         if direction not in {"push", "pull"} or cursor < 0:
             raise ValueError("invalid sync cursor")
         self.conn.execute(
@@ -1070,8 +1404,13 @@ class Vault(StorageBackend):
             "FROM memories WHERE status='active' AND supersedes IS NOT NULL "
             "GROUP BY supersedes HAVING COUNT(*) > 1 ORDER BY supersedes"
         ).fetchall()
-        return [{"base_key": row["base_key"], "competitor_keys": sorted(row["keys"].split(","))}
-                for row in rows]
+        return [
+            {
+                "base_key": row["base_key"],
+                "competitor_keys": sorted(row["keys"].split(",")),
+            }
+            for row in rows
+        ]
 
     def record_competing_corrections(self, now: int) -> list[dict]:
         conflicts = self.list_competing_corrections()
@@ -1093,7 +1432,8 @@ class Vault(StorageBackend):
                 continue
             active = self.conn.execute(
                 f"SELECT key FROM memories WHERE status='active' AND key IN "
-                f"({','.join('?' for _ in keys)})", keys,
+                f"({','.join('?' for _ in keys)})",
+                keys,
             ).fetchall()
             if len(active) == 1:
                 self.conn.execute(
@@ -1110,19 +1450,29 @@ class Vault(StorageBackend):
         rows = self.conn.execute(
             "SELECT * FROM sync_conflicts" + clause + " ORDER BY detected_at, base_key"
         ).fetchall()
-        return [{**dict(row), "competitor_keys": json.loads(row["competitor_keys"]),
-                 "resolved": row["resolved_at"] is not None} for row in rows]
+        return [
+            {
+                **dict(row),
+                "competitor_keys": json.loads(row["competitor_keys"]),
+                "resolved": row["resolved_at"] is not None,
+            }
+            for row in rows
+        ]
 
-    def resolve_sync_conflict(self, base_key: str, winner_key: str,
-                              resolved_by: str, now: int) -> None:
+    def resolve_sync_conflict(
+        self, base_key: str, winner_key: str, resolved_by: str, now: int
+    ) -> None:
         row = self.conn.execute(
-            "SELECT competitor_keys FROM sync_conflicts WHERE base_key=?", (base_key,),
+            "SELECT competitor_keys FROM sync_conflicts WHERE base_key=?",
+            (base_key,),
         ).fetchone()
         if row is None:
             raise KeyError(f"no recorded competing correction for {base_key}")
         competitors = json.loads(row["competitor_keys"])
         if winner_key not in competitors:
-            raise ValueError(f"winner must be one of the competing corrections: {competitors}")
+            raise ValueError(
+                f"winner must be one of the competing corrections: {competitors}"
+            )
         self.conn.execute(
             "UPDATE sync_conflicts SET resolved_at=?, winner_key=?, resolved_by=? WHERE base_key=?",
             (now, winner_key, resolved_by, base_key),
@@ -1130,8 +1480,13 @@ class Vault(StorageBackend):
         if not self._txn:
             self.conn.commit()
 
-    def scan(self, where: str = "", args: tuple = (), limit: int = 100,
-             with_embedding: bool = False) -> list[sqlite3.Row]:
+    def scan(
+        self,
+        where: str = "",
+        args: tuple = (),
+        limit: int = 100,
+        with_embedding: bool = False,
+    ) -> list[sqlite3.Row]:
         cols = "*" if with_embedding else ", ".join(READ_COLUMNS)
         q = f"SELECT {cols} FROM memories"
         if where:
@@ -1139,8 +1494,9 @@ class Vault(StorageBackend):
         q += " ORDER BY created_at ASC LIMIT ?"
         return self.conn.execute(q, (*args, limit)).fetchall()
 
-    def find(self, query: MemoryQuery, limit: int = 100,
-             with_embedding: bool = False) -> list[sqlite3.Row]:
+    def find(
+        self, query: MemoryQuery, limit: int = 100, with_embedding: bool = False
+    ) -> list[sqlite3.Row]:
         # eq columns are checked against FILTER_COLUMNS by MemoryQuery
         clauses = [f"{col}=?" for col in query.eq]
         args = list(query.eq.values())
@@ -1174,7 +1530,8 @@ class Vault(StorageBackend):
         return {
             r["status"]: r["c"]
             for r in self.conn.execute(
-                "SELECT status, COUNT(*) c FROM memories GROUP BY status").fetchall()
+                "SELECT status, COUNT(*) c FROM memories GROUP BY status"
+            ).fetchall()
         }
 
     @staticmethod
@@ -1187,15 +1544,22 @@ class Vault(StorageBackend):
             return None
         return " ".join(f'"{t}"' for t in terms)
 
-    def fts_search(self, text: str, limit: int = 100, status: str = "active",
-                   extra: dict | None = None) -> list[sqlite3.Row]:
+    def fts_search(
+        self,
+        text: str,
+        limit: int = 100,
+        status: str = "active",
+        extra: dict | None = None,
+    ) -> list[sqlite3.Row]:
         """BM25 keyword search over content. Returns memory rows best-first.
 
         extra maps exact-match columns (task_id, memory_type, team_id,
         agent_id, canonical_id) to values. Raises RuntimeError without FTS5.
         """
         if not self._fts:
-            raise RuntimeError("this sqlite build has no FTS5 — keyword search unavailable")
+            raise RuntimeError(
+                "this sqlite build has no FTS5 — keyword search unavailable"
+            )
         match = self.sanitize_fts(text)
         if match is None:
             return []
@@ -1217,10 +1581,14 @@ class Vault(StorageBackend):
     def all_vectors(self) -> list[tuple[int, bytes]]:
         return [
             (r["rowid"], r["embedding"])
-            for r in self.conn.execute("SELECT rowid, embedding FROM memories").fetchall()
+            for r in self.conn.execute(
+                "SELECT rowid, embedding FROM memories"
+            ).fetchall()
         ]
 
-    def _filter_sql(self, status: str, filters: dict | None, now: int | None) -> tuple[str, tuple]:
+    def _filter_sql(
+        self, status: str, filters: dict | None, now: int | None
+    ) -> tuple[str, tuple]:
         clauses = ["status=?"]
         args: list = [status]
         for col in ("task_id", "memory_type", "team_id", "agent_id"):
@@ -1240,7 +1608,9 @@ class Vault(StorageBackend):
         scored.sort(key=lambda t: t[1])
         return scored
 
-    def _hydrate(self, scored: list[tuple[int, float]], k: int) -> list[tuple[sqlite3.Row, float]]:
+    def _hydrate(
+        self, scored: list[tuple[int, float]], k: int
+    ) -> list[tuple[sqlite3.Row, float]]:
         """Load full read columns for the closest k rowids only."""
         top = scored[:k]
         if not top:
@@ -1257,8 +1627,14 @@ class Vault(StorageBackend):
         return out
 
     # -- vector search -------------------------------------------------------
-    def knn(self, query: np.ndarray, k: int, status: str = "active",
-            filters: dict | None = None, now: int | None = None) -> list[tuple[sqlite3.Row, float]]:
+    def knn(
+        self,
+        query: np.ndarray,
+        k: int,
+        status: str = "active",
+        filters: dict | None = None,
+        now: int | None = None,
+    ) -> list[tuple[sqlite3.Row, float]]:
         """Returns [(memory_row, cosine_distance)] ordered closest-first.
 
         Metadata filters and expiry apply before the top-k cut. sqlite-vec

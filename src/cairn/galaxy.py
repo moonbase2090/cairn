@@ -6,13 +6,16 @@ search, inspector) plus a WebGL 3D warp mode (orbit,
 dive, hyperspace tour) in the same dependency-free file.
 `cairn galaxy` hosts it on a local stdlib HTTP server (not `cairn serve`).
 """
+
 from __future__ import annotations
 
 import json
+import hmac
+import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import numpy as np
 
@@ -58,8 +61,11 @@ def _isle_layout(teams: list) -> dict:
     r = 1.0 / (1.0 + 1.0 / math.sin(math.pi / n)) * 0.92
     rc = 1.0 - r
     return {
-        t: (rc * math.cos(2 * math.pi * i / n - math.pi / 2),
-            rc * math.sin(2 * math.pi * i / n - math.pi / 2), r)
+        t: (
+            rc * math.cos(2 * math.pi * i / n - math.pi / 2),
+            rc * math.sin(2 * math.pi * i / n - math.pi / 2),
+            r,
+        )
         for i, t in enumerate(uniq)
     }
 
@@ -70,7 +76,9 @@ def _template() -> str:
 
         return files("cairn").joinpath("templates/galaxy-2d.html").read_text()
     except (FileNotFoundError, ModuleNotFoundError, OSError):
-        return Path(__file__).with_name("templates").joinpath("galaxy-2d.html").read_text()
+        return (
+            Path(__file__).with_name("templates").joinpath("galaxy-2d.html").read_text()
+        )
 
 
 def to_points(client, limit: int = 2000) -> list[dict]:
@@ -109,21 +117,23 @@ def to_points(client, limit: int = 2000) -> list[dict]:
         if multi:  # shrink the team's PCA cloud onto its own island
             cx, cy, rad = isles[r["team_id"]]
             x, y, z = cx + x * rad, cy + y * rad, z * rad
-        points.append({
-            "key": r["key"],
-            "x": round(float(x), 4),
-            "y": round(float(y), 4),
-            "z": round(float(z), 4),
-            "agent": r["agent_id"],
-            "team": r["team_id"],
-            "task": r["task_id"],
-            "type": r["memory_type"],
-            "status": r["status"],
-            "version": int(r["version"] or 1),
-            "created": int(r["created_at"] or 0),
-            "stored_by": r["agent_id"],
-            "text": preview,
-        })
+        points.append(
+            {
+                "key": r["key"],
+                "x": round(float(x), 4),
+                "y": round(float(y), 4),
+                "z": round(float(z), 4),
+                "agent": r["agent_id"],
+                "team": r["team_id"],
+                "task": r["task_id"],
+                "type": r["memory_type"],
+                "status": r["status"],
+                "version": int(r["version"] or 1),
+                "created": int(r["created_at"] or 0),
+                "stored_by": r["agent_id"],
+                "text": preview,
+            }
+        )
     return points
 
 
@@ -165,8 +175,22 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def do_GET(self):
+    def _route_path(self) -> str | None:
         path = urlparse(self.path).path
+        if path == "/health":
+            return path
+        if not path.startswith("/") or path.startswith("//"):
+            return None
+        token, separator, route = path[1:].partition("/")
+        if not hmac.compare_digest(token, self.server.access_token):
+            return None
+        return "/" + route if separator else "/"
+
+    def do_GET(self):
+        path = self._route_path()
+        if path is None:
+            self.send_error(404)
+            return
         if path in ("/", "/index.html", "/galaxy.html"):
             client = self.server.client_factory()
             try:
@@ -206,8 +230,11 @@ class _Handler(BaseHTTPRequestHandler):
                 try:
                     now = time.time()
                     rows = client.vault.fts_search(q, lim) if q.strip() else []
-                    keys = [r["key"] for r in rows
-                            if r["expires_at"] is None or r["expires_at"] > now]
+                    keys = [
+                        r["key"]
+                        for r in rows
+                        if r["expires_at"] is None or r["expires_at"] > now
+                    ]
                     raw = json.dumps({"q": q, "keys": keys}).encode()
                     self.send_response(200)
                 except RuntimeError as e:  # sqlite without FTS5
@@ -237,22 +264,28 @@ class _Handler(BaseHTTPRequestHandler):
                     from .storage import ContentIntegrityError
 
                     rows = client.vault.find(
-                        MemoryQuery(eq={"canonical_id": rec.canonical_id}), 50)
+                        MemoryQuery(eq={"canonical_id": rec.canonical_id}), 50
+                    )
                     versions = []
                     for r in rows:
                         try:
                             vcontent = client.vault.read_content(r)
                         except ContentIntegrityError:
                             vcontent = None  # flagged in the expand view, not fatal
-                        versions.append({
-                            "key": r["key"], "version": int(r["version"] or 1),
-                            "status": r["status"], "agent_id": r["agent_id"],
-                            "created_at": int(r["created_at"] or 0),
-                            "content": vcontent,
-                        })
+                        versions.append(
+                            {
+                                "key": r["key"],
+                                "version": int(r["version"] or 1),
+                                "status": r["status"],
+                                "agent_id": r["agent_id"],
+                                "created_at": int(r["created_at"] or 0),
+                                "content": vcontent,
+                            }
+                        )
                     audit = _audit_for(client.vault.vault_dir, key, rec.canonical_id)
-                    raw = json.dumps({"record": rec.to_dict(), "versions": versions,
-                                      "audit": audit}).encode()
+                    raw = json.dumps(
+                        {"record": rec.to_dict(), "versions": versions, "audit": audit}
+                    ).encode()
                     self.send_response(200)
             finally:
                 client.vault.close()
@@ -280,32 +313,55 @@ def _audit_for(vault_dir, key: str, canonical_id: str, limit: int = 200) -> list
                     e = json.loads(line)
                 except ValueError:
                     continue
-                if e.get("key") == key or e.get("canonical_id") == canonical_id \
-                        or e.get("supersedes") == key:
+                if (
+                    e.get("key") == key
+                    or e.get("canonical_id") == canonical_id
+                    or e.get("supersedes") == key
+                ):
                     out.append(e)
     except OSError:
         return []
     return out[-limit:]
 
 
-def bind(client, host: str = "127.0.0.1", port: int = 8780, limit: int = 2000):
+def bind(
+    client,
+    host: str = "127.0.0.1",
+    port: int = 8780,
+    limit: int = 2000,
+    access_token: str | None = None,
+):
     """Bind a galaxy HTTP server. Caller serve_forever() or start a thread."""
+    access_token = access_token or secrets.token_urlsafe(32)
     srv = ThreadingHTTPServer((host, port), _Handler)
     srv.client_factory = _factory_for(client)
     srv.limit = limit
+    srv.access_token = access_token
     return srv
 
 
-def start_background(client, host: str = "127.0.0.1", port: int = 0, limit: int = 2000):
+def start_background(
+    client,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    limit: int = 2000,
+    access_token: str | None = None,
+):
     """Serve the galaxy in a daemon thread. Returns the server (has .server_address)."""
-    srv = bind(client, host, port, limit)
+    srv = bind(client, host, port, limit, access_token)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     return srv
 
 
-def serve_forever(client, host: str = "127.0.0.1", port: int = 8780, limit: int = 2000) -> None:
-    srv = bind(client, host, port, limit)
+def serve_forever(
+    client,
+    host: str = "127.0.0.1",
+    port: int = 8780,
+    limit: int = 2000,
+    access_token: str | None = None,
+) -> None:
+    srv = bind(client, host, port, limit, access_token)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -314,9 +370,9 @@ def serve_forever(client, host: str = "127.0.0.1", port: int = 8780, limit: int 
         srv.server_close()
 
 
-def galaxy_url(host: str, port: int) -> str:
+def galaxy_url(host: str, port: int, access_token: str) -> str:
     shown = "127.0.0.1" if host in ("0.0.0.0", "::") else host
-    return f"http://{shown}:{port}/"
+    return f"http://{shown}:{port}/{quote(access_token, safe='')}/"
 
 
 def galaxy_alive(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -326,7 +382,11 @@ def galaxy_alive(host: str, port: int, timeout: float = 1.0) -> bool:
     from urllib.request import urlopen
 
     try:
-        with urlopen(galaxy_url(host, port) + "health", timeout=timeout) as resp:
-            return resp.status == 200 and json.loads(resp.read().decode()).get("ok") is True
+        shown = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+        with urlopen(f"http://{shown}:{port}/health", timeout=timeout) as resp:
+            return (
+                resp.status == 200
+                and json.loads(resp.read().decode()).get("ok") is True
+            )
     except (URLError, TimeoutError, json.JSONDecodeError, OSError):
         return False
