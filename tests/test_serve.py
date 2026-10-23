@@ -372,6 +372,53 @@ def test_remote_client_uses_token_identity_and_enforces_memory_ownership(tmp_pat
         srv.shutdown()
 
 
+def test_remote_restore_requires_curator_before_archiving_cross_agent_rival(tmp_path):
+    server = make_client(tmp_path / "server" / "vault.db", "server")
+    add_server_token(server, "ct_owner", "owner-token", "owner")
+    add_server_token(server, "ct_curator", "curator-token", "curator", curator=True)
+    srv = start_background(server, token_mode="per-agent")
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        owner = RemoteCairnClient(RemoteConfig(url, "owner-token"), tmp_path / "owner")
+        curator = RemoteCairnClient(
+            RemoteConfig(url, "curator-token"), tmp_path / "curator"
+        )
+        original = owner.store_memory(
+            "The deployment uses the old configuration.", "team", "restore", mode="new"
+        )
+        correction = curator.store_memory(
+            "The deployment uses the corrected configuration.",
+            "team",
+            "restore",
+            supersedes_key=original.key,
+            mode="new",
+        )
+        assert server.get_memory(original.key).status == "superseded"
+        assert server.get_memory(correction.key).status == "active"
+        request = urllib.request.Request(
+            url + "/rpc",
+            data=json.dumps(
+                {"operation": "restore", "params": {"key": original.key}}
+            ).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer owner-token",
+            },
+        )
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(request)
+        assert denied.value.code == 403
+        assert "curator permission" in json.load(denied.value)["error"]
+        assert server.get_memory(original.key).status == "superseded"
+        assert server.get_memory(correction.key).status == "active"
+
+        assert curator.restore_memory(original.key)["retired"] == [correction.key]
+        assert server.get_memory(original.key).status == "active"
+        assert server.get_memory(correction.key).status == "archived"
+    finally:
+        srv.shutdown()
+
+
 def test_remote_client_requires_per_agent_server_tokens(tmp_path):
     server = make_client(tmp_path / "server" / "vault.db", "server")
     srv = start_background(server, token="shared-token")

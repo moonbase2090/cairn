@@ -366,6 +366,18 @@ def _remote_change_status(client, remote_client, params, agent_id, curator, oper
         raise KeyError(f"not found: {key}")
     if row["agent_id"] != agent_id and not curator:
         raise PermissionError("token is restricted to its assigned agent")
+    if operation == "restore" and row["status"] == "superseded" and not curator:
+        rivals = client.vault.find(
+            MemoryQuery(
+                eq={"canonical_id": row["canonical_id"], "status": "active"},
+                exclude_key=key,
+            ),
+            100,
+        )
+        if any(rival["agent_id"] != agent_id for rival in rivals):
+            raise PermissionError(
+                "curator permission is required to restore over another agent's memory"
+            )
     method = (
         remote_client.archive_memory
         if operation == "archive"
