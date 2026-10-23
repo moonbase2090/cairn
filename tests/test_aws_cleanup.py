@@ -5,8 +5,6 @@ import threading
 from pathlib import Path
 
 from botocore.exceptions import ClientError
-from boto3.dynamodb.conditions import Key
-
 
 _PATH = Path(__file__).resolve().parents[1] / "aws" / "infra" / "lambda" / "cleanup.py"
 _SPEC = importlib.util.spec_from_file_location("cairn_aws_cleanup", _PATH)
