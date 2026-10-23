@@ -7,6 +7,7 @@ import subprocess
 import threading
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
@@ -416,6 +417,59 @@ def test_remote_restore_requires_curator_before_archiving_cross_agent_rival(tmp_
         assert server.get_memory(original.key).status == "active"
         assert server.get_memory(correction.key).status == "archived"
     finally:
+        srv.shutdown()
+
+
+def test_remote_restore_rejects_curator_correction_created_during_request(
+    tmp_path, monkeypatch
+):
+    server = make_client(tmp_path / "server" / "vault.db", "server")
+    add_server_token(server, "ct_owner", "owner-token", "owner")
+    add_server_token(server, "ct_curator", "curator-token", "curator", curator=True)
+    srv = start_background(server, token_mode="per-agent")
+    entered_restore = threading.Event()
+    continue_restore = threading.Event()
+    restore = CairnClient.restore_memory
+
+    def paused_restore(client, key, **kwargs):
+        if client.agent_id == "owner":
+            entered_restore.set()
+            assert continue_restore.wait(10), "concurrent correction did not finish"
+        return restore(client, key, **kwargs)
+
+    monkeypatch.setattr(CairnClient, "restore_memory", paused_restore)
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        owner = RemoteCairnClient(RemoteConfig(url, "owner-token"), tmp_path / "owner")
+        curator = RemoteCairnClient(
+            RemoteConfig(url, "curator-token"), tmp_path / "curator"
+        )
+        original = owner.store_memory(
+            "Original deployment fact.", "team", "race", mode="new"
+        )
+        replacement = owner.store_memory(
+            "Owner correction.", "team", "race", supersedes_key=original.key, mode="new"
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending_restore = pool.submit(owner.restore_memory, original.key)
+            try:
+                assert entered_restore.wait(10), "restore request did not arrive"
+                correction = curator.store_memory(
+                    "Curator correction during restore.",
+                    "team",
+                    "race",
+                    supersedes_key=replacement.key,
+                    mode="new",
+                )
+            finally:
+                continue_restore.set()
+            with pytest.raises(ValueError, match="curator permission"):
+                pending_restore.result(timeout=10)
+        assert server.get_memory(original.key).status == "superseded"
+        assert server.get_memory(replacement.key).status == "superseded"
+        assert server.get_memory(correction.key).status == "active"
+    finally:
+        continue_restore.set()
         srv.shutdown()
 
 

@@ -544,7 +544,7 @@ class CairnClient:
         self._audit("archive", {"key": key})
         return {"key": key, "status": "archived"}
 
-    def restore_memory(self, key: str) -> dict:
+    def restore_memory(self, key: str, *, curator: bool = True) -> dict:
         row = self.vault.get(key)
         if row is None:
             raise KeyError(f"not found: {key}")
@@ -566,6 +566,10 @@ class CairnClient:
                     ),
                     100,
                 )
+                if not curator and any(r["agent_id"] != self.agent_id for r in rivals):
+                    raise PermissionError(
+                        "curator permission is required to restore over another agent's memory"
+                    )
                 for r in rivals:
                     self.vault.set_status(
                         r["key"], Status.ARCHIVED.value, now, archived_at=now
