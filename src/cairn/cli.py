@@ -54,8 +54,8 @@ from cairn.serve import (
     serve_forever,
     sync_handshake,
 )
-from cairn.skill_install import SkillInstallError, install_skill
 from cairn.storage import SpaceMismatchError, StorageConfig, open_backend
+from cairn.skill_install import SkillInstallError, install_skill
 
 DEFAULT_EMBED = "hash"
 
@@ -1366,10 +1366,10 @@ def _load_mcp_config(path: Path) -> dict:
             f"{path.name} is not valid JSON; refusing to overwrite it"
         ) from error
     if not isinstance(config, dict):
-        raise TypeError(f"{path.name} must contain a JSON object")
+        raise ValueError(f"{path.name} must contain a JSON object")  # noqa: TRY004 - CLI config error
     servers = config.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
-        raise TypeError(f"{path.name} mcpServers must be a JSON object")
+        raise ValueError(f"{path.name} mcpServers must be a JSON object")  # noqa: TRY004 - CLI config error
     return config
 
 

@@ -35,7 +35,7 @@ def _remote_table(path: Path) -> dict:
         raise ValueError(f"cannot read remote settings from {path.name}") from exc
     table = config.get("remote", {})
     if not isinstance(table, dict):
-        raise TypeError(f"{path.name}: [remote] must be a table")
+        raise ValueError(f"{path.name}: [remote] must be a table")  # noqa: TRY004 - CLI config error
     unknown = set(table) - {"url", "token", "tls_ca"}
     if unknown:
         raise ValueError(
@@ -48,15 +48,15 @@ def _remote_table(path: Path) -> dict:
 
 def remote_config(vault_dir: Path) -> RemoteConfig | None:
     """Resolve opt-in remote settings; a URL and token must be configured together."""
-    env_url = os.environ.get("CAIRN_URL")
-    env_token = os.environ.get("CAIRN_TOKEN")
+    env_url = os.environ.get("CAIRN_REMOTE_URL")
+    env_token = os.environ.get("CAIRN_REMOTE_TOKEN")
     if env_url or env_token:
         if not (env_url and env_token):
             return None
         values = {
             "url": env_url,
             "token": env_token,
-            "tls_ca": os.environ.get("CAIRN_TLS_CA"),
+            "tls_ca": os.environ.get("CAIRN_REMOTE_TLS_CA"),
         }
     else:
         values = {}

@@ -169,15 +169,15 @@ key.
 
 ## Use the remote vault directly
 
-Set both `CAIRN_URL` and `CAIRN_TOKEN` to send memory commands and MCP memory
-tools directly to the server. The token chooses the agent identity; if
+Set both `CAIRN_REMOTE_URL` and `CAIRN_REMOTE_TOKEN` to send memory commands
+and MCP memory tools directly to the server. The token chooses the agent identity; if
 `CAIRN_AGENT` is set, it must match that identity. Local behavior stays the
 default when no remote endpoint and token are configured. For a private
-certificate authority, also set `CAIRN_TLS_CA`.
+certificate authority, also set `CAIRN_REMOTE_TLS_CA`.
 
 ~~~sh
-export CAIRN_URL="https://sync.example.com"
-export CAIRN_TOKEN="the-token-created-for-client-a"
+export CAIRN_REMOTE_URL="https://sync.example.com"
+export CAIRN_REMOTE_TOKEN="the-token-created-for-client-a"
 export CAIRN_AGENT="client-a"
 cairn store "A shared decision." --team project --task planning
 cairn retrieve "shared decision" --task planning
@@ -199,10 +199,12 @@ token = "the-token-created-for-client-a"
 
 The vault's `config.toml` takes precedence over the home config. Treat the
 configured token as a secret and restrict access to the file. Environment
-variables override the config when both `CAIRN_URL` and `CAIRN_TOKEN` are set.
+variables override the config when both `CAIRN_REMOTE_URL` and
+`CAIRN_REMOTE_TOKEN` are set.
 
-With the remote pair set, `cairn push` and `cairn pull` continue to sync the
-local vault. Memory commands use the remote vault directly.
+The sync settings `CAIRN_URL` and `CAIRN_TOKEN` continue to configure
+`cairn push` and `cairn pull` for the local vault. They do not enable remote
+memory operations. Remote memory operations require per-agent token mode.
 
 When agents correct the same memory before syncing, Cairn keeps both
 corrections active and records a competing correction. Inspect and resolve it

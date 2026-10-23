@@ -11,11 +11,11 @@ cairn_whoami, cairn_gc, cairn_export, cairn_import, cairn_ingest.
 
 from __future__ import annotations
 
-import hashlib
 import json
+import hashlib
 import os
-import secrets
 import signal
+import secrets
 import subprocess
 import sys
 import time
@@ -25,6 +25,8 @@ from urllib.error import URLError
 from cairn import __version__ as CAIRN_VERSION
 from cairn.client import CairnClient
 from cairn.embed import format_embedder_hint, get_embedder, parse_embedder_hint
+from cairn.storage import open_backend
+from cairn.tutorial import howto_text
 from cairn.models import now_epoch
 from cairn.remote import RemoteCairnClient, remote_config
 from cairn.serve import (
@@ -34,8 +36,6 @@ from cairn.serve import (
     resolve_conflict_to,
     sync_handshake,
 )
-from cairn.storage import open_backend
-from cairn.tutorial import howto_text
 
 SERVER_NAME = "cairn"
 SERVER_VERSION = CAIRN_VERSION

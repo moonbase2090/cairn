@@ -62,8 +62,8 @@ storage and restored to a point in time. See
 [Back up a SQLite vault](docs/BACKUPS.md).
 Cairn supports a separate sync token for each agent. A curator token grants
 cross-agent state changes and conflict resolution. See the hosting guide.
-Set `CAIRN_URL` and `CAIRN_TOKEN` together to make CLI memory commands and MCP
-memory tools use the remote vault directly; with neither configured, Cairn keeps
+Set `CAIRN_REMOTE_URL` and `CAIRN_REMOTE_TOKEN` together to make CLI memory
+commands and MCP memory tools use the remote vault directly; with neither configured, Cairn keeps
 using its local vault. The hosting guide covers environment and config setup.
 
 ```bash

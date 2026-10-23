@@ -24,12 +24,12 @@ def _server_client(path):
 
 
 def test_remote_config_uses_environment_pair_and_private_ca(tmp_path, monkeypatch):
-    monkeypatch.setenv("CAIRN_URL", "https://vault.example")
-    monkeypatch.delenv("CAIRN_TOKEN", raising=False)
+    monkeypatch.setenv("CAIRN_REMOTE_URL", "https://vault.example")
+    monkeypatch.delenv("CAIRN_REMOTE_TOKEN", raising=False)
     assert remote_config(tmp_path) is None
 
-    monkeypatch.setenv("CAIRN_TOKEN", "secret-token")
-    monkeypatch.setenv("CAIRN_TLS_CA", "/tmp/test-ca.pem")
+    monkeypatch.setenv("CAIRN_REMOTE_TOKEN", "secret-token")
+    monkeypatch.setenv("CAIRN_REMOTE_TLS_CA", "/tmp/test-ca.pem")
     assert remote_config(tmp_path) == RemoteConfig(
         "https://vault.example",
         "secret-token",
@@ -38,8 +38,10 @@ def test_remote_config_uses_environment_pair_and_private_ca(tmp_path, monkeypatc
 
 
 def test_remote_config_reads_vault_config(tmp_path, monkeypatch):
-    monkeypatch.delenv("CAIRN_URL", raising=False)
-    monkeypatch.delenv("CAIRN_TOKEN", raising=False)
+    monkeypatch.delenv("CAIRN_REMOTE_URL", raising=False)
+    monkeypatch.delenv("CAIRN_REMOTE_TOKEN", raising=False)
+    monkeypatch.setenv("CAIRN_URL", "https://sync.example")
+    monkeypatch.setenv("CAIRN_TOKEN", "sync-token")
     vault_dir = tmp_path / "vault"
     vault_dir.mkdir()
     (vault_dir / "config.toml").write_text(
@@ -50,6 +52,69 @@ def test_remote_config_reads_vault_config(tmp_path, monkeypatch):
         "https://vault.example",
         "config-token",
     )
+
+
+def test_cli_reports_invalid_remote_config_as_a_managed_error(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CAIRN_DIR", str(tmp_path))
+    monkeypatch.delenv("CAIRN_REMOTE_URL", raising=False)
+    monkeypatch.delenv("CAIRN_REMOTE_TOKEN", raising=False)
+    (tmp_path / "config.toml").write_text('remote = "invalid"\n')
+
+    assert cli.main(["whoami"]) == 2
+    assert (
+        capsys.readouterr().err.strip()
+        == "error: config.toml: [remote] must be a table"
+    )
+
+
+def test_sync_environment_keeps_cli_and_mcp_memory_operations_local(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CAIRN_REMOTE_URL", raising=False)
+    monkeypatch.delenv("CAIRN_REMOTE_TOKEN", raising=False)
+    monkeypatch.setenv("CAIRN_DIR", str(tmp_path / "local"))
+    monkeypatch.setenv("CAIRN_AGENT", "agent-a")
+    assert cli.main(["init", "--yes", "--embed-spec", "hash"]) == 0
+    capsys.readouterr()
+    server = _server_client(tmp_path / "server" / "vault.db")
+    srv = start_background(server, token="shared-sync-token")
+    try:
+        monkeypatch.setenv("CAIRN_URL", f"http://127.0.0.1:{srv.server_address[1]}")
+        monkeypatch.setenv("CAIRN_TOKEN", "shared-sync-token")
+        assert (
+            cli.main(
+                [
+                    "store",
+                    "A local fact with sync configured.",
+                    "--team",
+                    "team",
+                    "--task",
+                    "local",
+                    "--json",
+                ]
+            )
+            == 0
+        )
+        stored = json.loads(capsys.readouterr().out)
+        assert cli.main(["whoami", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["storage"] == "sqlite"
+        assert cli.main(["retrieve", "local fact", "--task", "local", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)[0]["key"] == stored["key"]
+        result = json.loads(
+            call_tool(
+                make_client(),
+                "retrieve_memory",
+                {"query": "local fact", "task_id": "local"},
+            )
+        )
+        assert result[0]["key"] == stored["key"]
+        assert server.list_memories({"task_id": "local"}) == []
+    finally:
+        srv.shutdown()
 
 
 def test_remote_client_does_not_forward_token_to_redirect_target():
@@ -113,8 +178,10 @@ def test_cli_and_mcp_route_memory_operations_to_remote_vault(
     srv = start_background(server, token_mode="per-agent")
     local_dir = tmp_path / "client"
     try:
-        monkeypatch.setenv("CAIRN_URL", f"http://127.0.0.1:{srv.server_address[1]}")
-        monkeypatch.setenv("CAIRN_TOKEN", "agent-token")
+        monkeypatch.setenv(
+            "CAIRN_REMOTE_URL", f"http://127.0.0.1:{srv.server_address[1]}"
+        )
+        monkeypatch.setenv("CAIRN_REMOTE_TOKEN", "agent-token")
         monkeypatch.setenv("CAIRN_AGENT", "agent-a")
         monkeypatch.setenv("CAIRN_DIR", str(local_dir))
 
