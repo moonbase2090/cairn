@@ -23,10 +23,10 @@ planner-only or researcher-only vaults inside the same project.
 
 | Question | Finding | Evidence |
 |---|---|---|
-| How does CLI choose a vault? | Each CLI invocation creates one client. `--vault` wins, then `CAIRN_DIR`, then `./.cairn`. | [`vault_dir`](../../src/cairn/cli.py#L59), [`build_client`](../../src/cairn/cli.py#L223), parser option [`--vault`](../../src/cairn/cli.py#L237) |
+| How does CLI choose a vault? | Memory commands use the authenticated remote vault when both `CAIRN_REMOTE_URL` and `CAIRN_REMOTE_TOKEN` are set, or `[remote]` is configured. Otherwise each invocation creates one local client: `--vault`, then `CAIRN_DIR`, then `./.cairn`. | [`remote_config`](../../src/cairn/remote.py), [`build_client`](../../src/cairn/cli.py#L244), [`vault_dir`](../../src/cairn/cli.py#L60) |
 | How does bootstrap choose a vault? | Bootstrap writes one absolute `CAIRN_DIR` and one `CAIRN_AGENT` into the project MCP config. It currently uses the fixed server key `cairn`, so running bootstrap again for another vault replaces that entry. | [`_cmd_bootstrap`](../../src/cairn/cli.py#L964), MCP config write at [`cli.py:987`](../../src/cairn/cli.py#L987) |
 | Can one MCP process use several vaults? | No. `make_client()` reads one `CAIRN_DIR` (or the current directory), opens one backend, and passes one `CairnClient` to every tool call. A tool call has no vault selector. | [`make_client`](../../src/cairn/mcp_server.py#L108), [`handle`](../../src/cairn/mcp_server.py#L519) |
-| Can an agent use several vaults? | Yes, by connecting to separately configured MCP server processes, each pinned to its own vault. CLI commands can likewise specify `--vault`. Search and exact lookups run on that client’s backend only. | [`_tool_retrieve`](../../src/cairn/mcp_server.py#L143), [`_tool_get`](../../src/cairn/mcp_server.py#L171) |
+| Can an agent use several vaults? | Yes, by connecting to separately configured MCP server processes or running CLI commands with a different remote endpoint or `--vault`. Each process or command selects one vault; searches never aggregate across vaults. | [`make_client`](../../src/cairn/mcp_server.py#L120), [`remote_config`](../../src/cairn/remote.py), [`_tool_retrieve`](../../src/cairn/mcp_server.py#L155) |
 | Does MCP make the active vault obvious? | Not reliably today. CLI `whoami` reports the effective vault path, but the MCP `cairn_whoami` response reports agent, embedder, dimensions, and count without a vault name or ID. | [`_cmd_whoami`](../../src/cairn/cli.py#L882), [`_tool_whoami`](../../src/cairn/mcp_server.py#L188) |
 | What protects a local MCP vault? | Stdio MCP uses the configured filesystem path. `CAIRN_DIR` selects storage; it is not an authorization token. Local isolation depends on who can access the directory and which MCP entries the host exposes. | [`make_client`](../../src/cairn/mcp_server.py#L108), bootstrap environment at [`cli.py:987`](../../src/cairn/cli.py#L987) |
 | Can one `cairn serve` host multiple vaults? | No. The HTTP server’s client factory closes over one client and reopens that client’s backend for each request. Per-agent tokens are looked up in that backend’s token table. | [`_factory_for`](../../src/cairn/serve.py#L29), [`_authorize`](../../src/cairn/serve.py#L62), [`_bind`](../../src/cairn/serve.py#L306) |
@@ -36,6 +36,13 @@ planner-only or researcher-only vaults inside the same project.
 Task and team filters narrow a search request, but are supplied by the caller
 and are not authorization checks. They must never be described as privacy
 controls.
+
+Direct remote memory operations use `POST /rpc` over the existing Cairn serve
+endpoint. Each request must use a per-agent token. The server derives the
+writer identity from that token, allows shared-vault reads, and limits archive,
+restore, corrections, and purge to the assigned agent unless the token is a
+curator. With no remote endpoint and token pair, CLI and MCP keep using the
+local backend. `push` and `pull` remain explicit synchronization commands.
 
 ## Loopback experiments
 

@@ -336,6 +336,8 @@ server.
 | Large memories | <vault>/docs/ | Store content above the document threshold as content-addressed files. |
 | Sync URL | $CAIRN_URL | Default URL for push and pull. |
 | Sync token | $CAIRN_TOKEN | Default bearer token for serve, push, and pull. |
+| Remote vault | $CAIRN_REMOTE_URL + $CAIRN_REMOTE_TOKEN, or [remote] in config.toml | Route CLI and MCP memory operations to the authenticated server vault. Both environment values are required; unset keeps local behavior. |
+| Remote CA | $CAIRN_REMOTE_TLS_CA or [remote].tls_ca | Trust a private certificate authority for remote vault requests. |
 | Embed daemon socket | $CAIRN_EMBED_SOCK, $XDG_RUNTIME_DIR | Override or choose the cairn-embedd socket path. |
 | In-process embedder | $CAIRN_EMBEDD=0 | Disable the shared embedding socket and embed in the CLI process. |
 | Skill command gate | $CAIRN_EXPERIMENTAL_SKILLS=1 | Enable cairn skills install. |
@@ -346,6 +348,13 @@ server.
 Storage config stops at the first matching file. General storage uses the vault
 config, then ~/.cairn/config.toml, then SQLite. Backup config uses the first
 file in its three-path order that contains [[backup]] entries.
+
+When CAIRN_REMOTE_URL and CAIRN_REMOTE_TOKEN are configured together, or
+[remote] is configured, memory commands and MCP memory tools use the remote
+vault. CAIRN_URL and CAIRN_TOKEN configure sync only. The remote token supplies
+the stored agent identity;
+set CAIRN_AGENT to the same identity when the client should check it explicitly.
+Server and token administration continues to use the local vault.
 
 ## Output and exit codes
 
