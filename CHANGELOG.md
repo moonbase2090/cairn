@@ -2,6 +2,27 @@
 
 Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
+## 0.16.0 - 2026-10-25
+
+### Added
+
+- Remote vault clients. Set `CAIRN_URL` and `CAIRN_TOKEN` and the CLI and MCP
+  server read and write a `cairn serve` vault over HTTPS with the token's
+  agent identity. With no remote configured, Cairn stays local. The hosting
+  guide covers per-agent setup.
+
+### Changed
+
+- Split the sync and serve code into smaller functions and add tests for sync,
+  conflict resolution, storage config validation, and PostgreSQL migration.
+
+### Fixed
+
+- Restoring over another agent's memory requires curator permission, and the
+  rival snapshot used by restore is authorized.
+- Remote requests reject HTTP redirects.
+- Explicit remote vault selection and bootstrap errors behave correctly.
+
 ## 0.15.7 - 2026-10-19
 
 ### Changed
