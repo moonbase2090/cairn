@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 import cairn.cli as cli_mod
 from cairn.cli import main
 
@@ -168,8 +170,16 @@ def test_bootstrap_name_collision_fails_before_changing_project_or_config(
     assert not (tmp_path / "AGENTS.md").exists()
 
 
+@pytest.mark.parametrize(
+    ("config_text", "message"),
+    [
+        ("{not json", "refusing to overwrite"),
+        ("[]", "must contain a JSON object"),
+        ('{"mcpServers": []}', "mcpServers must be a JSON object"),
+    ],
+)
 def test_bootstrap_refuses_to_overwrite_malformed_mcp_json(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, config_text, message
 ):
     vault = tmp_path / ".cairn"
     monkeypatch.setenv("CAIRN_DIR", str(vault))
@@ -177,14 +187,15 @@ def test_bootstrap_refuses_to_overwrite_malformed_mcp_json(
     monkeypatch.chdir(tmp_path)
     assert run(["init", "--yes"], capsys)[0] == 0
     config_path = tmp_path / ".mcp.json"
-    config_path.write_text("{not json")
+    config_path.write_text(config_text)
 
     rc, _out, err = run(
         ["bootstrap", "--agent-id", "changed-seat", "--no-seed"], capsys
     )
 
-    assert rc == 2 and "refusing to overwrite" in err
-    assert config_path.read_text() == "{not json"
+    assert rc == 2 and message in err
+    assert "Traceback" not in err
+    assert config_path.read_text() == config_text
     assert (
         json.loads((vault / "project.json").read_text())["agent_id"] == "claude-myproj"
     )

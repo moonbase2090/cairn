@@ -523,8 +523,16 @@ class TestStorageContract:
             "old"
         ]
 
-    def test_vec_status_reports_sync(self, vault):
+    def test_vec_status_reports_sync(self, vault, backend_name):
         vault.insert(record("a", "alpha"), unit(0))
+        assert vault.vec_status()["vec_in_sync"] is True
+        if backend_name != "sqlite":
+            return
+        # A stale vector table must be reported, not just a boolean.
+        vault.conn.execute("DELETE FROM mem_vec")
+        vault.conn.commit()
+        assert vault.vec_status()["vec_in_sync"] is False
+        vault.rebuild_vec()
         assert vault.vec_status()["vec_in_sync"] is True
 
     # -- documents ---------------------------------------------------------------------------
