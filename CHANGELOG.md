@@ -6,10 +6,11 @@ Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
 ### Added
 
-- Remote vault clients. Set `CAIRN_URL` and `CAIRN_TOKEN` and the CLI and MCP
-  server read and write a `cairn serve` vault over HTTPS with the token's
-  agent identity. With no remote configured, Cairn stays local. The hosting
-  guide covers per-agent setup.
+- Remote vault clients. Set `CAIRN_REMOTE_URL` and `CAIRN_REMOTE_TOKEN` (or a
+  `[remote]` section in `config.toml`) and the CLI and MCP server read and
+  write a `cairn serve` vault over HTTPS with the token's agent identity.
+  `CAIRN_URL` and `CAIRN_TOKEN` still configure sync only. With no remote
+  configured, Cairn stays local. The hosting guide covers per-agent setup.
 
 ### Changed
 
