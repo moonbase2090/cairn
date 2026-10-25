@@ -2,6 +2,17 @@
 
 Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
+## 0.15.7 - 2026-10-19
+
+### Changed
+
+- Pin Ruff and check staged Python files before commits.
+- Simplify sync-pack validation, sync-event application, and MCP serve actions.
+
+### Fixed
+
+- Release packages find versioned Python executables.
+
 ## 0.15.5 - 2026-10-17
 
 ### Fixed
