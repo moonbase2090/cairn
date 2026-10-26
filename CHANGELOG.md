@@ -2,6 +2,16 @@
 
 Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
+## 0.16.1 - 2026-10-26
+
+### Changed
+
+- Update locked dependencies: certifi, filelock, and pillow.
+
+### Fixed
+
+- Test coverage for the staged Ruff formatting hook.
+
 ## 0.16.0 - 2026-10-25
 
 ### Added
