@@ -1,4 +1,4 @@
-# Run a Cairn sync server
+# Run a Cairn server
 
 Use this guide to keep a Cairn vault on a Linux server and sync local vaults
 over HTTPS. Cairn stores data on the server you choose. It does not host your
@@ -166,6 +166,45 @@ event page applies successfully, so a failed request can be retried. Tombstones
 keep hard deletions from returning on a later sync. Storing the same content
 again after purge creates a new versioned key rather than reusing the tombstoned
 key.
+
+## Use the remote vault directly
+
+Set both `CAIRN_REMOTE_URL` and `CAIRN_REMOTE_TOKEN` to send memory commands
+and MCP memory tools directly to the server. The token chooses the agent identity; if
+`CAIRN_AGENT` is set, it must match that identity. Local behavior stays the
+default when no remote endpoint and token are configured. For a private
+certificate authority, also set `CAIRN_REMOTE_TLS_CA`.
+
+~~~sh
+export CAIRN_REMOTE_URL="https://sync.example.com"
+export CAIRN_REMOTE_TOKEN="the-token-created-for-client-a"
+export CAIRN_AGENT="client-a"
+cairn store "A shared decision." --team project --task planning
+cairn retrieve "shared decision" --task planning
+~~~
+
+The MCP server reads the same environment. It opens the configured server vault
+for memory reads and writes; token and server administration still run against
+the local vault, so use the server account with the remote settings unset for
+those commands.
+
+You can keep the endpoint in `~/.cairn/config.toml` instead:
+
+~~~toml
+[remote]
+url = "https://sync.example.com"
+token = "the-token-created-for-client-a"
+# tls_ca = "/path/to/private-ca.pem"
+~~~
+
+The vault's `config.toml` takes precedence over the home config. Treat the
+configured token as a secret and restrict access to the file. Environment
+variables override the config when both `CAIRN_REMOTE_URL` and
+`CAIRN_REMOTE_TOKEN` are set.
+
+The sync settings `CAIRN_URL` and `CAIRN_TOKEN` continue to configure
+`cairn push` and `cairn pull` for the local vault. They do not enable remote
+memory operations. Remote memory operations require per-agent token mode.
 
 When agents correct the same memory before syncing, Cairn keeps both
 corrections active and records a competing correction. Inspect and resolve it

@@ -124,4 +124,4 @@ restored database. The audit log is stored separately and is not part of this
 backup.
 
 For recovery guidance and service setup, see
-[Run a Cairn sync server](HOSTING.md).
+[Run a Cairn server](HOSTING.md).
