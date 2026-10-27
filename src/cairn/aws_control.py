@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import hashlib
 import json
 import os
@@ -635,7 +635,7 @@ def create_plan(
         dimensions=dimensions,
         stack_name=stack_name,
         infra_hash=_infra_hash(),
-        created_at=datetime.now(timezone.utc).isoformat(),
+        created_at=datetime.now(UTC).isoformat(),
         source_fingerprint=source_fingerprint,
         source_memory_count=source_memory_count,
         source_event_count=source_event_count,
