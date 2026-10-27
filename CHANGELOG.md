@@ -2,6 +2,49 @@
 
 Notable changes to cairn. Versions follow `pyproject.toml`; see BRANCHING.md.
 
+## 0.16.1 - 2026-10-26
+
+### Changed
+
+- Update locked dependencies: certifi, filelock, and pillow.
+
+### Fixed
+
+- Test coverage for the staged Ruff formatting hook.
+
+## 0.16.0 - 2026-10-25
+
+### Added
+
+- Remote vault clients. Set `CAIRN_REMOTE_URL` and `CAIRN_REMOTE_TOKEN` (or a
+  `[remote]` section in `config.toml`) and the CLI and MCP server read and
+  write a `cairn serve` vault over HTTPS with the token's agent identity.
+  `CAIRN_URL` and `CAIRN_TOKEN` still configure sync only. With no remote
+  configured, Cairn stays local. The hosting guide covers per-agent setup.
+
+### Changed
+
+- Split the sync and serve code into smaller functions and add tests for sync,
+  conflict resolution, storage config validation, and PostgreSQL migration.
+
+### Fixed
+
+- Restoring over another agent's memory requires curator permission, and the
+  rival snapshot used by restore is authorized.
+- Remote requests reject HTTP redirects.
+- Explicit remote vault selection and bootstrap errors behave correctly.
+
+## 0.15.7 - 2026-10-19
+
+### Changed
+
+- Pin Ruff and check staged Python files before commits.
+- Simplify sync-pack validation, sync-event application, and MCP serve actions.
+
+### Fixed
+
+- Release packages find versioned Python executables.
+
 ## 0.15.5 - 2026-10-17
 
 ### Fixed
