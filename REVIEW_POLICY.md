@@ -46,7 +46,7 @@ The PR body has a **Proof** section with real evidence: test output, a CI run li
 
 ## 5. Feature gating
 
-New behavior in trunk code ships behind a flag or setting that is off by default, unless it is a pure fix. Turning a flag on by default is its own PR, and that PR is trunk.
+New behavior in trunk code ships on by default. A flag or setting that is off by default is used only when the owner explicitly asks for one for that feature. A pure fix never needs a flag. Turning on a feature the owner asked to gate is its own PR, and that PR is trunk.
 
 ## 6. Tests
 
