@@ -27,9 +27,9 @@ project.
 
 ~~~sh
 curl -fsSL https://cairncli.com/install.sh | sh
-# Windows: download the x86_64-pc-windows-msvc zip from
-# https://github.com/moonbase2090/cairn/releases/latest
-# and run powershell -File .\install.ps1
+# Or on macOS:
+brew tap moonbase2090/tap
+brew install cairn
 ~~~
 
 To install from a checkout or in CI, use the repository URL:
