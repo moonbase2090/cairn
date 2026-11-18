@@ -47,26 +47,12 @@ Node.js, and npm. Cairn runs `npm ci` for its pinned local CDK dependencies as
 needed, but the shell installer does not install those system tools or deploy
 AWS resources.
 
-## Homebrew tap (macOS)
+## Homebrew
 
-```sh
-brew tap moonbase2090/tap
-brew install cairn
-```
-
-Formula lives in `homebrew/cairn.rb`. It stages the `uv tool` install
-inside the Cellar (`UV_TOOL_DIR`/`UV_TOOL_BIN_DIR` into prefix) so
-`brew link` puts the binaries on `PATH`. Requires network at install time
-(acceptable for a personal tap). Untagged HEAD install for now — switch to
-a versioned tarball + `sha256` once releases/tags exist.
-
-Neither `brew` nor macOS is available on the dev machine, so the formula
-is written but not brew-tested. Test on a Mac with:
-
-```sh
-brew install --build-from-source ./homebrew/cairn.rb
-brew test cairn
-```
+There is no public Homebrew tap for Cairn. Install with the shell script
+above, or with a release archive (`./install.sh` or
+`powershell -File .\install.ps1`). A draft formula lives at
+`installer/homebrew/cairn.rb` but is not published.
 
 ## ⚠️ PyPI name squat (open issue)
 

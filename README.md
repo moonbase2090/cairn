@@ -15,9 +15,9 @@ curl -fsSL https://cairncli.com/install.sh | CAIRN_INSTALL_EMBED=fastembed sh
 # Optional: include the AWS SDK for AWS storage or migration
 curl -fsSL https://cairncli.com/install.sh | CAIRN_INSTALL_AWS=1 sh
 
-# Or install with Homebrew on macOS
-brew tap moonbase2090/tap
-brew install cairn
+# Windows, or a specific archive: download from
+# https://github.com/moonbase2090/cairn/releases/latest
+# then run ./install.sh, or powershell -File .\install.ps1
 
 # Set up Cairn in a project
 export CAIRN_AGENT=claude-myproj
